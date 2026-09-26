@@ -108,6 +108,17 @@ git -C "$R" add -A
 run_in "$R"
 check "a deleted neighbour still named with ./ is a finding" 1 "$RC" "a.mjs:1: b.mjs — deleted from this tree"
 
+seeded_repo
+printf 'export const b = 1;\n' > "$R/b.mjs"
+git -C "$R" add -A
+git -C "$R" commit -qm add-b
+git -C "$R" mv b.mjs c.mjs
+git -C "$R" commit -qm rename-b
+printf '%s\n' '// `./b.mjs` holds the other half.' > "$R/a.mjs"
+git -C "$R" add -A
+run_in "$R"
+check "a renamed neighbour still named by its old name is a finding" 1 "$RC" "a.mjs:1: b.mjs — deleted from this tree"
+
 # A name this tree never held is silent like any foreign path, since a module
 # may name what it writes at run time.
 seeded_repo

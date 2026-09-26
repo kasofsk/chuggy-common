@@ -67,8 +67,8 @@ function workerRepositoryConfiguration(repositories, repositoryId) {
  * which `githubAddressOf` in chuggy's `src/adapters/forge/githubAddress.ts`
  * reads an owner and a name out of, and which `repositoryCredentialHost` in
  * chuggy's `src/interpreter/forgeCredentials.ts` takes the minting host from.
- * (The brand itself is `src/interpreter/finalizer.ts`'s and not
- * `src/domain`'s; chuggy's domain layer holds no repository identity at all.)
+ * (chuggy's `src/interpreter/finalizer.ts` holds the brand itself; its
+ * `src/domain` holds no repository identity at all.)
  * So a repository bound from the console reaches a worker with nothing added
  * to this map.
  *

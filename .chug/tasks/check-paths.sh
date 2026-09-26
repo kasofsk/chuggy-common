@@ -153,8 +153,9 @@ FNR == 1 {
 
 # What this tree has deleted, asked ONCE: R2 needs "was this ever ours", and a
 # git call per token is a process per token. One history dump answers them all
-# in memory.
-git log --diff-filter=D --name-only --format= 2>/dev/null | sort -u > "$work/deleted" || true
+# in memory. Without `--no-renames` a `git mv` logs as a rename and its old name
+# is never deleted, and at a flat root that is the only way a module leaves.
+git log --no-renames --diff-filter=D --name-only --format= 2>/dev/null | sort -u > "$work/deleted" || true
 
 # Resolution in one pass over the three lists.
 #   OK    — resolved, counted as a claim

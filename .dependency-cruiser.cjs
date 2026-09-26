@@ -1,10 +1,10 @@
 // The harness's boundary: what a module at this repository's root may import.
 //
-// Every module here, its suites and fixtures included, runs in an image that
-// holds this repository's shipped set and whatever that image installs
-// globally, and nothing else of this checkout. The suites run there too. So
-// a module here reaches Node's own modules, its neighbours at the root, and
-// the packages an image installs, by name.
+// Every module here, its suites and fixtures included, runs in an image beside
+// whatever that image installs globally and nothing else: the shipped set in
+// the worker, the suites in the stage that runs them. So a module here reaches
+// Node's own modules, its neighbours at the root, and the packages an image
+// installs, by name.
 //
 // Every rule below is proved to bite against a fixture tree carrying its
 // violation, in `.chug/tasks/check-boundaries.test.sh`. A boundary rule that
