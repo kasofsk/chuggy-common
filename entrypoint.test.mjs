@@ -555,12 +555,12 @@ async function reportFor(summary, scrub = (text) => text) {
 test("an agent's summary is reported well formed and without control characters", async () => {
   const escape = String.fromCodePoint(0x1b);
   const report = await reportFor(
-    `${escape}[31mred${escape}[0m bell\u0007 csi\u009b lone\ud800 end`,
+    `${escape}[31mred${escape}[0m bell\u0007 del\u007f csi\u009b lone\ud800 end`,
   );
 
   assert.ok(report.isWellFormed(), JSON.stringify(report));
   assert.ok(!/\p{Cc}/u.test(report), JSON.stringify(report));
-  assert.match(report, /red bell csi lone\uFFFD end/u);
+  assert.match(report, /red bell del csi lone\uFFFD end/u);
 });
 
 test("an agent's summary with nothing printable is reported as such", async () => {
@@ -589,6 +589,19 @@ test("an agent's summary stays within a report when its scrub lengthens it", asy
 
   assert.ok(report.length <= resultReportCharsMax, String(report.length));
   assert.ok(report.startsWith("[redacted credential]"), report.slice(0, 40));
+});
+
+test("an agent's summary is cut to a report on a code point", async () => {
+  const short = "0123456789abcdef";
+  const redacted = "[redacted credential]";
+  const filler = "x".repeat(resultReportCharsMax - redacted.length - 1);
+  const report = await reportFor(
+    `${short}${filler}\u{1F600}\u{1F600}`,
+    credentialScrub([short]),
+  );
+
+  assert.ok(report.isWellFormed(), JSON.stringify(report.slice(-4)));
+  assert.equal(report.length, resultReportCharsMax - 1);
 });
 
 test("a task carrying commands runs them and never reaches for an agent", async () => {

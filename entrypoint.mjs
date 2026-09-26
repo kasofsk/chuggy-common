@@ -400,7 +400,7 @@ async function report(context, manifest) {
 /** What a report says of an agent whose summary left nothing printable. */
 const reportSummaryBlank = "the agent's summary held no printable text";
 
-/** The agent's summary as the report row accepts it, or a note that it had nothing to say. */
+/** A run's summary as the report row accepts it, or a note that an agent's had nothing printable. */
 function reportSummary(summary, scrub) {
   return workerReportText(summary, scrub) || reportSummaryBlank;
 }
