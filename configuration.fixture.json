@@ -1,0 +1,11 @@
+{
+  "worker": {
+    "mode": {
+      "type": "SingleAgent",
+      "agent": "Claude",
+      "arguments": ["--allowedTools=Bash,Edit,Read,Write,Glob,Grep"]
+    },
+    "setup": ["npm ci"],
+    "files": []
+  }
+}
