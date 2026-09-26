@@ -15,6 +15,7 @@ import {
   workerTaskVariable,
   workerWorkspaceVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
+import { resultReportCharsMax } from "@chuggy/worker-contract/workerDocuments";
 import { workerPlaneBytesMediaType } from "@chuggy/worker-contract/workerPlane";
 import { workTaskAnswerSchema } from "@chuggy/worker-contract/workerTask";
 
@@ -537,6 +538,70 @@ test("the report summary and the diagnostic artifact are scrubbed", async () => 
   assert.ok(summary.includes("[redacted credential]"));
   assert.ok(!diagnostic.includes(secret));
   assert.ok(diagnostic.includes("[redacted credential]"));
+});
+
+/** The report the plane was sent for an agent that finished with this summary. */
+async function reportFor(summary, scrub = (text) => text) {
+  const { calls, request } = planeCalls();
+  await published(calls, request, scrub, {
+    output: { type: "result", structured_output: { summary } },
+    result: { verdict: "Pass", summary },
+    diagnosticPath: ".chuggy/agent-result.json",
+  });
+  return JSON.parse(calls.find(({ path }) => path === "/v1/report").init.body)
+    .report;
+}
+
+test("an agent's summary is reported well formed and without control characters", async () => {
+  const escape = String.fromCodePoint(0x1b);
+  const report = await reportFor(
+    `${escape}[31mred${escape}[0m bell\u0007 del\u007f csi\u009b lone\ud800 end`,
+  );
+
+  assert.ok(report.isWellFormed(), JSON.stringify(report));
+  assert.ok(!/\p{Cc}/u.test(report), JSON.stringify(report));
+  assert.match(report, /red bell del csi lone\uFFFD end/u);
+});
+
+test("an agent's summary with nothing printable is reported as such", async () => {
+  const report = await reportFor("\u0007\u009b \n\t");
+
+  assert.equal(report, "the agent's summary held no printable text");
+});
+
+test("an agent's summary is scrubbed before its lines are joined", async () => {
+  const spanning = "-----BEGIN KEY-----\nabcdefghijklmnop\n-----END KEY-----";
+  const report = await reportFor(
+    `the key was ${spanning}`,
+    credentialScrub([spanning]),
+  );
+
+  assert.ok(!report.includes("abcdefghijklmnop"), report);
+  assert.ok(report.includes("[redacted credential]"), report);
+});
+
+test("an agent's summary stays within a report when its scrub lengthens it", async () => {
+  const short = "0123456789abcdef";
+  const summary = short
+    .repeat(Math.ceil(resultReportCharsMax / short.length))
+    .slice(0, resultReportCharsMax);
+  const report = await reportFor(summary, credentialScrub([short]));
+
+  assert.ok(report.length <= resultReportCharsMax, String(report.length));
+  assert.ok(report.startsWith("[redacted credential]"), report.slice(0, 40));
+});
+
+test("an agent's summary is cut to a report on a code point", async () => {
+  const short = "0123456789abcdef";
+  const redacted = "[redacted credential]";
+  const filler = "x".repeat(resultReportCharsMax - redacted.length - 1);
+  const report = await reportFor(
+    `${short}${filler}\u{1F600}\u{1F600}`,
+    credentialScrub([short]),
+  );
+
+  assert.ok(report.isWellFormed(), JSON.stringify(report.slice(-4)));
+  assert.equal(report.length, resultReportCharsMax - 1);
 });
 
 test("a task carrying commands runs them and never reaches for an agent", async () => {

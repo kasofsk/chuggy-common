@@ -63,6 +63,7 @@ import { workerAgent } from "./agent.mjs";
 import {
   runChecks,
   workerCheckCommands,
+  workerReportText,
   workerStageEnvironment,
 } from "./checks.mjs";
 import { keepWorkerLease } from "./lease.mjs";
@@ -396,8 +397,12 @@ async function report(context, manifest) {
   );
 }
 
-function reportSummary(summary) {
-  return summary.replace(/\s+/gu, " ").trim();
+/** What a report says of an agent whose summary left nothing printable. */
+const reportSummaryBlank = "the agent's summary held no printable text";
+
+/** A run's summary as the report row accepts it, or a note that an agent's summary had nothing printable. */
+function reportSummary(summary, scrub) {
+  return workerReportText(summary, scrub) || reportSummaryBlank;
 }
 
 async function credentialValues(mounted) {
@@ -723,7 +728,7 @@ export async function publishWorkerResult(
   await context.stopLease();
   await report(context, {
     verdict: result.verdict,
-    report: context.scrub(reportSummary(result.summary)),
+    report: reportSummary(result.summary, context.scrub),
     handoffs: [],
     ...(source === undefined ? {} : { source }),
     diagnostics,

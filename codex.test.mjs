@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { resultReportCharsMax } from "@chuggy/worker-contract/workerDocuments";
+
 import {
   codexAgent,
   codexConfiguration,
@@ -115,6 +117,18 @@ test("Codex must return a structured verdict", () => {
       ]),
     /Codex returned no structured verdict/u,
   );
+});
+
+test("a summary the schema admits is taken though its code units exceed the bound", () => {
+  const summary = "\u{1F600}".repeat(resultReportCharsMax);
+  const output = {
+    type: "item.completed",
+    item: {
+      type: "agent_message",
+      text: JSON.stringify({ verdict: "Pass", summary }),
+    },
+  };
+  assert.equal(codexResult([output]).result.summary, summary);
 });
 
 test("ticket configuration cannot replace worker-owned Codex arguments", () => {
