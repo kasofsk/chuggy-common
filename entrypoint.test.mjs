@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -122,47 +122,6 @@ function evidenceFor(request) {
     warn: () => undefined,
   });
 }
-
-test("the image carries every module the worker imports", async () => {
-  const directory = dirname(fileURLToPath(import.meta.url));
-  const dockerfile = await readFile(join(directory, "Dockerfile"), "utf8");
-  const modules = (await readdir(directory)).filter(
-    (name) =>
-      name.endsWith(".mjs") &&
-      !name.endsWith(".test.mjs") &&
-      !name.endsWith(".fixture.mjs"),
-  );
-
-  assert.ok(modules.includes("checks.mjs"), modules.join(" "));
-  for (const name of modules) {
-    assert.ok(
-      dockerfile.includes(`COPY images/worker/${name} `),
-      `${name} is imported by the worker and copied into no image`,
-    );
-  }
-});
-
-/** Catches the image and the work launcher naming the workspace apart, since that launcher writes none. */
-test("the image names the workspace a work pod reads", async () => {
-  const directory = dirname(fileURLToPath(import.meta.url));
-  const dockerfile = await readFile(join(directory, "Dockerfile"), "utf8");
-
-  assert.match(dockerfile, new RegExp(`^ +${workerWorkspaceVariable}=`, "mu"));
-});
-
-/** The contract's schemas run under the image's zod in a pod and under the lockfile's in every suite here. */
-test("the image installs the zod the suites run", async () => {
-  const directory = dirname(fileURLToPath(import.meta.url));
-  const dockerfile = await readFile(join(directory, "Dockerfile"), "utf8");
-  const lockfile = JSON.parse(
-    await readFile(join(directory, "../../package-lock.json"), "utf8"),
-  );
-
-  assert.equal(
-    /^ARG ZOD_VERSION=(\S+)$/mu.exec(dockerfile)?.[1],
-    lockfile.packages["node_modules/zod"].version,
-  );
-});
 
 test("exactly one task document is what a pod may be launched with", () => {
   assert.equal(workerMode({ [workerTaskVariable]: "{}" }), "Work");

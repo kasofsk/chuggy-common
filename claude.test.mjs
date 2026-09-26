@@ -1,15 +1,22 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { URL } from "node:url";
+
+import { workTaskAnswerSchema } from "@chuggy/worker-contract/workerTask";
 
 import { claudeInvocation, claudeResult } from "./claude.mjs";
 
-test("the development configuration composes a valid default Claude invocation", async () => {
-  const checkedIn = JSON.parse(
-    await readFile(".chug/configurations/chuggy-development.json", "utf8"),
+/** The worker is parsed by the contract first, so the fixture is one a plane could serve. */
+test("a configured Claude worker composes a valid default Claude invocation", async () => {
+  const configuration = JSON.parse(
+    await readFile(
+      new URL("./configuration.fixture.json", import.meta.url),
+      "utf8",
+    ),
   );
   const task = {
-    ...checkedIn.configuration,
+    worker: workTaskAnswerSchema.shape.worker.parse(configuration.worker),
     briefing: { text: "briefing" },
   };
 

@@ -62,7 +62,7 @@
  * reach the tool, and the derived-work rule is that mapping rather than a
  * sentence in a description.
  * `Prerequisite` is admitted by the schema only so its refusal can name the
- * reason — a released ticket's dependencies are immutable in
+ * reason — a released ticket's dependencies are immutable in chuggy's
  * `model/domain.qnt`, which names re-authoring machinery as deliberately absent.
  *
  * `zod` IS A PEER DEPENDENCY OF THE AGENT SDK, NOT ONE OF ITS DEPENDENCIES, so
@@ -374,8 +374,8 @@ const ordinal = (z) => z.number().int().min(1);
  * authority on. IT IS `looseObject` AND NOT `record`: the runtime converts a
  * shape to JSON schema when it lists its tools, its converter throws on a zod
  * record, and a server whose listing throws reports itself connected and offers
- * the model no tools at all. `images/worker/toolProbe.mjs` is what holds that
- * shut at build time.
+ * the model no tools at all. `./toolProbe.mjs` is what holds that shut at
+ * build time.
  */
 const anyObject = (z) => z.looseObject({});
 
@@ -392,10 +392,10 @@ const anyObject = (z) => z.looseObject({});
  * IT IS ONE TABLE SO IT IS ONE DELETION. Each entry goes in the change that
  * registers its route; an entry left behind is a tool that refuses a route that
  * works, which the first turn against a served installation shows. Nothing here
- * can check that for itself — the image reaches nothing under `src/`, and the
- * route table is built by an app this repo's suites do not stand up — so the
- * suites hold what they can: every key is a tool the roster carries, every tool
- * named here refuses before it makes a request, and no tool outside it does.
+ * can check that for itself — the route table is built by chuggy's server,
+ * which this repository does not carry — so the suites hold what they can:
+ * every key is a tool the roster carries, every tool named here refuses before
+ * it makes a request, and no tool outside it does.
  */
 export const chuggyToolsNotYetServed = {
   read_decision_log:

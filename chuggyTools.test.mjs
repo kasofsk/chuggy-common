@@ -953,7 +953,8 @@ test("origination is registered for a thread's roster and for no lead's", () => 
 });
 
 /**
- * The reads whose route `src/adapters/http/server.ts` does not register.
+ * The reads whose route chuggy's `src/adapters/http/server.ts` does not
+ * register.
  * Written here rather than read off the table under test, so a table that lost
  * an entry is a failure rather than a change of expectation.
  */

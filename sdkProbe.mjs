@@ -1,6 +1,6 @@
 /**
  * The build's verdict on what the session mode can resolve, read off the image
- * rather than off the Dockerfile.
+ * rather than off the Dockerfile that built it.
  *
  * `zod` IS A PEER OF THE AGENT SDK THAT THE POD'S OWN SCRIPTS IMPORT TOO. npm's
  * global install nests a package's peers inside that package's own tree, where

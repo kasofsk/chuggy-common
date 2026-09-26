@@ -1,0 +1,57 @@
+{
+  "name": "@chuggy/worker-core",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "private": true,
+  "dependencies": {
+    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.0.0/chuggy-worker-contract-1.0.0.tgz"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "dependency-cruiser": "^18.2.0",
+    "eslint": "^10.9.1",
+    "jscpd": "5.0.5",
+    "prettier": "^3.9.6",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.68.0",
+    "zod": "4.5.4"
+  },
+  "peerDependencies": {
+    "zod": "^4.4.3"
+  },
+  "files": [
+    "agent.mjs",
+    "checks.mjs",
+    "chuggyApi.mjs",
+    "chuggyTools.mjs",
+    "claude.mjs",
+    "codex.mjs",
+    "contractProbe.mjs",
+    "entrypoint.mjs",
+    "git-askpass.sh",
+    "leadDecision.mjs",
+    "lease.mjs",
+    "planeCredential.mjs",
+    "postgres.mjs",
+    "rateLimit.mjs",
+    "repository.mjs",
+    "result.mjs",
+    "runEvidence.mjs",
+    "sdkProbe.mjs",
+    "session.mjs",
+    "sessionCheckout.mjs",
+    "sessionMailbox.mjs",
+    "sessionStore.mjs",
+    "sessionTransport.mjs",
+    "snapshot.mjs",
+    "source.mjs",
+    "toolListing.mjs",
+    "toolProbe.mjs",
+    "transcriptPage.mjs",
+    "transport.mjs",
+    "wire.mjs"
+  ]
+}
