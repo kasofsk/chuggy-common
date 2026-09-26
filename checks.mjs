@@ -174,6 +174,15 @@ function checkPrintable(text) {
   return checkClean(text).replace(/\s+/gu, " ").trim();
 }
 
+/**
+ * Any text as a report carries it: scrubbed while it is still as it was
+ * written, so a secret spanning lines is still matched, then printable on one
+ * line and no longer than a report holds, whatever the scrub put in.
+ */
+export function workerReportText(text, scrub) {
+  return checkHead(checkPrintable(scrub(text)), resultReportCharsMax);
+}
+
 /** The longest head of a well-formed text within this many code units that ends on a code point. */
 function checkHead(text, units) {
   let head = "";
