@@ -135,6 +135,24 @@ test("a mailbox that stays empty for the idle bound ends the session cleanly", a
   );
 });
 
+/**
+ * Catches a session's agent moving a long command to the background, where the
+ * headless run kills it unseen, including where the site's own environment
+ * asks for background tasks.
+ */
+test("a session's agent never moves a command to the background, whatever the site says", async () => {
+  const plane = planeOf([], facts);
+  const { seen, query } = queryOf(() => []);
+
+  await run({
+    request: plane.request,
+    query,
+    environment: { ...environment, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0" },
+  });
+
+  assert.equal(seen.options.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
+});
+
 test("the query is opened eagerly against the store, with the session's own bounds", async () => {
   const plane = planeOf([], facts);
   const { seen, query } = queryOf(() => []);

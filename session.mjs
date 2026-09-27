@@ -73,6 +73,7 @@ import {
   chuggyToolServer,
   sessionAllowedTools,
 } from "./chuggyTools.mjs";
+import { claudeEnvironment } from "./claude.mjs";
 import { leadDecisionStaging } from "./leadDecision.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import {
@@ -518,6 +519,7 @@ export function sessionQueryOptions(
     cwd: checkout?.directory ?? workspace,
     env: {
       ...environment,
+      ...claudeEnvironment,
       CLAUDE_CODE_OAUTH_TOKEN: token,
       [sessionConfigDirectoryVariable]: sessionConfigDirectory(
         environment,
