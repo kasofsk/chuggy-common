@@ -423,27 +423,31 @@ test("an envelope's pod clones into the workspace its envelope names", async () 
  * which could leave it in a file for the commands to read.
  */
 test("a setup line sees the pod's environment but not the task document", async () => {
-  const database = "postgres://postgres@127.0.0.1:5432/postgres";
+  const site = "set by the site";
   Object.assign(process.env, {
     [workerTaskVariable]: "{}",
     [sessionTaskVariable]: "{}",
-    CHUG_PG_URL: database,
+    SITE_VARIABLE: site,
   });
   const directory = await mkdtemp(join(tmpdir(), "chuggy-setup-"));
   try {
     const setup =
       `printf "%s|%s|%s" "\${${workerTaskVariable}-unset}" ` +
-      `"\${${sessionTaskVariable}-unset}" "\${CHUG_PG_URL-unset}" > inherited`;
+      `"\${${sessionTaskVariable}-unset}" "\${SITE_VARIABLE-unset}" > inherited`;
 
     await prepareWorker({ worker: { setup: [setup] } }, directory);
 
     assert.equal(
       await readFile(join(directory, "inherited"), "utf8"),
-      `unset|unset|${database}`,
+      `unset|unset|${site}`,
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
-    for (const name of [workerTaskVariable, sessionTaskVariable, "CHUG_PG_URL"])
+    for (const name of [
+      workerTaskVariable,
+      sessionTaskVariable,
+      "SITE_VARIABLE",
+    ])
       delete process.env[name];
   }
 });

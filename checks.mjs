@@ -119,7 +119,7 @@ const checkTaskDocuments = [workerTaskVariable, sessionTaskVariable];
 
 /**
  * What the pod holds, less the document that placed it. Everything else stands,
- * the attempt's own database among it.
+ * the site's own variables among it.
  */
 export function workerStageEnvironment(environment) {
   return Object.fromEntries(

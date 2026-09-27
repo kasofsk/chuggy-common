@@ -35,7 +35,6 @@
     "leadDecision.mjs",
     "lease.mjs",
     "planeCredential.mjs",
-    "postgres.mjs",
     "rateLimit.mjs",
     "repository.mjs",
     "result.mjs",
