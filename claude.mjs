@@ -1,5 +1,14 @@
 import { agentResult, agentResultSchema } from "./result.mjs";
 
+/**
+ * What every Claude Code run here is started with beside its credential. A run
+ * is headless, so it ends with the agent's last reply, and Claude Code kills a
+ * command it moved to the background once the run ends, without the agent ever
+ * seeing it finish. So no command is moved there: a long one is waited for,
+ * up to the Bash tool's timeout.
+ */
+export const claudeEnvironment = { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" };
+
 const reservedClaudeArguments = [
   "-p",
   "--print",
@@ -68,7 +77,7 @@ export const claudeAgent = {
   invocation: claudeInvocation,
   result: claudeResult,
   prepareCredential: (token) => ({
-    environment: { CLAUDE_CODE_OAUTH_TOKEN: token },
+    environment: { ...claudeEnvironment, CLAUDE_CODE_OAUTH_TOKEN: token },
     secrets: [token],
   }),
   configurationEvent: (event) =>

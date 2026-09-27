@@ -5,7 +5,16 @@ import { URL } from "node:url";
 
 import { workTaskAnswerSchema } from "@chuggy/worker-contract/workerTask";
 
-import { claudeInvocation, claudeResult } from "./claude.mjs";
+import { claudeAgent, claudeInvocation, claudeResult } from "./claude.mjs";
+
+/** Catches a job's agent moving a long command to the background, where the headless run kills it unseen. */
+test("a Claude job never moves a command to the background", () => {
+  assert.equal(
+    claudeAgent.prepareCredential("token").environment
+      .CLAUDE_CODE_DISABLE_BACKGROUND_TASKS,
+    "1",
+  );
+});
 
 /** The worker is parsed by the contract first, so the fixture is one a plane could serve. */
 test("a configured Claude worker composes a valid default Claude invocation", async () => {
