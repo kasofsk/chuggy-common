@@ -272,17 +272,17 @@ test("a stage handed no commands is a crashed run and never a pass", async () =>
  */
 test("a stage's commands inherit the pod's environment but not the task document", async () => {
   const placed = { [workerTaskVariable]: "{}", [sessionTaskVariable]: "{}" };
-  const database = "postgres://postgres@127.0.0.1:5432/postgres";
-  Object.assign(process.env, placed, { CHUG_PG_URL: database });
+  const site = "set by the site";
+  Object.assign(process.env, placed, { SITE_VARIABLE: site });
   try {
     const { output } = await ran([
       `printf "%s|%s|%s" "\${${workerTaskVariable}-unset}" ` +
-        `"\${${sessionTaskVariable}-unset}" "\${CHUG_PG_URL-unset}"`,
+        `"\${${sessionTaskVariable}-unset}" "\${SITE_VARIABLE-unset}"`,
     ]);
 
-    assert.equal(output.checks[0].output, `unset|unset|${database}`);
+    assert.equal(output.checks[0].output, `unset|unset|${site}`);
   } finally {
-    for (const name of [...Object.keys(placed), "CHUG_PG_URL"])
+    for (const name of [...Object.keys(placed), "SITE_VARIABLE"])
       delete process.env[name];
   }
 });

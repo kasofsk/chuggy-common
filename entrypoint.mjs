@@ -68,7 +68,6 @@ import {
 } from "./checks.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import { planeCredential, workerCredentialPath } from "./planeCredential.mjs";
-import { attemptDatabase } from "./postgres.mjs";
 import {
   workerRepositories,
   workerRepository,
@@ -681,7 +680,6 @@ export async function workerAttempt(launch, seams = {}) {
       keepSecret,
       { ...seams, workspace: into },
     );
-    attemptDatabase(process.env);
     await prepareWorker(task, workspace.directory);
     const run = await runWorkerTask(
       {
