@@ -68,7 +68,7 @@ test("source publication commits all changes and pushes a new attempt ref", asyn
   });
   assert.deepEqual(calls.at(-1), {
     executable: "git",
-    args: ["push", "http://git/rig.git", `HEAD:${source.ref}`],
+    args: ["push", "http://git/rig.git", `abc123:${source.ref}`],
     options: { cwd: "/workspace/repository", env: environment },
   });
   assert.ok(calls.some(({ args }) => args[0] === "add" && args[1] === "--all"));
@@ -128,9 +128,13 @@ test("a push that can take a fresh credential takes one, and uses it", async () 
 /**
  * One attempt published from a checkout by git itself, holding `held`: the
  * source it declared or the error it was refused with, and how many times its
- * push asked for a credential.
+ * push asked for a credential. `meanwhile` runs as the push asks, after the
+ * check.
  */
-async function publishedFrom({ remote, directory, base }) {
+async function publishedFrom(
+  { remote, directory, base },
+  meanwhile = async () => undefined,
+) {
   const asked = { refreshes: 0 };
   const source = commitAndPushSource({
     task: { ticket: 9, attempt: "opaque", worker: {} },
@@ -143,6 +147,7 @@ async function publishedFrom({ remote, directory, base }) {
     secrets: held,
     refresh: async () => {
       asked.refreshes += 1;
+      await meanwhile();
       return process.env;
     },
   });
@@ -343,6 +348,49 @@ test("a secret behind a replacement ref is refused", async () => {
       { refused, asked },
       { secret: held[1], commit: carrying, place: "a file" },
     );
+  });
+});
+
+/**
+ * What is pushed is the commit that was checked. Catches a push of `HEAD`,
+ * which a process the agent left running could move between the check and the
+ * push, onto a commit the check never read.
+ */
+test("a commit made after the check is never what is pushed", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, remote } = checkout;
+
+    const { source } = await publishedFrom(checkout, async () => {
+      await agentCommitted(directory, "late", held[0].value);
+    });
+
+    const { stdout: pushed } = await git("git", ["rev-parse", source.ref], {
+      cwd: remote,
+    });
+    assert.equal(pushed.trim(), source.commit);
+    assert.notEqual(source.commit, await headOf(directory));
+  });
+});
+
+/**
+ * A check git could not run found nothing, and is no reason to push. Catches
+ * an exit status left unread: a base the checkout does not have lists no
+ * object at all, which reads exactly like a clean push.
+ */
+test("a check git cannot run refuses the push", async () => {
+  await inCheckout(async (checkout) => {
+    const { asked, source: refused } = await publishedFrom({
+      ...checkout,
+      base: "f".repeat(40),
+    });
+
+    assert.ok(refused instanceof Error, "the attempt pushed unchecked");
+    assert.match(
+      refused.message,
+      /^git rev-list exited 128 checking the push for secrets: /u,
+    );
+    assert.equal(asked.refreshes, 0);
+    assert.equal(await remoteRefs(checkout.remote), "");
   });
 });
 

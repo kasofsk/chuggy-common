@@ -184,8 +184,10 @@ async function sourceSecretCarried(directory, base, head, secrets) {
  * NOTHING HELD IS PUSHED. `secrets` is every `{ kind, value }` the pod scrubs
  * from what it uploads, and a commit carrying one of them is refused before the
  * remote is reached, naming its kind and the commit and never its value. The
- * credential the push then takes is minted after every commit it sends, so none
- * can carry it and it is not looked for.
+ * push names the commit that was checked rather than `HEAD`, so nothing
+ * committed after the check is sent. The credential the push then takes is
+ * minted after every commit it sends, so none can carry it and it is not
+ * looked for.
  *
  * THE PUSH ASKS FOR ITS CREDENTIAL AGAIN. `refresh` is present where the plane
  * minted the one the clone used: a minted token expires, an attempt may outlive
@@ -241,7 +243,7 @@ export async function commitAndPushSource({
       `commit ${carried.commit} carries ${carried.kind} in ${carried.place}, so the attempt pushes nothing`,
     );
   const ref = ticketBranch(task);
-  await command("git", ["push", repository, `HEAD:${ref}`], {
+  await command("git", ["push", repository, `${commit}:${ref}`], {
     cwd: directory,
     env: refresh === undefined ? environment : await refresh(),
   });

@@ -316,32 +316,40 @@ async function servedPlane(answer) {
   };
 }
 
+/** A work task whose worker runs `commands`. */
+function commandedTask(commands) {
+  return {
+    status: 200,
+    body: workTaskAnswerSchema.parse({
+      ...fetchedAnswer,
+      worker: { mode: { type: "Commands", commands }, setup: [], files: [] },
+    }),
+  };
+}
+
+/** The input bundle one attempt is placed with: a repository and the commit it starts from. */
+function inputAnswer(repository, base) {
+  return {
+    status: 200,
+    body: {
+      bundle: "bundle-1",
+      digest: "0".repeat(64),
+      references: [
+        { ordinal: 1, kind: "Repository", reference: repository },
+        { ordinal: 2, kind: "TargetCommit", reference: base },
+      ],
+    },
+  };
+}
+
 /** A plane serving an envelope's pod one commanded work task, and minting nothing for its repository. */
 function commandedPlane() {
-  const commanded = workTaskAnswerSchema.parse({
-    ...fetchedAnswer,
-    worker: {
-      mode: { type: "Commands", commands: ["true"] },
-      setup: [],
-      files: [],
-    },
-  });
   return servedPlane((route) => {
     switch (route) {
       case "task":
-        return { status: 200, body: commanded };
+        return commandedTask(["true"]);
       case "input":
-        return {
-          status: 200,
-          body: {
-            bundle: "bundle-1",
-            digest: "0".repeat(64),
-            references: [
-              { ordinal: 1, kind: "Repository", reference: "repository-1" },
-              { ordinal: 2, kind: "TargetCommit", reference: "0".repeat(40) },
-            ],
-          },
-        };
+        return inputAnswer("repository-1", "0".repeat(40));
       case "credential":
         return { status: 404 };
       default:
@@ -474,29 +482,9 @@ test("an envelope's pod clones into the workspace its envelope names", async () 
   const plane = await servedPlane((route) => {
     switch (route) {
       case "task":
-        return {
-          status: 200,
-          body: workTaskAnswerSchema.parse({
-            ...fetchedAnswer,
-            worker: {
-              mode: { type: "Commands", commands: ["true"] },
-              setup: [],
-              files: [],
-            },
-          }),
-        };
+        return commandedTask(["true"]);
       case "input":
-        return {
-          status: 200,
-          body: {
-            bundle: "bundle-1",
-            digest: "0".repeat(64),
-            references: [
-              { ordinal: 1, kind: "Repository", reference: "repository-1" },
-              { ordinal: 2, kind: "TargetCommit", reference: "0".repeat(40) },
-            ],
-          },
-        };
+        return inputAnswer("repository-1", "0".repeat(40));
       case "credential":
         return {
           status: 200,
@@ -1112,7 +1100,7 @@ test("a passing commanded work attempt commits and pushes what it declares", asy
   assert.deepEqual(push.args, [
     "push",
     repositories["repository-1"].url,
-    `HEAD:${ticketBranch(workAttempt)}`,
+    `${workCommit}:${ticketBranch(workAttempt)}`,
   ]);
   assert.deepEqual(push.options.env, pushCredential);
   assert.deepEqual(reported.source, {
@@ -1231,6 +1219,64 @@ test("a passing work attempt pushes no commit carrying any secret it holds", asy
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+/**
+ * The push a whole attempt makes is checked against what that attempt holds.
+ * A commanded work attempt, launched from an envelope mounting the Claude
+ * credential, copies that credential into its checkout: its commit is refused,
+ * the attempt fails, and neither the remote nor the report hears of it.
+ * Catches an attempt handing its push anything but the run's own secrets.
+ */
+test("a work attempt whose commit carries its Claude credential fails and pushes nothing", async () => {
+  await inCheckout(async ({ remote, directory, base }) => {
+    const root = await mkdtemp(join(tmpdir(), "chuggy-attempt-"));
+    const providerCredentialFile = join(root, "claude-code");
+    await writeFile(providerCredentialFile, `${secret}\n`);
+    const plane = await servedPlane((route) => {
+      switch (route) {
+        case "task":
+          return commandedTask([`cp ${providerCredentialFile} leaked`]);
+        case "input":
+          return inputAnswer(remote, base);
+        case "credential":
+          return {
+            status: 200,
+            body: { ...minted, expiresAtMs: 1_900_000_000_000 },
+          };
+        default:
+          return { status: 204 };
+      }
+    });
+    try {
+      const failed = await workerAttempt(
+        envelopeLaunch({
+          ...envelope,
+          callbackUrl: plane.url,
+          providerCredentialFile,
+        }),
+        {
+          minted: root,
+          write: async () => undefined,
+          clone: async () => directory,
+        },
+      ).then(
+        () => new Error("pushed"),
+        (error) => error,
+      );
+
+      assert.match(
+        failed.message,
+        /^commit [0-9a-f]{40} carries a credential the launcher mounted in a file, so the attempt pushes nothing$/u,
+      );
+      assert.ok(!failed.message.includes(secret));
+      assert.equal(await remoteRefs(remote), "");
+      assert.ok(!plane.asked.some(({ route }) => route === "report"));
+    } finally {
+      await plane.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 test("a plane that stops minting mid-attempt fails it rather than pushing with a mount", async () => {
