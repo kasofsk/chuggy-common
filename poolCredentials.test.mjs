@@ -54,6 +54,27 @@ test("a registration's file only its owner can open is read back whole", async (
     );
 });
 
+test("a registration naming its registry host is read back whole", async () => {
+  const named = { ...registration, registryHost: "chuggy-registry.invalid" };
+  assert.deepEqual(
+    await written(JSON.stringify(named), 0o600, poolCredentials),
+    named,
+  );
+});
+
+test("a registry host that is a URL or carries a path is refused by name", async () => {
+  for (const registryHost of [
+    "https://chuggy-registry.invalid",
+    "chuggy-registry.invalid/v2",
+    "Chuggy-Registry.invalid",
+    "",
+  ])
+    assert.match(
+      await refusal(JSON.stringify({ ...registration, registryHost })),
+      /registryHost/u,
+    );
+});
+
 test("a file a group or anyone else can open is refused, naming its mode", async () => {
   for (const mode of [0o640, 0o620, 0o610, 0o604, 0o602, 0o601, 0o644])
     assert.match(
