@@ -19,7 +19,8 @@ import { z } from "zod";
  * @property {string} tokenUrl
  * @property {string} audience
  * @property {string} planeUrl
- * @property {string} [registryHost] the one registry the pool presents its token to when it pulls
+ * @property {string} [registryHost] the one registry the pool presents its
+ *   token to when it pulls
  * @property {string} clientId
  * @property {string} clientSecret
  */
@@ -42,7 +43,9 @@ const poolCredentialsSchema = z.strictObject({
   planeUrl: poolCredentialsTextSchema,
   registryHost: z
     .string()
-    .regex(/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$/u)
+    .regex(
+      /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?$/u,
+    )
     .optional(),
   clientId: poolCredentialsTextSchema,
   clientSecret: poolCredentialsTextSchema,
