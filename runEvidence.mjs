@@ -77,10 +77,7 @@ const [runFailed, runRateLimited, runTurnsExhausted, runUploadRefused] = [
  */
 export function credentialScrub(secrets) {
   const values = [...new Set(secrets)]
-    .filter(
-      (secret) =>
-        typeof secret === "string" && secret.length >= credentialScrubCharsMin,
-    )
+    .filter(credentialScrubReplaces)
     .sort((left, right) => right.length - left.length);
   return (text) =>
     values.reduce(
@@ -89,21 +86,37 @@ export function credentialScrub(secrets) {
     );
 }
 
+function credentialScrubReplaces(secret) {
+  return typeof secret === "string" && secret.length >= credentialScrubCharsMin;
+}
+
 /**
  * The same scrub over a set of secrets that grows. A credential the plane mints
  * after the run started is as much this pod's to hide as one its launcher
  * mounted, and the evidence recorder, the diagnostics and the failure path all
  * took the function before that mint — so what the one they hold delegates to is
  * what a later secret replaces.
+ *
+ * Each secret is a `{ kind, value }`, and `held` answers the ones the scrub
+ * replaces, each once under the first kind it was held as, so a secret can be
+ * named without being printed.
  */
 export function credentialScrubbing(secrets) {
   const held = [...secrets];
-  let scrubbing = credentialScrub(held);
+  const values = () => held.map(({ value }) => value);
+  let scrubbing = credentialScrub(values());
   return {
     scrub: (text) => scrubbing(text),
     keepSecret: (secret) => {
       held.push(secret);
-      scrubbing = credentialScrub(held);
+      scrubbing = credentialScrub(values());
+    },
+    held: () => {
+      const kinds = new Map();
+      for (const { kind, value } of held)
+        if (credentialScrubReplaces(value) && !kinds.has(value))
+          kinds.set(value, kind);
+      return [...kinds].map(([value, kind]) => ({ kind, value }));
     },
   };
 }

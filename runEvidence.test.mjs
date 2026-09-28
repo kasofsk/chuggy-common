@@ -83,14 +83,36 @@ test("a credential too short to be distinctive is not scrubbed", () => {
 });
 
 test("a credential minted after the scrub was handed out is scrubbed by it", () => {
-  const { scrub, keepSecret } = credentialScrubbing([secret]);
+  const { scrub, keepSecret } = credentialScrubbing([
+    { kind: "agent", value: secret },
+  ]);
   const minted = "ghs_0123456789abcdefghijklmnopqrstuvwxyz";
 
   assert.equal(scrub(`saw ${minted}`), `saw ${minted}`);
-  keepSecret(minted);
+  keepSecret({ kind: "minted", value: minted });
 
   assert.equal(scrub(`saw ${minted}`), "saw [redacted credential]");
   assert.equal(scrub(`saw ${secret}`), "saw [redacted credential]");
+});
+
+/**
+ * What a push is checked for is what the scrub replaces. Catches a held set
+ * that drifted from it: a short value kept, which no scrub replaces, a
+ * repeated one named twice, or a later kind renaming one held first.
+ */
+test("the held secrets are the scrub's, each once under the kind it was first held as", () => {
+  const minted = "ghs_0123456789abcdefghijklmnopqrstuvwxyz";
+  const { held, keepSecret } = credentialScrubbing([
+    { kind: "agent", value: secret },
+    { kind: "bearer", value: "a".repeat(credentialScrubCharsMin - 1) },
+    { kind: "mounted", value: secret },
+  ]);
+  keepSecret({ kind: "minted", value: minted });
+
+  assert.deepEqual(held(), [
+    { kind: "agent", value: secret },
+    { kind: "minted", value: minted },
+  ]);
 });
 
 test("an oversized event keeps its type and position and loses its payload", () => {

@@ -771,6 +771,7 @@ test("the manifest the pod reports is one the contract's manifest schema reads",
         scrub: (text) => text,
         stopLease: async () => undefined,
         request,
+        held: () => [],
         command: async () => ({ stdout: `${"a".repeat(40)}\n` }),
       },
       {
