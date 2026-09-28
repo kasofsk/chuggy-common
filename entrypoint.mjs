@@ -28,13 +28,21 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import {
+  access,
+  constants,
+  mkdir,
+  readFile,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { createInterface } from "node:readline";
 
 import {
+  mintedCredentialDirectory,
   sessionTaskVariable,
   workerCredentialFilesVariable,
   workerRepositoriesVariable,
@@ -90,6 +98,14 @@ const agentDiagnosticPath = ".chuggy/agent-result.json";
 const checkDiagnosticPath = ".chuggy/check-output.json";
 const workerCredentialFilesMax = 64;
 const workspaceWrite = rosterLabel(filesystemAccesses, "WriteWorkspace");
+
+/** What each secret this pod holds is, which a refused push names in place of its value. */
+const workerSecretKinds = {
+  bearer: "the attempt's bearer",
+  mounted: "a credential the launcher mounted",
+  minted: "the git credential the plane minted",
+};
+
 let activeTask;
 let activeBearer;
 let activeScrub;
@@ -261,9 +277,14 @@ async function upload(task, bearer, path, content, request = workerRequest) {
   return artifact(path, content);
 }
 
-async function workSource(task, workspace, verdict, run = command) {
-  if (task.taskKind !== "Work" || verdict !== "Pass") return undefined;
-  return commitAndPushSource({ task, ...workspace, command: run });
+async function workSource(context, workspace, verdict) {
+  if (context.task.taskKind !== "Work" || verdict !== "Pass") return undefined;
+  return commitAndPushSource({
+    task: context.task,
+    ...workspace,
+    command: context.command ?? command,
+    secrets: context.held(),
+  });
 }
 
 /**
@@ -279,7 +300,8 @@ async function workerMinted({ task, bearer, keepSecret, request, write }) {
     ...(request === undefined ? {} : { request }),
     ...(write === undefined ? {} : { write }),
   });
-  if (minted !== undefined) keepSecret(minted.password);
+  if (minted !== undefined)
+    keepSecret({ kind: workerSecretKinds.minted, value: minted.password });
   return minted;
 }
 
@@ -429,7 +451,8 @@ async function agentCredential(credentialFiles, agent) {
  * What a run is set up with: the agent's environment, the evidence recorder,
  * and the scrub over every secret this pod holds — the agent's own, the bearer,
  * and each file in `mounted`, which is every credential this pod's launcher
- * mounted whether or not the map names it.
+ * mounted whether or not the map names it. `held` answers those secrets with
+ * their kinds, for the push to be checked against.
  */
 export async function workerRun({
   task,
@@ -442,10 +465,14 @@ export async function workerRun({
     agent === undefined
       ? { environment: {}, secrets: [] }
       : await agentCredential(credentialFiles, agent);
-  const { scrub, keepSecret } = credentialScrubbing([
-    ...prepared.secrets,
-    bearer,
-    ...(await credentialValues(mounted)),
+  const agentKind = `the ${agent?.runtime ?? "agent"} credential`;
+  const { scrub, keepSecret, held } = credentialScrubbing([
+    ...prepared.secrets.map((value) => ({ kind: agentKind, value })),
+    { kind: workerSecretKinds.bearer, value: bearer },
+    ...(await credentialValues(mounted)).map((value) => ({
+      kind: workerSecretKinds.mounted,
+      value,
+    })),
   ]);
   activeScrub = scrub;
   const evidence = runEvidenceRecorder(task, bearer, scrub);
@@ -454,6 +481,7 @@ export async function workerRun({
     agentEnvironment: prepared.environment,
     scrub,
     keepSecret,
+    held,
     evidence,
   };
 }
@@ -646,10 +674,35 @@ export function envelopeLaunch(envelope) {
 }
 
 /**
+ * The directory a minted credential is written to, checked before an attempt
+ * starts its work: a launcher that forgot to mount it would otherwise fail the
+ * attempt only at the plane's first mint.
+ */
+export async function workerMintedWritable(directory) {
+  const found = await stat(directory).catch(() => undefined);
+  if (found === undefined)
+    throw new Error(
+      `the minted credential directory ${directory} does not exist; a pod is launched with it mounted writable`,
+    );
+  const writable =
+    found.isDirectory() &&
+    (await access(directory, constants.W_OK | constants.X_OK).then(
+      () => true,
+      () => false,
+    ));
+  if (!writable)
+    throw new Error(
+      `the minted credential directory ${directory} is not writable; a pod is launched with it mounted writable`,
+    );
+}
+
+/**
  * One attempt, run from its task onwards the same whichever carrier brought it.
- * `seams` are `workerWorkspace`'s, less the directory, which is the launch's.
+ * `seams` are `workerWorkspace`'s, less the directory, which is the launch's,
+ * and `minted`, the directory checked in place of the contract's.
  */
 export async function workerAttempt(launch, seams = {}) {
+  const { minted = mintedCredentialDirectory, ...workspaceSeams } = seams;
   const task = await launch.task();
   activeTask = task;
   const commands = workerCheckCommands(task);
@@ -663,13 +716,9 @@ export async function workerAttempt(launch, seams = {}) {
     workspace: into,
   } = await launch.given(agent);
   activeBearer = bearer;
-  const { agentEnvironment, scrub, keepSecret, evidence } = await workerRun({
-    task,
-    bearer,
-    credentialFiles,
-    mounted,
-    agent,
-  });
+  const { agentEnvironment, scrub, keepSecret, held, evidence } =
+    await workerRun({ task, bearer, credentialFiles, mounted, agent });
+  await workerMintedWritable(minted);
   const stopLease = keepWorkerLease(task, bearer);
   try {
     const workspace = await workerWorkspace(
@@ -678,7 +727,7 @@ export async function workerAttempt(launch, seams = {}) {
       credentialFiles,
       bearer,
       keepSecret,
-      { ...seams, workspace: into },
+      { ...workspaceSeams, workspace: into },
     );
     await prepareWorker(task, workspace.directory);
     const run = await runWorkerTask(
@@ -693,7 +742,15 @@ export async function workerAttempt(launch, seams = {}) {
       commands,
     );
     await publishWorkerResult(
-      { task, bearer, evidence, scrub, stopLease, request: workerRequest },
+      {
+        task,
+        bearer,
+        evidence,
+        scrub,
+        held,
+        stopLease,
+        request: workerRequest,
+      },
       workspace,
       run,
     );
@@ -708,7 +765,7 @@ export async function workerAttempt(launch, seams = {}) {
  * totals reach the plane before the report that terminalizes the execution, so
  * a settled task never carries figures nothing wrote. `context.command` is the
  * seam a passing work attempt's push runs through, this module's own where it
- * is absent.
+ * is absent, and `context.held` answers the secrets that push is checked for.
  */
 export async function publishWorkerResult(
   context,
@@ -716,12 +773,7 @@ export async function publishWorkerResult(
   { output, result, diagnosticPath },
 ) {
   await context.evidence.finish();
-  const source = await workSource(
-    context.task,
-    workspace,
-    result.verdict,
-    context.command,
-  );
+  const source = await workSource(context, workspace, result.verdict);
   const diagnostics = [await diagnostic(context, diagnosticPath, output)];
   await context.stopLease();
   await report(context, {

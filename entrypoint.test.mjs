@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath, URL } from "node:url";
+import { fileURLToPath, pathToFileURL, URL } from "node:url";
 
 import {
   sessionTaskVariable,
@@ -19,7 +19,9 @@ import { resultReportCharsMax } from "@chuggy/worker-contract/workerDocuments";
 import { workerPlaneBytesMediaType } from "@chuggy/worker-contract/workerPlane";
 import { workTaskAnswerSchema } from "@chuggy/worker-contract/workerTask";
 
+import { inCheckout, remoteRefs } from "./checkout.fixture.mjs";
 import { workerCheckCommands } from "./checks.mjs";
+import { claudeAgent } from "./claude.mjs";
 import {
   envelopeLaunch,
   prepareWorker,
@@ -28,7 +30,9 @@ import {
   runWorkerTask,
   workerAttempt,
   workerCredential,
+  workerMintedWritable,
   workerMode,
+  workerRun,
   workerWorkspace,
 } from "./entrypoint.mjs";
 import { envelope, fetchedAnswer } from "./envelope.fixture.mjs";
@@ -54,6 +58,9 @@ const repositories = {
 };
 const credentialFiles = { forge: "/var/run/chuggy/credentials/forge" };
 
+/** The kind a minted credential is held as, and a refused push names it by. */
+const mintedKind = "the git credential the plane minted";
+
 /**
  * One attempt asking the plane for its credential, with what the plane answers
  * and what the pod is authorized to mount if it does not.
@@ -72,7 +79,7 @@ function askedFor(answer, credentials = ["forge"]) {
       repositories,
       credentialFiles,
       repositoryId: "repository-1",
-      keepSecret: (value) => kept.push(value),
+      keepSecret: (secret) => kept.push(secret),
       request: async (_task, _bearer, path) => {
         paths.push(path);
         return typeof answer === "function" ? answer() : answer;
@@ -142,14 +149,30 @@ test("exactly one task document is what a pod may be launched with", () => {
 /**
  * One pod launched as the image launches it, which is the only way into the
  * environment `main` reads: it is not exported, and nothing imports it.
+ * `minted`, where given, is the directory it finds in place of the contract's
+ * minted credential directory, which no machine a suite runs on mounts.
  */
-function launched(environment) {
+function launched(environment, minted) {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const redirected =
+    minted === undefined
+      ? []
+      : [
+          "--import",
+          pathToFileURL(join(here, "mintedDirectory.fixture.mjs")).href,
+        ];
   return new Promise((resolve) => {
     const child = spawn(
       process.execPath,
-      [join(dirname(fileURLToPath(import.meta.url)), "entrypoint.mjs")],
+      [...redirected, join(here, "entrypoint.mjs")],
       {
-        env: { PATH: process.env["PATH"] ?? "", ...environment },
+        env: {
+          PATH: process.env["PATH"] ?? "",
+          ...(minted === undefined
+            ? {}
+            : { CHUG_SUITE_MINTED_DIRECTORY: minted }),
+          ...environment,
+        },
         stdio: ["ignore", "ignore", "pipe"],
       },
     );
@@ -293,15 +316,8 @@ async function servedPlane(answer) {
   };
 }
 
-/**
- * A pod launched as a pool launches it: an envelope, carrying a field a later
- * release might add, and no credential map. Catches an envelope read as a
- * document, a pod that fetched its task anywhere but the envelope's plane or
- * under anything but its bearer, and an attempt that did not run on from
- * there as a pushed one does, to the credential its repository needs and the
- * crashed run's report when there is none.
- */
-test("a pod launched with an envelope fetches its task and runs it under the envelope's bearer", async () => {
+/** A plane serving an envelope's pod one commanded work task, and minting nothing for its repository. */
+function commandedPlane() {
   const commanded = workTaskAnswerSchema.parse({
     ...fetchedAnswer,
     worker: {
@@ -310,7 +326,7 @@ test("a pod launched with an envelope fetches its task and runs it under the env
       files: [],
     },
   });
-  const plane = await servedPlane((route) => {
+  return servedPlane((route) => {
     switch (route) {
       case "task":
         return { status: 200, body: commanded };
@@ -332,14 +348,30 @@ test("a pod launched with an envelope fetches its task and runs it under the env
         return { status: 204 };
     }
   });
+}
+
+/**
+ * A pod launched as a pool launches it: an envelope, carrying a field a later
+ * release might add, and no credential map. Catches an envelope read as a
+ * document, a pod that fetched its task anywhere but the envelope's plane or
+ * under anything but its bearer, and an attempt that did not run on from
+ * there as a pushed one does, to the credential its repository needs and the
+ * crashed run's report when there is none.
+ */
+test("a pod launched with an envelope fetches its task and runs it under the envelope's bearer", async () => {
+  const plane = await commandedPlane();
+  const minted = await mkdtemp(join(tmpdir(), "chuggy-minted-"));
   try {
-    const ran = await launched({
-      [workerTaskVariable]: JSON.stringify({
-        ...envelope,
-        callbackUrl: plane.url,
-        namedByALaterRelease: true,
-      }),
-    });
+    const ran = await launched(
+      {
+        [workerTaskVariable]: JSON.stringify({
+          ...envelope,
+          callbackUrl: plane.url,
+          namedByALaterRelease: true,
+        }),
+      },
+      minted,
+    );
 
     assert.equal(ran.code, 1);
     assert.match(
@@ -354,6 +386,82 @@ test("a pod launched with an envelope fetches its task and runs it under the env
     );
   } finally {
     await plane.close();
+    await rm(minted, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A launcher that forgot the minted credential directory is told so, and the
+ * attempt ends as a crashed run's does before any of its work: no input read,
+ * no credential asked for. Catches a check made after the work began, or one
+ * whose refusal leaves the attempt to its lease.
+ */
+test("a pod launched without its minted credential directory ends the attempt before any work", async () => {
+  const plane = await commandedPlane();
+  const root = await mkdtemp(join(tmpdir(), "chuggy-minted-"));
+  const missing = join(root, "missing");
+  try {
+    const ran = await launched(
+      {
+        [workerTaskVariable]: JSON.stringify({
+          ...envelope,
+          callbackUrl: plane.url,
+        }),
+      },
+      missing,
+    );
+
+    assert.equal(ran.code, 1);
+    assert.ok(
+      ran.stderr
+        .split("\n")
+        .includes(
+          `the minted credential directory ${missing} does not exist; a pod is launched with it mounted writable`,
+        ),
+      ran.stderr,
+    );
+    assert.deepEqual(
+      plane.asked.map(({ route }) => route),
+      ["task", "runTotals", "artifact", "runEnded"],
+    );
+  } finally {
+    await plane.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a minted credential directory that is missing is refused, naming it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chuggy-minted-"));
+  try {
+    const missing = join(root, "missing");
+
+    await assert.rejects(workerMintedWritable(missing), {
+      message: `the minted credential directory ${missing} does not exist; a pod is launched with it mounted writable`,
+    });
+    await workerMintedWritable(root);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A read-only mount, and a file standing where the directory should, which the
+ * pod could write and search were it a directory.
+ */
+test("a minted credential directory the pod cannot write to is refused, naming it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chuggy-minted-"));
+  try {
+    const readOnly = join(root, "read-only");
+    const file = join(root, "file");
+    await mkdir(readOnly, { mode: 0o500 });
+    await writeFile(file, "", { mode: 0o700 });
+
+    for (const directory of [readOnly, file])
+      await assert.rejects(workerMintedWritable(directory), {
+        message: `the minted credential directory ${directory} is not writable; a pod is launched with it mounted writable`,
+      });
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -399,9 +507,11 @@ test("an envelope's pod clones into the workspace its envelope names", async () 
     }
   });
   const cloned = [];
+  const mintedDirectory = await mkdtemp(join(tmpdir(), "chuggy-minted-"));
   try {
     await assert.rejects(
       workerAttempt(envelopeLaunch({ ...envelope, callbackUrl: plane.url }), {
+        minted: mintedDirectory,
         write: async () => undefined,
         clone: async (_repository, _base, into) => {
           cloned.push(into);
@@ -412,6 +522,7 @@ test("an envelope's pod clones into the workspace its envelope names", async () 
     );
   } finally {
     await plane.close();
+    await rm(mintedDirectory, { recursive: true, force: true });
   }
 
   assert.deepEqual(cloned, [envelope.workspace]);
@@ -735,7 +846,7 @@ test("a minted credential is what git is given, and the mount is never read", as
     resolved.environment.CHUG_WORKER_GIT_CREDENTIAL_FILE,
     credentialFiles.forge,
   );
-  assert.deepEqual(kept, [minted.password]);
+  assert.deepEqual(kept, [{ kind: mintedKind, value: minted.password }]);
 });
 
 test("a minted repository the site names no map for is cloned at its own id", async () => {
@@ -816,7 +927,10 @@ test("the push takes a fresh mint rather than the one the clone used", async () 
 
   assert.equal(mints, 2);
   assert.equal(refreshed.CHUG_WORKER_GIT_CREDENTIAL_USERNAME, minted.username);
-  assert.deepEqual(kept, [minted.password, later]);
+  assert.deepEqual(kept, [
+    { kind: mintedKind, value: minted.password },
+    { kind: mintedKind, value: later },
+  ]);
 });
 
 test("an outage at the clone fails the attempt rather than falling back", async () => {
@@ -925,6 +1039,7 @@ async function workPublished(worker, run) {
       scrub: (text) => text,
       stopLease: async () => calls.push({ path: "lease/stopped" }),
       request,
+      held: () => [],
       command: async (executable, args, options) => {
         runs.push({ executable, args, options });
         return { stdout: `${workCommit}\n` };
@@ -1022,6 +1137,100 @@ test("a failing commanded work attempt pushes nothing and declares no source", a
   assert.deepEqual(runs, []);
   assert.equal(reported.verdict, "Fail");
   assert.equal(reported.source, undefined);
+});
+
+/**
+ * A passing work attempt published from a real checkout under `run`'s secrets,
+ * what its push was refused with, and every call the plane saw.
+ */
+async function passedFrom({ remote, directory, base }, run, bearer) {
+  const { calls, request } = planeCalls();
+  const refused = await publishWorkerResult(
+    {
+      task: { ...task, ...workAttempt, worker: {} },
+      bearer,
+      evidence: evidenceFor(request),
+      scrub: run.scrub,
+      held: run.held,
+      stopLease: async () => undefined,
+      request,
+    },
+    {
+      repositoryId: "repository-1",
+      repository: remote,
+      base,
+      directory,
+      environment: process.env,
+    },
+    {
+      output: {},
+      result: { verdict: "Pass", summary: "done" },
+      diagnosticPath: ".chuggy/agent-result.json",
+    },
+  ).then(
+    () => new Error("pushed"),
+    (error) => error,
+  );
+  return { refused, calls };
+}
+
+/**
+ * Each kind of secret a work attempt holds is one its push is checked for, and
+ * the kind is what the refusal names: the agent's credential, the bearer, what
+ * the launcher mounted and what the plane minted. Catches a secret the run's
+ * scrub holds and its push is never checked for, a refusal that prints the
+ * value it found, and a refused push reported as the attempt's source.
+ */
+test("a passing work attempt pushes no commit carrying any secret it holds", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chuggy-held-"));
+  try {
+    const bearer = "bearer-0123456789abcdefghijklmn";
+    const forge = "forge-0123456789abcdefghijklmno";
+    const agentFile = join(root, "claude-code");
+    const forgeFile = join(root, "forge");
+    await writeFile(agentFile, `${secret}\n`);
+    await writeFile(forgeFile, `${forge}\n`);
+    const run = await workerRun({
+      task,
+      bearer,
+      credentialFiles: { "claude-code": agentFile },
+      mounted: [agentFile, forgeFile],
+      agent: claudeAgent,
+    });
+    run.evidence.stop();
+    const { asked } = askedFor(
+      { status: 200, ok: true, json: async () => minted },
+      [],
+    );
+    await workerCredential({ ...asked, keepSecret: run.keepSecret });
+    const expected = [
+      { kind: "the Claude Code credential", value: secret },
+      { kind: "the attempt's bearer", value: bearer },
+      { kind: "a credential the launcher mounted", value: forge },
+      { kind: mintedKind, value: minted.password },
+    ];
+    assert.deepEqual(run.held(), expected);
+
+    for (const held of expected)
+      await inCheckout(async (checkout) => {
+        await writeFile(join(checkout.directory, "leaked"), held.value);
+
+        const { refused, calls } = await passedFrom(checkout, run, bearer);
+
+        assert.match(
+          refused.message,
+          new RegExp(
+            `^commit [0-9a-f]{40} carries ${held.kind} in a file, so the attempt pushes nothing$`,
+            "u",
+          ),
+        );
+        assert.ok(!refused.message.includes(held.value));
+        assert.equal(await remoteRefs(checkout.remote), "");
+        assert.ok(!calls.some(({ path }) => path === "/v1/report"));
+      });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("a plane that stops minting mid-attempt fails it rather than pushing with a mount", async () => {
