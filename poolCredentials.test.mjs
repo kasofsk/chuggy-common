@@ -58,7 +58,9 @@ test("a registration naming its registry host, with or without a port, is read b
   for (const registryHost of [
     "chuggy-registry.invalid",
     "localhost:5000",
+    "localhost:30500",
     "10.43.129.13:5000",
+    "registry.us-east-1.invalid:443",
   ]) {
     const named = { ...registration, registryHost };
     assert.deepEqual(
@@ -75,6 +77,11 @@ test("a registry host that is not exactly a lowercase host and port is refused b
     "Chuggy-Registry.invalid",
     "chuggy..invalid",
     "chuggy-.invalid",
+    "-chuggy.invalid",
+    "chuggy.-invalid",
+    "chuggy.invalid-",
+    "chuggy.registry..invalid",
+    "chuggy_registry.invalid",
     "localhost:",
     "localhost:http",
     "localhost:123456",

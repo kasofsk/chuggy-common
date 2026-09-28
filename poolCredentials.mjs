@@ -1,8 +1,8 @@
 /**
  * The file a pool's registration writes: who the pool is, where its issuer,
- * plane and image registry are, and its client credential. It is refused unless only its owner
- * can read or write it, and no refusal carries the file's text, because the
- * secret is in it.
+ * plane and image registry are, and its client credential. It is refused unless
+ * only its owner can read or write it, and no refusal carries the file's text,
+ * because the secret is in it.
  */
 
 import { open } from "node:fs/promises";
