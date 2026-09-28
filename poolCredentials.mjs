@@ -1,8 +1,8 @@
 /**
- * The file a pool's registration writes: who the pool is, where its issuer and
- * plane are, and its client credential. It is refused unless only its owner
- * can read or write it, and no refusal carries the file's text, because the
- * secret is in it.
+ * The file a pool's registration writes: who the pool is, where its issuer,
+ * plane and image registry are, and its client credential. It is refused unless
+ * only its owner can read or write it, and no refusal carries the file's text,
+ * because the secret is in it.
  */
 
 import { open } from "node:fs/promises";
@@ -19,6 +19,8 @@ import { z } from "zod";
  * @property {string} tokenUrl
  * @property {string} audience
  * @property {string} planeUrl
+ * @property {string} [registryHost] the one registry the pool presents its
+ *   token to when it pulls
  * @property {string} clientId
  * @property {string} clientSecret
  */
@@ -39,6 +41,12 @@ const poolCredentialsSchema = z.strictObject({
   tokenUrl: poolCredentialsTextSchema,
   audience: poolCredentialsTextSchema,
   planeUrl: poolCredentialsTextSchema,
+  registryHost: z
+    .string()
+    .regex(
+      /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?$/u,
+    )
+    .optional(),
   clientId: poolCredentialsTextSchema,
   clientSecret: poolCredentialsTextSchema,
 });
