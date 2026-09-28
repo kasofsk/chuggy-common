@@ -24,6 +24,7 @@
   },
   "files": [
     "agent.mjs",
+    "boundedResponse.mjs",
     "checks.mjs",
     "chuggyApi.mjs",
     "chuggyTools.mjs",
@@ -35,6 +36,10 @@
     "leadDecision.mjs",
     "lease.mjs",
     "planeCredential.mjs",
+    "poolCredentials.mjs",
+    "poolLoop.mjs",
+    "poolPlane.mjs",
+    "poolTokens.mjs",
     "rateLimit.mjs",
     "repository.mjs",
     "result.mjs",
