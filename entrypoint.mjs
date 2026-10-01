@@ -85,6 +85,7 @@ import {
   credentialScrub,
   credentialScrubbing,
   runEvidenceRecorder,
+  workerErrorPath,
 } from "./runEvidence.mjs";
 import { runConfigurationSnapshot } from "./snapshot.mjs";
 import { commitAndPushSource, resultDocument } from "./source.mjs";
@@ -574,18 +575,8 @@ async function envelopeTaskRead(response) {
 
 /** One refused attempt ended as a crashed run's is, with the refusal as its error text. */
 async function envelopeTaskSettled(plane, bearer, request, message) {
-  const scrub = credentialScrub([bearer]);
   try {
-    await reportWorkerFailure(
-      {
-        task: plane,
-        bearer,
-        evidence: runEvidenceRecorder(plane, bearer, scrub, { request }),
-        request,
-        scrub,
-      },
-      message,
-    );
+    await reportWorkerFailureBeforeRun(plane, bearer, request, message);
   } catch {
     process.stderr.write("the refused attempt could not be ended\n");
   }
@@ -656,10 +647,13 @@ function documentLaunch(document) {
  * What a pool's envelope stands for in their place. Its `timeoutSecsMax` is
  * the pool's to enforce, as a Kubernetes pool does at its pod's deadline, and
  * its `outputBytesMax` names no channel, every one this pod writes to the
- * plane being bounded by the contract already; so neither is read here.
+ * plane being bounded by the contract already; so neither is read here. Its
+ * `bearer` is held from the start, so a task refused at admission still ends
+ * its attempt.
  */
 export function envelopeLaunch(envelope) {
   return {
+    bearer: envelope.bearer,
     task: () => envelopeTask(envelope),
     given: async (agent) => ({
       credentialFiles: envelopeCredentialFiles(envelope, agent),
@@ -705,6 +699,7 @@ export async function workerAttempt(launch, seams = {}) {
   const { minted = mintedCredentialDirectory, ...workspaceSeams } = seams;
   const task = await launch.task();
   activeTask = task;
+  activeBearer = launch.bearer;
   const commands = workerCheckCommands(task);
   const agent = commands === undefined ? workerAgent(task) : undefined;
   await admitWorkerTask(task, agent);
@@ -799,7 +794,7 @@ export async function reportWorkerFailure(
     await upload(
       task,
       bearer,
-      ".chuggy/worker-error.txt",
+      workerErrorPath,
       Buffer.from(scrub(`${message}\n`)),
       request,
     );
@@ -807,6 +802,24 @@ export async function reportWorkerFailure(
     process.stderr.write("worker failure text could not be uploaded\n");
   }
   await evidence?.ended();
+}
+
+/**
+ * A failure ended as a crashed run's is, where the run never began: its figures
+ * are empty, and the bearer is the one secret it holds to scrub.
+ */
+async function reportWorkerFailureBeforeRun(task, bearer, request, message) {
+  const scrub = credentialScrub([bearer]);
+  await reportWorkerFailure(
+    {
+      task,
+      bearer,
+      evidence: runEvidenceRecorder(task, bearer, scrub, { request }),
+      request,
+      scrub,
+    },
+    message,
+  );
 }
 
 /**
@@ -889,15 +902,22 @@ async function reportActiveFailure(failure) {
   process.stderr.write(`${message}\n`);
   if (activeTask !== undefined && activeBearer !== undefined) {
     try {
-      await reportWorkerFailure(
-        {
-          task: activeTask,
-          bearer: activeBearer,
-          evidence: activeEvidence,
-          scrub: scrubbed,
-        },
-        message,
-      );
+      await (activeEvidence === undefined
+        ? reportWorkerFailureBeforeRun(
+            activeTask,
+            activeBearer,
+            workerRequest,
+            message,
+          )
+        : reportWorkerFailure(
+            {
+              task: activeTask,
+              bearer: activeBearer,
+              evidence: activeEvidence,
+              scrub: scrubbed,
+            },
+            message,
+          ));
     } catch {
       process.stderr.write("worker failure could not be reported\n");
     }

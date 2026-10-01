@@ -13,4 +13,4 @@ just check
 
 ## The pool loop
 
-A worker pool outside the cluster runs `poolLoop.mjs` over a backend of its own, which places, stops and lists its work. `poolTokens.mjs` turns the pool's client credential into a token, `poolPlane.mjs` polls and settles over HTTP, and `poolCredentials.mjs` reads the file a registration writes. chuggy keeps its own TypeScript copy of the loop beside its Kubernetes backend; the contract's schemas are what hold the two copies to one wire.
+A worker pool outside the cluster runs `poolLoop.mjs` over a backend of its own, which places, stops and lists its work, and names the work that ended of itself. `poolTokens.mjs` turns the pool's client credential into a token, `poolPlane.mjs` polls and settles over HTTP, `poolJobPlane.mjs` ends the attempt of work that ended without reporting, and `poolCredentials.mjs` reads the file a registration writes. chuggy keeps its own TypeScript copy of the loop beside its Kubernetes backend; the contract's schemas are what hold the two copies to one wire.

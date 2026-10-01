@@ -603,10 +603,12 @@ function pool(issuer, plane, passesMax = 1) {
   return {
     tokens: poolClientTokens(issuer.config),
     plane,
+    jobs: { end: async () => "Ended" },
     backend: {
       place: async () => ({ placed: "Placed" }),
       stop: async () => ({ stopped: "Stopped" }),
       held: async () => [],
+      ended: async () => [],
     },
     settings: { concurrencyMax: 1, outageBackoffMs: 1, passesMax },
   };

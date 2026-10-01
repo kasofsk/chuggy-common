@@ -269,8 +269,9 @@ test("a commanded work task without network or workspace write is refused", asyn
 
 /**
  * A worker plane a launched pod reaches over HTTP, answering through the
- * contract's own tables: `answer(route)` is what each route answers, and
- * `asked` is every route in order with the bearer it was asked under.
+ * contract's own tables: `answer(route)` is what each route answers, `asked`
+ * is every route in order with the bearer it was asked under, and `requests`
+ * is each one as the plane read it, its body included.
  */
 async function servedPlane(answer) {
   const plane = planeFetch(planes.job, answer);
@@ -312,6 +313,7 @@ async function servedPlane(answer) {
   return {
     url: `http://127.0.0.1:${String(server.address().port)}`,
     asked,
+    requests: plane.asked,
     close: () => new Promise((closed) => server.close(() => closed(undefined))),
   };
 }
@@ -435,6 +437,48 @@ test("a pod launched without its minted credential directory ends the attempt be
   } finally {
     await plane.close();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A task whose configuration names no worker is refused before the pod reads
+ * anything else, and the attempt still ends then, under the envelope's bearer
+ * and with the refusal as its error text. Catches a pod that holds no bearer
+ * until after admission, and one that ends a run it never began without
+ * posting the end.
+ */
+test("an envelope's task refused at admission ends its attempt with the refusal", async () => {
+  const unworked = Object.fromEntries(
+    Object.entries(fetchedAnswer).filter(([field]) => field !== "worker"),
+  );
+  const plane = await servedPlane((route) =>
+    route === "task" ? { status: 200, body: unworked } : { status: 204 },
+  );
+  try {
+    const ran = await launched({
+      [workerTaskVariable]: JSON.stringify({
+        ...envelope,
+        callbackUrl: plane.url,
+      }),
+    });
+
+    assert.equal(ran.code, 1);
+    assert.match(ran.stderr, /^worker mode is not SingleAgent$/mu);
+    assert.deepEqual(
+      plane.asked,
+      ["task", "runTotals", "artifact", "runEnded"].map((route) => ({
+        route,
+        authorization: `Bearer ${envelope.bearer}`,
+      })),
+    );
+    const uploaded = plane.requests.find(({ route }) => route === "artifact");
+    assert.equal(uploaded.path, "/v1/artifacts/.chuggy/worker-error.txt");
+    assert.equal(
+      Buffer.from(uploaded.body).toString("utf8"),
+      "worker mode is not SingleAgent\n",
+    );
+  } finally {
+    await plane.close();
   }
 });
 
