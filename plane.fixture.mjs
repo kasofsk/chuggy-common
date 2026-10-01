@@ -17,6 +17,7 @@ import { URL } from "node:url";
 
 import {
   sessionCredentialSchema,
+  sessionEndedSchema,
   sessionPlaneAnswers,
   sessionPlaneRoutes,
   sessionReferenceSchema,
@@ -65,6 +66,7 @@ export const planes = {
       turnAnswer: sessionTurnAnswerSchema,
       turnFailure: sessionTurnFailureSchema,
       credential: sessionCredentialSchema,
+      ended: sessionEndedSchema,
     },
     bytes: ["storeBatch"],
   },

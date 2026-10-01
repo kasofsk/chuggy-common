@@ -29,6 +29,14 @@ const assignment = {
   bearer: "attempt-bearer",
 };
 
+/** A session the plane offers, which always names its image. */
+const session = {
+  ...assignment,
+  assignment: "session-one",
+  image: "registry.invalid/chuggy/session:1",
+  bearer: "session-bearer",
+};
+
 /** One answer as the plane would send it, with no server to send it. */
 function answered(status, body) {
   return new globalThis.Response(status === 204 ? null : body, { status });
@@ -39,25 +47,30 @@ function answering(status, body = "{}", settings = planeSettings) {
   return poolPlaneClient(settings, async () => answered(status, body));
 }
 
-test("a poll names what the pool holds and wants, and carries its own token", async () => {
+test("a poll names what the pool holds and wants of each kind, and carries its own token", async () => {
   const seen = [];
   const plane = poolPlaneClient(planeSettings, async (input, init) => {
     seen.push({ url: String(input), init });
     return answered(
       200,
-      JSON.stringify({ assignments: [assignment], stop: ["a"] }),
+      JSON.stringify({
+        assignments: [assignment],
+        sessions: [session],
+        stop: ["a"],
+      }),
     );
   });
-  const polled = await plane.poll("pool-token", ["one", "two"], 3);
+  const polled = await plane.poll("pool-token", ["one", "two"], 3, 2);
   assert.equal(
     seen[0].url,
-    "https://pool-plane.invalid/v1/assignments?held=one&held=two&wanted=3",
+    "https://pool-plane.invalid/v1/assignments?held=one&held=two&wanted=3&wantedSessions=2",
   );
   assert.equal(seen[0].init.method, "GET");
   assert.equal(seen[0].init.headers.authorization, "Bearer pool-token");
   assert.deepEqual(polled, {
     polled: "Reconciled",
     assignments: [assignment],
+    sessions: [session],
     stop: ["a"],
   });
 });
@@ -68,13 +81,16 @@ test("a base address's own path is kept beneath every route", async () => {
     { ...planeSettings, baseUrl: "https://gateway.invalid/pools" },
     async (input) => {
       sent.push(String(input));
-      return answered(200, JSON.stringify({ assignments: [], stop: [] }));
+      return answered(
+        200,
+        JSON.stringify({ assignments: [], sessions: [], stop: [] }),
+      );
     },
   );
   await plane.poll("pool-token", [], 1);
   await plane.settle("pool-token", "one", { outcome: "Accepted" });
   assert.deepEqual(sent, [
-    "https://gateway.invalid/pools/v1/assignments?wanted=1",
+    "https://gateway.invalid/pools/v1/assignments?wanted=1&wantedSessions=0",
     "https://gateway.invalid/pools/v1/assignments/one/accepted",
   ]);
 });
@@ -94,7 +110,9 @@ test("each refusing status is the arm the plane means by it", async () => {
 
 /** A reconciliation the schema reads, as bytes, with `stop` naming each of `stopped`. */
 function reconciliationBytes(stopped) {
-  return Buffer.from(JSON.stringify({ assignments: [], stop: stopped }));
+  return Buffer.from(
+    JSON.stringify({ assignments: [], sessions: [], stop: stopped }),
+  );
 }
 
 test("an answer this pool cannot read is an outage rather than a refusal", async () => {
@@ -205,7 +223,10 @@ test("a poll and every settlement name the release this client was built with", 
   const named = [];
   const plane = poolPlaneClient(planeSettings, async (_input, init) => {
     named.push(init.headers[workerContractHeader]);
-    return answered(200, JSON.stringify({ assignments: [], stop: [] }));
+    return answered(
+      200,
+      JSON.stringify({ assignments: [], sessions: [], stop: [] }),
+    );
   });
   await plane.poll("pool-token", [], 1);
   await plane.settle("pool-token", "one", { outcome: "Accepted" });

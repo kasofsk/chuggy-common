@@ -17,6 +17,16 @@ function assignment(named) {
   };
 }
 
+/** The workloads a backend holds, each named and of `kind`. */
+function holding(kind, ...named) {
+  return named.map((assignment) => ({ assignment, kind }));
+}
+
+/** A session the plane offers, which always names its image. */
+function sessionOffer(named) {
+  return { ...assignment(named), image: "registry.invalid/session:1" };
+}
+
 /** A backend holding nothing and placing everything, which every case narrows from. */
 const idle = {
   place: async () => ({ placed: "Placed" }),
@@ -25,9 +35,9 @@ const idle = {
   ended: async () => [],
 };
 
-/** What a poll answers when it offers `assignments` and asks for `stop`. */
-function reconciled(assignments = [], stop = []) {
-  return { polled: "Reconciled", assignments, stop };
+/** What a poll answers when it offers `assignments` and `sessions` and asks for `stop`. */
+function reconciled(assignments = [], stop = [], sessions = []) {
+  return { polled: "Reconciled", assignments, sessions, stop };
 }
 
 /** A plane with nothing to say, answered by the poll that says so. */
@@ -60,6 +70,7 @@ function client(parts) {
     },
     plane: quiet,
     jobs: { end: async () => "Ended" },
+    sessions: { end: async () => "Ended" },
     backend: idle,
     settings,
     ...parts,
@@ -106,7 +117,13 @@ test("what the pool holds is read from the backend rather than remembered", asyn
   const sent = [];
   const passed = await workerPoolClientPass(
     client({
-      backend: { ...idle, held: async () => ["running-one"] },
+      backend: {
+        ...idle,
+        held: async () => [
+          ...holding("Job", "running-one"),
+          ...holding("Session", "session-one"),
+        ],
+      },
       plane: {
         ...quiet,
         poll: async (_token, held) => {
@@ -116,7 +133,7 @@ test("what the pool holds is read from the backend rather than remembered", asyn
       },
     }),
   );
-  assert.deepEqual(sent, [["running-one"]]);
+  assert.deepEqual(sent, [["running-one", "session-one"]]);
   assert.equal(passed.passed, "Reconciled");
 });
 
@@ -137,7 +154,7 @@ test("a poll asks for the room left under the ceiling, and none at it", async ()
     await workerPoolClientPass(
       client({
         settings: { ...settings, concurrencyMax },
-        backend: { ...idle, held: async () => held },
+        backend: { ...idle, held: async () => holding("Job", ...held) },
         plane,
       }),
     );
@@ -146,7 +163,7 @@ test("a poll asks for the room left under the ceiling, and none at it", async ()
 
 test("a pool at its own ceiling polls for none, and places nothing it is offered anyway", async () => {
   const asked = [];
-  const placer = placing(["running-one"]);
+  const placer = placing(holding("Job", "running-one"));
   const offer = offering([assignment("offered")]);
   const passed = await workerPoolClientPass(
     client({
@@ -178,7 +195,7 @@ test("a stopped assignment frees the room the same pass places into", async () =
     client({
       backend: {
         ...idle,
-        held: async () => ["going"],
+        held: async () => holding("Job", "going"),
         stop: async (named) => {
           stopped.push(named);
           return { stopped: "Stopped" };
@@ -200,8 +217,189 @@ test("a stopped assignment frees the room the same pass places into", async () =
   });
 });
 
+/** A backend holding `held` and recording each placement with the kind it was placed as. */
+function placingKinds(held) {
+  const placed = [];
+  return {
+    placed,
+    backend: {
+      ...idle,
+      held: async () => held,
+      place: async (offered, kind) => {
+        placed.push([offered.assignment, kind]);
+        return { placed: "Placed" };
+      },
+    },
+  };
+}
+
+/** A plane offering `jobs` and `sessions` once, recording each poll's two rooms and each settlement. */
+function offeringKinds(jobs, sessions, stop = []) {
+  const rooms = [];
+  const posted = [];
+  return {
+    rooms,
+    posted,
+    plane: {
+      poll: async (_token, _held, wanted, wantedSessions) => {
+        rooms.push({ wanted, wantedSessions });
+        return reconciled(jobs, stop, sessions);
+      },
+      settle: async (_token, named, outcome) => {
+        posted.push([named, outcome.outcome]);
+        return "Settled";
+      },
+    },
+  };
+}
+
+test("each kind's room is asked against its own ceiling, whatever the other kind holds", async () => {
+  const rooms = [];
+  for (const held of [
+    [...holding("Job", "j1"), ...holding("Session", "s1", "s2")],
+    holding("Job", "j1", "j2", "j3"),
+    holding("Session", "s1", "s2", "s3"),
+  ]) {
+    const offer = offeringKinds([], []);
+    await workerPoolClientPass(
+      client({
+        settings: { ...settings, concurrencyMax: 3, sessionsMax: 2 },
+        backend: { ...idle, held: async () => held },
+        plane: offer.plane,
+      }),
+    );
+    rooms.push(...offer.rooms);
+  }
+  assert.deepEqual(rooms, [
+    { wanted: 2, wantedSessions: 0 },
+    { wanted: 0, wantedSessions: 2 },
+    { wanted: 3, wantedSessions: 0 },
+  ]);
+});
+
+test("sessions are placed as sessions against their own ceiling, and a full job ceiling takes none of their room", async () => {
+  const placer = placingKinds(holding("Job", "running"));
+  const offer = offeringKinds(
+    [assignment("job")],
+    ["one", "two", "three"].map(sessionOffer),
+  );
+  const passed = await workerPoolClientPass(
+    client({
+      settings: { ...settings, concurrencyMax: 1, sessionsMax: 2 },
+      backend: placer.backend,
+      plane: offer.plane,
+    }),
+  );
+  assert.deepEqual(offer.rooms, [{ wanted: 0, wantedSessions: 2 }]);
+  assert.deepEqual(placer.placed, [
+    ["one", "Session"],
+    ["two", "Session"],
+  ]);
+  assert.deepEqual(offer.posted, [
+    ["job", "Unavailable"],
+    ["one", "Accepted"],
+    ["two", "Accepted"],
+    ["three", "Unavailable"],
+  ]);
+  assert.equal(passed.placed, 2);
+});
+
+test("a pool that names no session ceiling asks for none and places none it is offered", async () => {
+  const placer = placingKinds([]);
+  const offer = offeringKinds([assignment("job")], [sessionOffer("session")]);
+  await workerPoolClientPass(
+    client({ backend: placer.backend, plane: offer.plane }),
+  );
+  assert.deepEqual(offer.rooms, [{ wanted: 1, wantedSessions: 0 }]);
+  assert.deepEqual(placer.placed, [["job", "Job"]]);
+  assert.deepEqual(offer.posted, [
+    ["job", "Accepted"],
+    ["session", "Unavailable"],
+  ]);
+});
+
+test("a stopped session frees a session's room this pass, and never a job's", async () => {
+  const placer = placingKinds([
+    ...holding("Job", "job-running"),
+    ...holding("Session", "session-going"),
+  ]);
+  const offer = offeringKinds(
+    [assignment("job")],
+    [sessionOffer("session")],
+    ["session-going"],
+  );
+  await workerPoolClientPass(
+    client({
+      settings: { ...settings, concurrencyMax: 1, sessionsMax: 1 },
+      backend: placer.backend,
+      plane: offer.plane,
+    }),
+  );
+  assert.deepEqual(placer.placed, [["session", "Session"]]);
+  assert.deepEqual(offer.posted, [
+    ["job", "Unavailable"],
+    ["session", "Accepted"],
+  ]);
+});
+
+test("an ended session is told to the session plane and an ended job to the job plane, each once", async () => {
+  const jobEnd = {
+    kind: "Job",
+    job: assignment("job"),
+    why: "its container exited with status 1",
+  };
+  const sessionEnd = {
+    kind: "Session",
+    session: assignment("session"),
+    phase: "Succeeded",
+  };
+  const told = [];
+  const passed = await workerPoolClientPass(
+    client({
+      backend: { ...idle, ended: async () => [jobEnd, sessionEnd] },
+      jobs: {
+        end: async (ended) => {
+          told.push(["jobs", ended]);
+          return "Ended";
+        },
+      },
+      sessions: {
+        end: async (ended) => {
+          told.push(["sessions", ended]);
+          return "Refused";
+        },
+      },
+    }),
+  );
+  assert.deepEqual(told, [
+    ["jobs", jobEnd],
+    ["sessions", sessionEnd],
+  ]);
+  assert.equal(passed.ended, 1);
+});
+
+test("a backend ending a workload of no kind the loop knows fails the pass before it is told anywhere", async () => {
+  const told = [];
+  const telling = { end: async (ended) => told.push(ended) };
+  await assert.rejects(
+    workerPoolClientPass(
+      client({
+        backend: {
+          ...idle,
+          ended: async () => [{ job: assignment("crashed"), why: "exited" }],
+        },
+        jobs: telling,
+        sessions: telling,
+      }),
+    ),
+    /undefined, which is no workload/u,
+  );
+  assert.deepEqual(told, []);
+});
+
 test("a workload that ended unreported has its attempt ended, each one once, counting the ends taken", async () => {
   const workloads = ["crashed", "reported"].map((named) => ({
+    kind: "Job",
     job: assignment(named),
     why: `the ${named} container exited`,
   }));
@@ -238,7 +436,11 @@ test("an ended workload found by this pass's read is ended before the poll waits
           return [];
         },
         ended: async () => [
-          { job: assignment("crashed"), why: "the container exited" },
+          {
+            kind: "Job",
+            job: assignment("crashed"),
+            why: "the container exited",
+          },
         ],
       },
       jobs: {
@@ -260,7 +462,7 @@ test("an ended workload found by this pass's read is ended before the poll waits
 });
 
 test("a fabric that could not take a stop places nothing further this pass", async () => {
-  const placer = placing(["going"]);
+  const placer = placing(holding("Job", "going"));
   const passed = await workerPoolClientPass(
     client({
       backend: {
@@ -290,7 +492,7 @@ test("a fabric that refused a stop ends the run rather than renewing that lease"
       settings: { ...settings, passesMax: 5 },
       backend: {
         ...idle,
-        held: async () => ["going"],
+        held: async () => holding("Job", "going"),
         stop: async () => ({
           stopped: "Refused",
           evidence: "the fabric refused to stop this workload",
@@ -474,4 +676,25 @@ test("a run refuses a bound that is not a positive whole number", async () => {
         ),
         new RegExp(`${name} must be a positive safe integer`, "u"),
       );
+});
+
+test("a run refuses a session ceiling that is not a whole number of zero or more, and takes none or zero", async () => {
+  for (const refused of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 2])
+    await assert.rejects(
+      workerPoolClientRun(
+        client({ settings: { ...settings, sessionsMax: refused } }),
+        async () => undefined,
+      ),
+      /sessionsMax must be a safe integer of zero or more, or absent/u,
+    );
+  for (const taken of [{}, { sessionsMax: 0 }])
+    assert.equal(
+      (
+        await workerPoolClientRun(
+          client({ settings: { ...settings, ...taken } }),
+          async () => undefined,
+        )
+      ).passed,
+      "Reconciled",
+    );
 });

@@ -170,7 +170,6 @@ test("every read that takes a limit admits its route's bound and no more", () =>
     list_configurations: nativeHttpPageItemsMax,
     read_decision_log: selectorHistoryLimitMax,
     read_refusals: agenticRefusalsAnsweredMax,
-    read_projects: nativeHttpPageItemsMax,
     list_executions: nativeHttpPageItemsMax,
     read_thread: threadTurnsAnsweredMax,
   };
@@ -640,14 +639,6 @@ test("a thread read past its bound is refused before it asks, and within it asks
   assert.equal(api.calls.length, 1, "a transcript at its cursor was refused");
 });
 
-test("the project inventory is read outside the project's own path", async () => {
-  const api = apiOf();
-
-  await routeOf("read_projects", { limit: 3 }, api);
-
-  assert.equal(api.calls[0].path, "/api/v1/projects?limit=3");
-});
-
 test("an argument past its bound is refused before any call is made", async () => {
   const { api, call } = toolsOf();
 
@@ -933,6 +924,73 @@ test("an origination without the fence the route requires never reaches it", asy
     assert.equal(answer.isError, true, missing);
   }
   assert.equal(api.calls.length, 0);
+});
+
+/**
+ * Catches a tool built on a route outside its session's own project, which the
+ * API refuses a session bearer however the membership reads: an inventory of
+ * every project the principal sees is one.
+ */
+test("every project tool reaches its own session's project and nothing outside it", async () => {
+  const partition = "/api/v1/tenants/vteng/projects/chuggy";
+  const arguments_ = {
+    list_tickets: {},
+    read_ticket: { ticket: 7 },
+    read_draft: { ticket: 7 },
+    list_drafts: {},
+    list_configurations: {},
+    read_configuration: { revision: "r1" },
+    read_decision_log: {},
+    read_refusals: {},
+    read_ticket_refusals: { ticket: 7 },
+    read_lead: {},
+    read_lead_transcript: {},
+    list_executions: {},
+    read_execution: { execution: "e-1" },
+    read_run_transcript: { execution: "e-1", attempt: "a-1" },
+    read_operation: { operation: "o-1" },
+    list_threads: {},
+    read_thread: { session: "t-1" },
+    read_thread_transcript: { session: "t-1" },
+    initialize_draft: { revision: "r1" },
+    file_dependent: dependent,
+    revise_draft: {
+      ticket: 4,
+      expectedVersion: 2,
+      configurationRevision: "r1",
+      authoring: { dependencies: [] },
+      brief: { title: "t" },
+    },
+    delete_draft: { ticket: 4, expectedVersion: 2 },
+    release_draft: {
+      ticket: 4,
+      authoringVersion: 2,
+      configurationRevision: "r1",
+    },
+    create_draft: origination,
+  };
+  assert.deepEqual(
+    chuggyProjectTools.map(({ name }) => name).sort(),
+    Object.keys(arguments_).sort(),
+  );
+  for (const definition of chuggyProjectTools) {
+    const api = apiOf();
+
+    await definition.call(
+      chuggyToolContext(task, bearer, {
+        request: api.request,
+        turn: () => "turn-1",
+      }),
+      arguments_[definition.name],
+    );
+
+    assert.equal(api.calls.length, 1, definition.name);
+    const { pathname } = new URL(api.calls[0].path, task.api.url);
+    assert.ok(
+      pathname === partition || pathname.startsWith(`${partition}/`),
+      `${definition.name} reached ${pathname}`,
+    );
+  }
 });
 
 test("origination is registered for a thread's roster and for no lead's", () => {

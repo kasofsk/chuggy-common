@@ -24,8 +24,9 @@ import { workerPlaneHeaders } from "./transport.mjs";
 import { rosterLabel, routePath } from "./wire.mjs";
 
 /**
- * @typedef {import("./poolLoop.mjs").WorkerPoolEnded} WorkerPoolEnded
- * @typedef {import("./poolLoop.mjs").WorkerPoolJobEnded} WorkerPoolJobEnded
+ * @typedef {import("./poolLoop.mjs").WorkerPoolAttempt} WorkerPoolAttempt
+ * @typedef {import("./poolLoop.mjs").WorkerPoolEndAnswer} WorkerPoolEndAnswer
+ * @typedef {import("./poolLoop.mjs").WorkerPoolJobEnd} WorkerPoolJobEnd
  * @typedef {import("./poolLoop.mjs").WorkerPoolJobPlane} WorkerPoolJobPlane
  *
  * @typedef {object} PoolJobPlaneClientSettings
@@ -38,7 +39,7 @@ const runFailed = rosterLabel(runEndedEvidences, "RunFailed");
  * The error text an ended workload leaves: the backend's reason, as a report
  * carries any text, scrubbed of the bearer it was handed.
  *
- * @param {WorkerPoolEnded} ended
+ * @param {WorkerPoolJobEnd} ended
  */
 export function poolJobEndedText({ job, why }) {
   return `${workerReportText(
@@ -59,19 +60,26 @@ export function checkedPoolJobPlaneClientSettings(input) {
 
 /**
  * One call to an attempt's plane, resolved against its callback as the
- * harness resolves its own, answered by its status alone.
+ * harness resolves its own, answered by its status alone. A session's end is
+ * the same call to its own plane (`./poolSessionPlane.mjs`).
  *
  * @param {PoolJobPlaneClientSettings} settings
  * @param {typeof fetch} fetcher
- * @param {WorkerPoolEnded["job"]} job
+ * @param {WorkerPoolAttempt} attempt
  * @param {string} path
  * @param {{method: string, contentType: string, body: string | Buffer}} sent
  */
-async function poolJobPlaneStatus(settings, fetcher, job, path, sent) {
-  const answered = await fetcher(new URL(path, job.callbackUrl), {
+export async function poolAttemptStatus(
+  settings,
+  fetcher,
+  attempt,
+  path,
+  sent,
+) {
+  const answered = await fetcher(new URL(path, attempt.callbackUrl), {
     method: sent.method,
     signal: globalThis.AbortSignal.timeout(settings.timeoutMs),
-    headers: workerPlaneHeaders(job.bearer, {
+    headers: workerPlaneHeaders(attempt.bearer, {
       "content-type": sent.contentType,
     }),
     body: sent.body,
@@ -82,9 +90,9 @@ async function poolJobPlaneStatus(settings, fetcher, job, path, sent) {
 
 /**
  * @param {number} status
- * @returns {WorkerPoolJobEnded}
+ * @returns {WorkerPoolEndAnswer}
  */
-function poolJobPlaneEnding(status) {
+export function poolEndAnswer(status) {
   if (status === 204) return "Ended";
   if (status >= 400 && status < 500) return "Refused";
   return "Unavailable";
@@ -96,12 +104,12 @@ function poolJobPlaneEnding(status) {
  *
  * @param {PoolJobPlaneClientSettings} settings
  * @param {typeof fetch} fetcher
- * @param {WorkerPoolEnded} ended
- * @returns {Promise<WorkerPoolJobEnded>}
+ * @param {WorkerPoolJobEnd} ended
+ * @returns {Promise<WorkerPoolEndAnswer>}
  */
 async function poolJobPlaneEnded(settings, fetcher, ended) {
   try {
-    await poolJobPlaneStatus(
+    await poolAttemptStatus(
       settings,
       fetcher,
       ended.job,
@@ -116,8 +124,8 @@ async function poolJobPlaneEnded(settings, fetcher, ended) {
     // The end below is asked for regardless.
   }
   try {
-    return poolJobPlaneEnding(
-      await poolJobPlaneStatus(
+    return poolEndAnswer(
+      await poolAttemptStatus(
         settings,
         fetcher,
         ended.job,
