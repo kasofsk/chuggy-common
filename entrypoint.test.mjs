@@ -19,7 +19,7 @@ import { resultReportCharsMax } from "@chuggy/worker-contract/workerDocuments";
 import { workerPlaneBytesMediaType } from "@chuggy/worker-contract/workerPlane";
 import { workTaskAnswerSchema } from "@chuggy/worker-contract/workerTask";
 
-import { inCheckout, remoteRefs } from "./checkout.fixture.mjs";
+import { git, inCheckout, remoteRefs } from "./checkout.fixture.mjs";
 import { workerCheckCommands } from "./checks.mjs";
 import { claudeAgent } from "./claude.mjs";
 import {
@@ -39,7 +39,7 @@ import { envelope, fetchedAnswer } from "./envelope.fixture.mjs";
 import { planeFetch, planes } from "./plane.fixture.mjs";
 import { workerCredentialPath } from "./planeCredential.mjs";
 import { credentialScrub, runEvidenceRecorder } from "./runEvidence.mjs";
-import { ticketBranch } from "./source.mjs";
+import { commitAndPushSource, ticketBranch } from "./source.mjs";
 
 const task = { workerPlane: { url: "http://worker-plane.test:3001" } };
 const secret = "sk-ant-oat01-0123456789abcdefghijklmnop";
@@ -572,20 +572,20 @@ test("a setup line sees the pod's environment but not the task document", async 
     [sessionTaskVariable]: "{}",
     SITE_VARIABLE: site,
   });
-  const directory = await mkdtemp(join(tmpdir(), "chuggy-setup-"));
   try {
-    const setup =
-      `printf "%s|%s|%s" "\${${workerTaskVariable}-unset}" ` +
-      `"\${${sessionTaskVariable}-unset}" "\${SITE_VARIABLE-unset}" > inherited`;
+    await inCheckout(async ({ directory }) => {
+      const setup =
+        `printf "%s|%s|%s" "\${${workerTaskVariable}-unset}" ` +
+        `"\${${sessionTaskVariable}-unset}" "\${SITE_VARIABLE-unset}" > inherited`;
 
-    await prepareWorker({ worker: { setup: [setup] } }, directory);
+      await prepareWorker({ worker: { setup: [setup] } }, directory);
 
-    assert.equal(
-      await readFile(join(directory, "inherited"), "utf8"),
-      `unset|unset|${site}`,
-    );
+      assert.equal(
+        await readFile(join(directory, "inherited"), "utf8"),
+        `unset|unset|${site}`,
+      );
+    });
   } finally {
-    await rm(directory, { recursive: true, force: true });
     for (const name of [
       workerTaskVariable,
       sessionTaskVariable,
@@ -593,6 +593,51 @@ test("a setup line sees the pod's environment but not the task document", async 
     ])
       delete process.env[name];
   }
+});
+
+/**
+ * Driven against a real checkout, because what `git add --all` takes is git's
+ * answer. Catches a lockfile `uv sync` writes, or a build directory, reaching
+ * the attempt's commit as if the agent had made it: a review held to the
+ * ticket's scope then fails every attempt for a file nothing asked for. The
+ * starred name catches a leftover excluded as a pattern wider than itself.
+ */
+test("what setup leaves untracked is excluded, and the work is not", async () => {
+  await inCheckout(async ({ remote, directory, base }) => {
+    const worker = {
+      files: [{ path: "provided/brief.md", content: "given\n" }],
+      setup: [
+        "printf lock > uv.lock && mkdir 'build dir' && printf o > 'build dir/out'",
+        "printf x > 'a*b' && printf more >> README.md",
+      ],
+    };
+
+    await prepareWorker({ worker }, directory);
+    const { stdout: seen } = await git(
+      "git",
+      ["status", "--porcelain", "--untracked-files=all"],
+      { cwd: directory },
+    );
+    await writeFile(join(directory, "axb"), "the agent's\n");
+    const source = await commitAndPushSource({
+      task: { ticket: 9, attempt: "opaque", worker },
+      repositoryId: "chuggy",
+      repository: remote,
+      base,
+      directory,
+      command: git,
+      environment: process.env,
+      secrets: [],
+    });
+
+    assert.equal(seen, " M README.md\n");
+    const { stdout: changed } = await git(
+      "git",
+      ["diff", "--name-only", base, source.commit],
+      { cwd: directory },
+    );
+    assert.deepEqual(changed.trim().split("\n"), ["README.md", "axb"]);
+  });
 });
 
 test("a run that died posts its figures and ends the attempt", async () => {

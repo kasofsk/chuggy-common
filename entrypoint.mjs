@@ -23,6 +23,12 @@
  * from, the bearer to fetch it under, and what the pool itself mounted. What
  * the plane answers is the document less that plane, so the plane is joined
  * back on and the attempt runs from admission onwards exactly as a pushed one.
+ *
+ * WHAT PREPARING THE WORKSPACE LEAVES IS NOT THE WORK. The files a block
+ * provisions and whatever its setup lines leave untracked, such as a lockfile a
+ * repository does not keep, are excluded in the clone before anything runs, so
+ * neither the attempt's commit nor what the agent sees as its changes carries
+ * them. A file setup changes that the repository tracks is still the work's.
  */
 
 import { execFile, spawn } from "node:child_process";
@@ -30,6 +36,7 @@ import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
 import {
   access,
+  appendFile,
   constants,
   mkdir,
   readFile,
@@ -172,6 +179,11 @@ function workspaceFile(directory, path) {
   return target;
 }
 
+/** `path` as a gitignore pattern naming it alone, from the repository's root. */
+function excludedPattern(path) {
+  return `/${path.replace(/[\\*?[]/gu, "\\$&").replace(/ $/u, "\\ ")}`;
+}
+
 /** The files and the setup lines a worker block asks for, in the workspace it runs in. */
 export async function prepareWorker(task, directory) {
   for (const file of task.worker?.files ?? []) {
@@ -185,6 +197,24 @@ export async function prepareWorker(task, directory) {
       env: workerStageEnvironment(process.env),
     });
   }
+  const { stdout: status } = await command(
+    "git",
+    ["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+    { cwd: directory },
+  );
+  const left = status
+    .split("\0")
+    .filter((entry) => entry.startsWith("?? ") && !entry.includes("\n"))
+    .map((entry) => excludedPattern(entry.slice(3)));
+  if (left.length === 0) return;
+  const { stdout: exclude } = await command(
+    "git",
+    ["rev-parse", "--git-path", "info/exclude"],
+    { cwd: directory },
+  );
+  const excludeFile = resolve(directory, exclude.trim());
+  await mkdir(dirname(excludeFile), { recursive: true });
+  await appendFile(excludeFile, `${left.join("\n")}\n`);
 }
 
 async function captureConfiguration(context, argv, init) {
