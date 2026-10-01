@@ -85,6 +85,7 @@ import {
   credentialScrub,
   credentialScrubbing,
   runEvidenceRecorder,
+  workerErrorPath,
 } from "./runEvidence.mjs";
 import { runConfigurationSnapshot } from "./snapshot.mjs";
 import { commitAndPushSource, resultDocument } from "./source.mjs";
@@ -793,7 +794,7 @@ export async function reportWorkerFailure(
     await upload(
       task,
       bearer,
-      ".chuggy/worker-error.txt",
+      workerErrorPath,
       Buffer.from(scrub(`${message}\n`)),
       request,
     );

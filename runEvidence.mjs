@@ -55,6 +55,9 @@ export const runTranscriptEventStringsMax = 4_096;
  * mangling ordinary text. */
 export const credentialScrubCharsMin = 16;
 
+/** Where an attempt that ended without a result leaves the text saying why. */
+export const workerErrorPath = ".chuggy/worker-error.txt";
+
 const credentialRedaction = "[redacted credential]";
 const turnsExhaustedSubtype = "error_max_turns";
 const runCostBasis = "List";

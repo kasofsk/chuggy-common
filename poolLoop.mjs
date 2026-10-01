@@ -1,7 +1,8 @@
 /**
- * The pool loop: each pass takes a token, reads what the backend holds, polls
- * the plane for the room left, stops what it is told to and places what it is
- * offered. chuggy's `src/interpreter/workerPoolClient.ts` is the same loop in
+ * The pool loop: each pass takes a token, reads what the backend holds, ends
+ * the attempts of workloads that ended without reporting, polls the plane for
+ * the room left, stops what it is told to and places what it is offered.
+ * chuggy's `src/interpreter/workerPoolClient.ts` is the same loop in
  * TypeScript, and a change to one is a change to both.
  *
  * Nothing is held between passes. What is running is read from the backend,
@@ -17,10 +18,15 @@
  * @typedef {{placed: "Placed"} | {placed: "Refused", evidence: string} | {placed: "Unavailable"}} WorkerPoolPlacement
  * @typedef {{stopped: "Stopped"} | {stopped: "Refused", evidence: string} | {stopped: "Unavailable", evidence: string}} WorkerPoolStopped
  *
+ * @typedef {object} WorkerPoolEnded a workload that ended of itself, which its harness may never have reported
+ * @property {Pick<WorkerPoolAssignment, "assignment" | "callbackUrl" | "bearer">} job
+ * @property {string} why the backend's own words, never the workload's, which may carry a secret no scrub here holds
+ *
  * @typedef {object} WorkerPoolBackend where the work runs, and the only record of what is running
  * @property {(assignment: WorkerPoolAssignment) => Promise<WorkerPoolPlacement>} place
  * @property {(assignment: string) => Promise<WorkerPoolStopped>} stop idempotent
  * @property {() => Promise<readonly string[]>} held
+ * @property {() => Promise<readonly WorkerPoolEnded[]>} ended each one once, after `held` stopped naming it; never one this pool stopped
  *
  * @typedef {{polled: "Reconciled", assignments: readonly WorkerPoolAssignment[], stop: readonly string[]}
  *   | {polled: "Stale"} | {polled: "Denied", evidence: string} | {polled: "Unavailable", evidence: string}} WorkerPoolPolled
@@ -29,6 +35,11 @@
  * @typedef {object} WorkerPoolPlane `Stale` is a token to replace; `Denied` a pool the plane will not serve
  * @property {(token: string, held: readonly string[], wanted: number) => Promise<WorkerPoolPolled>} poll
  * @property {(token: string, assignment: string, outcome: AssignmentOutcome) => Promise<WorkerPoolSettled>} settle
+ *
+ * @typedef {"Ended" | "Refused" | "Unavailable"} WorkerPoolJobEnded
+ *
+ * @typedef {object} WorkerPoolJobPlane `Refused` is an attempt no longer live, whose own report stands
+ * @property {(ended: WorkerPoolEnded) => Promise<WorkerPoolJobEnded>} end
  *
  * @typedef {{acquired: "Token", token: string} | {acquired: "Denied", evidence: string}
  *   | {acquired: "Unavailable", evidence: string}} WorkerPoolTokenAcquired
@@ -42,12 +53,13 @@
  * @property {number} outageBackoffMs the wait after a pass that met an outage
  * @property {number} passesMax the passes one run makes
  *
- * @typedef {{passed: "Reconciled", placed: number, stopped: number, refused: number}
+ * @typedef {{passed: "Reconciled", placed: number, stopped: number, refused: number, ended: number}
  *   | {passed: "Denied", evidence: string} | {passed: "Unavailable", evidence: string}} WorkerPoolPass
  *
  * @typedef {object} WorkerPoolClient
  * @property {WorkerPoolTokens} tokens
  * @property {WorkerPoolPlane} plane
+ * @property {WorkerPoolJobPlane} jobs
  * @property {WorkerPoolBackend} backend
  * @property {WorkerPoolClientSettings} settings
  */
@@ -101,6 +113,19 @@ async function workerPoolClientStopped(client, stop) {
 }
 
 /**
+ * Ends each attempt whose workload ended unreported, counting the ends the
+ * plane took. One it did not take is left to its lease.
+ *
+ * @param {WorkerPoolClient} client
+ */
+async function workerPoolClientEnded(client) {
+  let ended = 0;
+  for (const workload of await client.backend.ended())
+    if ((await client.jobs.end(workload)) === "Ended") ended += 1;
+  return ended;
+}
+
+/**
  * @param {WorkerPoolPlacement} placement
  * @returns {AssignmentOutcome}
  */
@@ -151,7 +176,8 @@ async function workerPoolClientPlaced(client, token, offered, running) {
 
 /**
  * One reconciliation pass. The room is asked before the stops are known, so a
- * stop this pass delivers frees room the next pass asks for.
+ * stop this pass delivers frees room the next pass asks for. The ended are
+ * ended before the poll, which may wait on the plane for work to offer.
  *
  * @param {WorkerPoolClient} client
  * @returns {Promise<WorkerPoolPass>}
@@ -160,6 +186,7 @@ export async function workerPoolClientPass(client) {
   const minted = await workerPoolClientToken(client);
   if (!("token" in minted)) return minted;
   const held = await client.backend.held();
+  const ended = await workerPoolClientEnded(client);
   const polled = await client.plane.poll(
     minted.token,
     held,
@@ -184,6 +211,7 @@ export async function workerPoolClientPass(client) {
     placed: tally.placed,
     stopped: stopped.stopped,
     refused: tally.refused,
+    ended,
   };
 }
 
@@ -198,7 +226,13 @@ export async function workerPoolClientPass(client) {
 export async function workerPoolClientRun(client, sleep) {
   checkedWorkerPoolClientSettings(client.settings);
   /** @type {WorkerPoolPass} */
-  let last = { passed: "Reconciled", placed: 0, stopped: 0, refused: 0 };
+  let last = {
+    passed: "Reconciled",
+    placed: 0,
+    stopped: 0,
+    refused: 0,
+    ended: 0,
+  };
   for (let pass = 0; pass < client.settings.passesMax; pass += 1) {
     last = await workerPoolClientPass(client);
     if (last.passed === "Denied") return last;

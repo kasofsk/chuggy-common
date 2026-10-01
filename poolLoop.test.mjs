@@ -22,6 +22,7 @@ const idle = {
   place: async () => ({ placed: "Placed" }),
   stop: async () => ({ stopped: "Stopped" }),
   held: async () => [],
+  ended: async () => [],
 };
 
 /** What a poll answers when it offers `assignments` and asks for `stop`. */
@@ -58,6 +59,7 @@ function client(parts) {
       invalidate: () => undefined,
     },
     plane: quiet,
+    jobs: { end: async () => "Ended" },
     backend: idle,
     settings,
     ...parts,
@@ -166,6 +168,7 @@ test("a pool at its own ceiling polls for none, and places nothing it is offered
     placed: 0,
     stopped: 0,
     refused: 0,
+    ended: 0,
   });
 });
 
@@ -193,7 +196,67 @@ test("a stopped assignment frees the room the same pass places into", async () =
     placed: 1,
     stopped: 1,
     refused: 0,
+    ended: 0,
   });
+});
+
+test("a workload that ended unreported has its attempt ended, each one once, counting the ends taken", async () => {
+  const workloads = ["crashed", "reported"].map((named) => ({
+    job: assignment(named),
+    why: `the ${named} container exited`,
+  }));
+  const asked = [];
+  const passed = await workerPoolClientPass(
+    client({
+      backend: { ...idle, ended: async () => workloads },
+      jobs: {
+        end: async (workload) => {
+          asked.push(workload);
+          return workload.job.assignment === "crashed" ? "Ended" : "Refused";
+        },
+      },
+    }),
+  );
+  assert.deepEqual(asked, workloads);
+  assert.deepEqual(passed, {
+    passed: "Reconciled",
+    placed: 0,
+    stopped: 0,
+    refused: 0,
+    ended: 1,
+  });
+});
+
+test("an ended workload found by this pass's read is ended before the poll waits", async () => {
+  const order = [];
+  await workerPoolClientPass(
+    client({
+      backend: {
+        ...idle,
+        held: async () => {
+          order.push("held");
+          return [];
+        },
+        ended: async () => [
+          { job: assignment("crashed"), why: "the container exited" },
+        ],
+      },
+      jobs: {
+        end: async () => {
+          order.push("end");
+          return "Ended";
+        },
+      },
+      plane: {
+        ...quiet,
+        poll: async () => {
+          order.push("poll");
+          return reconciled();
+        },
+      },
+    }),
+  );
+  assert.deepEqual(order, ["held", "end", "poll"]);
 });
 
 test("a fabric that could not take a stop places nothing further this pass", async () => {
@@ -264,6 +327,7 @@ test("a placement the plane never acknowledged is still placed", async () => {
     placed: 1,
     stopped: 0,
     refused: 0,
+    ended: 0,
   });
 });
 
@@ -287,6 +351,7 @@ test("a refused placement is reported as evidence rather than as unavailable", a
     placed: 0,
     stopped: 0,
     refused: 1,
+    ended: 0,
   });
 });
 
