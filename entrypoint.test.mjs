@@ -599,26 +599,50 @@ test("a setup line sees the pod's environment but not the task document", async 
  * Driven against a real checkout, because what `git add --all` takes is git's
  * answer. Catches a lockfile `uv sync` writes, or a build directory, reaching
  * the attempt's commit as if the agent had made it: a review held to the
- * ticket's scope then fails every attempt for a file nothing asked for. The
- * starred name catches a leftover excluded as a pattern wider than itself.
+ * ticket's scope then fails every attempt for a file nothing asked for.
+ *
+ * Each odd leftover sits beside a file of the agent's that a pattern wider
+ * than the leftover would swallow, so every escape, the anchor, and the names
+ * no pattern can hold are each the one thing between that file and the commit.
  */
 test("what setup leaves untracked is excluded, and the work is not", async () => {
+  const leftovers = {
+    "uv.lock": "lib/uv.lock",
+    "a*b": "axb",
+    "q?": "qz",
+    "x[a]": "xa",
+    "b\\x": "bx",
+    "trail ": "trail",
+    "#hash": undefined,
+    "!bang": undefined,
+    "build dir/out": undefined,
+  };
+  const unheld = { "a\nsrc": "lib/src/new.py", "stamp\r": "stamp" };
+  const created = (name) => `printf x > "$(printf '%s' '${name}')"`;
   await inCheckout(async ({ remote, directory, base }) => {
     const worker = {
       files: [{ path: "provided/brief.md", content: "given\n" }],
       setup: [
-        "printf lock > uv.lock && mkdir 'build dir' && printf o > 'build dir/out'",
-        "printf x > 'a*b' && printf more >> README.md",
+        "mkdir 'build dir'",
+        ...Object.keys({ ...leftovers, ...unheld }).map(created),
+        "printf more >> README.md",
       ],
     };
 
     await prepareWorker({ worker }, directory);
     const { stdout: seen } = await git(
       "git",
-      ["status", "--porcelain", "--untracked-files=all"],
+      ["status", "--porcelain", "-z", "--untracked-files=all"],
       { cwd: directory },
     );
-    await writeFile(join(directory, "axb"), "the agent's\n");
+    const agents = [
+      ...Object.values({ ...leftovers, ...unheld }).filter(Boolean),
+      "provided/notes.md",
+    ];
+    for (const path of agents) {
+      await mkdir(dirname(join(directory, path)), { recursive: true });
+      await writeFile(join(directory, path), "the agent's\n");
+    }
     const source = await commitAndPushSource({
       task: { ticket: 9, attempt: "opaque", worker },
       repositoryId: "chuggy",
@@ -630,13 +654,22 @@ test("what setup leaves untracked is excluded, and the work is not", async () =>
       secrets: [],
     });
 
-    assert.equal(seen, " M README.md\n");
+    assert.deepEqual(
+      seen.split("\0").filter(Boolean).sort(),
+      [
+        " M README.md",
+        ...Object.keys(unheld).map((name) => `?? ${name}`),
+      ].sort(),
+    );
     const { stdout: changed } = await git(
       "git",
-      ["diff", "--name-only", base, source.commit],
+      ["diff", "--name-only", "-z", base, source.commit],
       { cwd: directory },
     );
-    assert.deepEqual(changed.trim().split("\n"), ["README.md", "axb"]);
+    assert.deepEqual(
+      changed.split("\0").filter(Boolean).sort(),
+      ["README.md", ...agents, ...Object.keys(unheld)].sort(),
+    );
   });
 });
 

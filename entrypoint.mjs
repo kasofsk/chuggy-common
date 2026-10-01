@@ -24,11 +24,13 @@
  * the plane answers is the document less that plane, so the plane is joined
  * back on and the attempt runs from admission onwards exactly as a pushed one.
  *
- * WHAT PREPARING THE WORKSPACE LEAVES IS NOT THE WORK. The files a block
- * provisions and whatever its setup lines leave untracked, such as a lockfile a
- * repository does not keep, are excluded in the clone before anything runs, so
- * neither the attempt's commit nor what the agent sees as its changes carries
- * them. A file setup changes that the repository tracks is still the work's.
+ * WHAT PREPARING THE WORKSPACE LEAVES IS NOT THE WORK. Each file a block
+ * provisions, and whatever its setup lines leave untracked, such as a lockfile
+ * a repository does not keep or a directory it does not have, is excluded in
+ * the clone before anything runs. Neither the attempt's commit nor what the
+ * agent sees as its changes carries them, and a file the agent adds under such
+ * a directory goes with it. A tracked file setup changes is still the work's,
+ * as is a name with a line break or carriage return, which no pattern holds.
  */
 
 import { execFile, spawn } from "node:child_process";
@@ -179,18 +181,37 @@ function workspaceFile(directory, path) {
   return target;
 }
 
-/** `path` as a gitignore pattern naming it alone, from the repository's root. */
+/** `path` as a gitignore pattern naming it alone, from the repository's root;
+ * none where git would end the pattern inside the name. */
 function excludedPattern(path) {
+  if (/[\n\r]/u.test(path)) return undefined;
   return `/${path.replace(/[\\*?[]/gu, "\\$&").replace(/ $/u, "\\ ")}`;
+}
+
+/** `paths` excluded in the clone at `directory`, each by a pattern naming it alone. */
+async function excludedFromWork(directory, paths) {
+  const patterns = paths.flatMap((path) => excludedPattern(path) ?? []);
+  if (patterns.length === 0) return;
+  const { stdout: exclude } = await command(
+    "git",
+    ["rev-parse", "--git-path", "info/exclude"],
+    { cwd: directory },
+  );
+  const excludeFile = resolve(directory, exclude.trim());
+  await mkdir(dirname(excludeFile), { recursive: true });
+  await appendFile(excludeFile, `${patterns.join("\n")}\n`);
 }
 
 /** The files and the setup lines a worker block asks for, in the workspace it runs in. */
 export async function prepareWorker(task, directory) {
+  const provisioned = [];
   for (const file of task.worker?.files ?? []) {
     const target = workspaceFile(directory, file.path);
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, file.content, { flag: "wx" });
+    provisioned.push(relative(directory, target));
   }
+  await excludedFromWork(directory, provisioned);
   for (const setup of task.worker?.setup ?? []) {
     await command("/bin/sh", ["-eu", "-c", setup], {
       cwd: directory,
@@ -202,19 +223,13 @@ export async function prepareWorker(task, directory) {
     ["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
     { cwd: directory },
   );
-  const left = status
-    .split("\0")
-    .filter((entry) => entry.startsWith("?? ") && !entry.includes("\n"))
-    .map((entry) => excludedPattern(entry.slice(3)));
-  if (left.length === 0) return;
-  const { stdout: exclude } = await command(
-    "git",
-    ["rev-parse", "--git-path", "info/exclude"],
-    { cwd: directory },
+  await excludedFromWork(
+    directory,
+    status
+      .split("\0")
+      .filter((entry) => entry.startsWith("?? "))
+      .map((entry) => entry.slice(3)),
   );
-  const excludeFile = resolve(directory, exclude.trim());
-  await mkdir(dirname(excludeFile), { recursive: true });
-  await appendFile(excludeFile, `${left.join("\n")}\n`);
 }
 
 async function captureConfiguration(context, argv, init) {
