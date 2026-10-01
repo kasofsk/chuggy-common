@@ -601,28 +601,33 @@ test("a setup line sees the pod's environment but not the task document", async 
  * the attempt's commit as if the agent had made it: a review held to the
  * ticket's scope then fails every attempt for a file nothing asked for.
  *
- * Each odd leftover sits beside a file of the agent's that a pattern wider
- * than the leftover would swallow, so every escape, the anchor, and the name
- * no pattern can hold are each the one thing between that file and the commit.
+ * Each leftover lists the files of the agent's that a pattern wider than it
+ * would swallow, and must itself stay out of both the status and the commit,
+ * so every escape, the anchor and the skipped name each stand between some
+ * file and where it belongs. The provisioned path is spelled as a
+ * configuration may spell it, and a file the agent adds under a directory
+ * setup made goes with that directory.
  */
 test("what setup leaves untracked is excluded, and the work is not", async () => {
   const leftovers = {
-    "uv.lock": "lib/uv.lock",
-    "a*b": "axb",
-    "q?": "qz",
-    "x[a]": "xa",
-    "b\\x": "bx",
-    "trail ": "trail",
-    "#hash": undefined,
-    "!bang": undefined,
-    "build dir/out": undefined,
-    "stamp\r": "stamp",
+    "uv.lock": ["lib/uv.lock"],
+    "a*b": ["axb"],
+    "q?": ["qz"],
+    "x[a]": ["xa"],
+    "b\\x": ["bx"],
+    "trail ": ["trail"],
+    "y  ": ["y "],
+    "stamp\r": ["stamp", "stampx"],
+    "#hash": [],
+    "!bang": [],
+    "build dir/out": [],
   };
-  const unheld = { "a\nsrc": "lib/src/new.py" };
+  const unheld = { "a\nsrc": ["lib/src/new.py"] };
+  const swallowed = ["build dir/agent.txt"];
   const created = (name) => `printf x > "$(printf '%s' '${name}')"`;
   await inCheckout(async ({ remote, directory, base }) => {
     const worker = {
-      files: [{ path: "provided/brief.md", content: "given\n" }],
+      files: [{ path: "./provided/brief.md", content: "given\n" }],
       setup: [
         "mkdir 'build dir'",
         ...Object.keys({ ...leftovers, ...unheld }).map(created),
@@ -637,10 +642,10 @@ test("what setup leaves untracked is excluded, and the work is not", async () =>
       { cwd: directory },
     );
     const agents = [
-      ...Object.values({ ...leftovers, ...unheld }).filter(Boolean),
+      ...Object.values({ ...leftovers, ...unheld }).flat(),
       "provided/notes.md",
     ];
-    for (const path of agents) {
+    for (const path of [...agents, ...swallowed]) {
       await mkdir(dirname(join(directory, path)), { recursive: true });
       await writeFile(join(directory, path), "the agent's\n");
     }

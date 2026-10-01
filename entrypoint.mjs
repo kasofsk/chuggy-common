@@ -30,7 +30,8 @@
  * the clone before anything runs. Neither the attempt's commit nor what the
  * agent sees as its changes carries them, and a file the agent adds under such
  * a directory goes with it. A tracked file setup changes is still the work's,
- * as is a name with a line break, which no pattern holds.
+ * as is a name with a line break, which no pattern holds, and a path the
+ * repository's own `.gitignore` takes back with `!`, which outranks this.
  */
 
 import { execFile, spawn } from "node:child_process";
