@@ -13,6 +13,13 @@
  * would be a second and weaker authority for the tenant, project and session the
  * bearer already names.
  *
+ * EVERY STRING IS SCRUBBED BEFORE IT IS WEIGHED. The store is opened with the
+ * scrub its session holds, and every string value in an entry passes through
+ * it as the runtime holds it, unescaped, before any clip: the bound then counts
+ * what is posted, and no cut falls inside a credential and leaves a head the
+ * scrub no longer knows. A signed block is scrubbed too, because a credential
+ * kept is worse than a resume refused, and the pod's log says where.
+ *
  * BATCHES ARE FROZEN WHEN THEY ARE NUMBERED. Once entries are given a number the
  * bytes never change: a batch the plane did not acknowledge is re-sent under the
  * same number with the same body, which is what lets the plane deduplicate by
@@ -495,24 +502,45 @@ function growSites(clipped, cut) {
  * escaping and the copies are what a line is charged for and neither is visible
  * in one.
  */
-function storedLine(entry) {
-  const line = JSON.stringify(entry);
-  if (lineBytes(line) <= sessionStoreBatchBytesMax) return { line };
+function storedLine(entry, scrub) {
+  const { line, signed } = scrubbedLine(entry, scrub);
+  if (lineBytes(line) <= sessionStoreBatchBytesMax) return { line, signed };
   const clipped = JSON.parse(line);
   const cut = cutSites(clipped);
-  if (cut.length === 0) return { line };
+  if (cut.length === 0) return { line, signed };
   growSites(clipped, cut);
-  return { line: JSON.stringify(clipped), cut: cut.length };
+  return { line: JSON.stringify(clipped), cut: cut.length, signed };
 }
 
-/** The lines this call still owes the store, in order, with the settled ones dropped. */
-function owedLines(state, entries) {
+/** An entry as a line with every string value scrubbed, and whether that changed a signed block. */
+function scrubbedLine(entry, scrub) {
+  let signed = false;
+  const line = JSON.stringify(entry, function (_key, value) {
+    if (typeof value !== "string") return value;
+    const scrubbed = scrub(value);
+    if (scrubbed !== value && signedBlock(this)) signed = true;
+    return scrubbed;
+  });
+  return { line, signed };
+}
+
+/**
+ * The lines this call still owes the store, in order, with the settled ones
+ * dropped. A line whose signed block the scrub changed is said so in the pod's
+ * log, naming where it is and nothing it holds, because the resume it breaks
+ * comes later and somewhere else.
+ */
+function owedLines(state, entries, held, stream) {
   const owed = [];
   for (const entry of entries) {
     const uuid = entryUuid(entry);
     if (uuid !== undefined && state.confirmed.has(uuid)) continue;
-    const { line, cut } = storedLine(entry);
+    const { line, cut, signed } = storedLine(entry, held.scrub);
     if (state.pending?.lines.has(line)) continue;
+    if (signed)
+      held.warn(
+        `the session store scrubbed a credential out of a signed block of ${stream}, ${uuid === undefined ? "in an entry with no uuid" : `entry ${uuid}`}; a later resume over it will be refused\n`,
+      );
     owed.push({ line, uuid, cut });
   }
   return owed;
@@ -592,7 +620,7 @@ async function appendOnce(held, stream, entries) {
   // Owed before the resend, because what the pending batch already carries is
   // read off it; planned after, because planning may raise on an entry nothing
   // can post and the unacknowledged batch is still owed either way.
-  const owed = owedLines(state, entries);
+  const owed = owedLines(state, entries, held, stream);
   if (resent !== undefined) {
     await sendBatch(held, stream, resent);
     confirm(held, state, stream, resent);
@@ -682,13 +710,28 @@ async function listStreamSubkeys(held, sessionId) {
     .map((stream) => stream.slice(prefix.length));
 }
 
-/** One session's store, held open for the life of the pod, retained unless it is a fork's. */
+/**
+ * One session's store, held open for the life of the pod, retained unless it
+ * is a fork's. It has no scrub of its own to fall back on, so one not handed
+ * is refused rather than replaced by none.
+ */
 export function sessionStoreAdapter(task, bearer, options = {}) {
-  const { request = sessionRequest, retain = true } = options;
+  const {
+    request = sessionRequest,
+    retain = true,
+    scrub,
+    warn = (text) => process.stderr.write(text),
+  } = options;
+  if (typeof scrub !== "function")
+    throw new TypeError(
+      "a session store is opened with the scrub its session holds",
+    );
   const held = {
     streams: new Map(),
     turn: { first: undefined, last: undefined },
     call: (path, init) => request(task, bearer, path, init),
+    scrub,
+    warn,
   };
   let chain = Promise.resolve();
   return {

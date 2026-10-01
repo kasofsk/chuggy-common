@@ -260,6 +260,14 @@ const answeredTurn = sessionRun(() => [
   result("success", { result: "ok" }),
 ]);
 
+/** A session's store over `request`, whose wire is what this suite asks about. */
+function sessionStoreOver(request) {
+  return sessionStoreAdapter(sessionTask, bearer, {
+    request,
+    scrub: (text) => text,
+  });
+}
+
 /** The caller of each session route, reached through `sessionRequest`. */
 const sessionCallers = {
   facts: answeredTurn,
@@ -285,18 +293,13 @@ const sessionCallers = {
   turnFailure: sessionRun(() => [result("error_during_execution")]),
   held: sessionRun(() => [rejection, result("error_during_execution")]),
   storeStreams: (request) =>
-    sessionStoreAdapter(sessionTask, bearer, { request }).listSubkeys({
-      sessionId: "runtime-1",
-    }),
+    sessionStoreOver(request).listSubkeys({ sessionId: "runtime-1" }),
   storeBatch: (request) =>
-    sessionStoreAdapter(sessionTask, bearer, { request }).append(
-      { sessionId: "runtime-1" },
-      [{ uuid: "a", type: "assistant" }],
-    ),
+    sessionStoreOver(request).append({ sessionId: "runtime-1" }, [
+      { uuid: "a", type: "assistant" },
+    ]),
   storePage: (request) =>
-    sessionStoreAdapter(sessionTask, bearer, { request }).load({
-      sessionId: "runtime-1",
-    }),
+    sessionStoreOver(request).load({ sessionId: "runtime-1" }),
   credential: (request) =>
     planeCredential({
       task: sessionTask,
@@ -488,11 +491,14 @@ test("every status a job route the pod calls may answer is one the pod has a nam
   );
 });
 
+/** The session routes the pool holding a session calls rather than its pod, which `poolSessionPlane.test.mjs` holds to their statuses. */
+const poolSessionRoutes = ["ended"];
+
 test("every status a session route the pod calls may answer is one the pod has a named reaction to", async () => {
   await heldToMap(
     planes.session,
     sessionReactions,
-    [],
+    poolSessionRoutes,
     sessionCallers,
     sessionSuccess,
     sessionRequest,
@@ -544,8 +550,8 @@ test("the task an envelope's pod fetches is the pushed document, less what nothi
     "the pushed document leaves a field out, which the read could drop unseen",
   );
   assert.deepEqual(fetched, {
-    ...pushed,
-    workerPlane: { url: envelope.callbackUrl },
+    mode: "Work",
+    task: { ...pushed, workerPlane: { url: envelope.callbackUrl } },
   });
   assert.deepEqual(
     plane.asked.map(({ route }) => route),
@@ -580,6 +586,13 @@ test("no field a task document names is one a pool envelope names", () => {
   );
 });
 
+/** A session's task as a pod's launcher writes it, less what a pool-held session's answer adds. */
+const sessionTaskBare = Object.fromEntries(
+  Object.entries(sessionTask).filter(
+    ([field]) => !["api", "bounds", "workerPlane"].includes(field),
+  ),
+);
+
 /**
  * Each way the task route may refuse an envelope's pod, and whether the plane
  * can still take the attempt's end: not where it refuses this pod's release,
@@ -603,10 +616,10 @@ const taskRefusals = [
     settles: true,
   },
   {
-    what: "a session's task",
+    what: "a session's task without the launch facts a pool-held one carries",
     status: 200,
     body: sessionTaskAnswerSchema.parse({
-      ...sessionTask,
+      ...sessionTaskBare,
       capabilities: leadRoster,
       credentialSlot: claudeAgent.credential,
       authority: fetchedAnswer.authority,

@@ -6,17 +6,20 @@
  * console user has: it goes over HTTP to the API under the pod's own session
  * bearer, the API resolves that bearer to the session's principal and authorizes
  * it through the project membership exactly as it authorizes a human's, and the
- * operation row records which session issued it. A decision tool
- * (`./leadDecision.mjs`) writes nothing at all.
+ * operation row records which session issued it. The API also confines that
+ * bearer to its own session's tenant and project, whatever else the membership
+ * reaches, so every project tool's route is one of that project's. A decision
+ * tool (`./leadDecision.mjs`) writes nothing at all.
  *
  * A ROSTER IS NOT A CONTROL. `allowedTools` and `disallowedTools` are enforced
  * by the agent runtime inside the pod, and the pod is the thing being
- * controlled. The two controls that are not the pod's are the membership,
- * enforced by the database when it authorizes a project access, and the
- * decision controls the selector applies to a finished turn — and the second is
- * post-hoc: the tool has already run and its command has already landed, and
- * what the selector refuses is the decision that used it. A control described as
- * stronger than it is, is worse than none.
+ * controlled. The controls that are not the pod's are the membership, enforced
+ * by the database when it authorizes a project access, the API's confinement
+ * of the bearer to its own project, and the decision controls the selector
+ * applies to a finished turn — and the last is post-hoc: the tool has already
+ * run and its command has already landed, and what the selector refuses is the
+ * decision that used it. A control described as stronger than it is, is worse
+ * than none.
  *
  * A READ ANSWERS ONE PAGE, WHOLE OR NOT AT ALL. Nothing here walks a
  * collection: the caller's page bound and cursor go through, the route's own
@@ -518,19 +521,6 @@ export const chuggyProjectTools = [
       read(
         context,
         projectPath(context, "ticketAgenticRefusals", { ticket: args.ticket }),
-      ),
-  },
-  {
-    name: "read_projects",
-    description: "One page of the projects this session's membership can see.",
-    shape: (z) => ({
-      cursor: identity(z).optional(),
-      limit: limit(z, nativeHttpPageItemsMax),
-    }),
-    call: (context, { cursor, limit: pageLimit }) =>
-      read(
-        context,
-        `${routeFilled(chuggyToolRoutes.projects, {})}${search({ cursor, limit: pageLimit })}`,
       ),
   },
   {

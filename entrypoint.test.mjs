@@ -24,6 +24,7 @@ import { workerCheckCommands } from "./checks.mjs";
 import { claudeAgent } from "./claude.mjs";
 import {
   envelopeLaunch,
+  envelopeTask,
   prepareWorker,
   publishWorkerResult,
   reportWorkerFailure,
@@ -35,10 +36,15 @@ import {
   workerRun,
   workerWorkspace,
 } from "./entrypoint.mjs";
-import { envelope, fetchedAnswer } from "./envelope.fixture.mjs";
+import {
+  envelope,
+  fetchedAnswer,
+  poolHeldSessionAnswer,
+} from "./envelope.fixture.mjs";
 import { planeFetch, planes } from "./plane.fixture.mjs";
 import { workerCredentialPath } from "./planeCredential.mjs";
 import { credentialScrub, runEvidenceRecorder } from "./runEvidence.mjs";
+import { facts } from "./sessionHarness.fixture.mjs";
 import { commitAndPushSource, ticketBranch } from "./source.mjs";
 
 const task = { workerPlane: { url: "http://worker-plane.test:3001" } };
@@ -271,10 +277,11 @@ test("a commanded work task without network or workspace write is refused", asyn
  * A worker plane a launched pod reaches over HTTP, answering through the
  * contract's own tables: `answer(route)` is what each route answers, `asked`
  * is every route in order with the bearer it was asked under, and `requests`
- * is each one as the plane read it, its body included.
+ * is each one as the plane read it, its body included. `wire` is the job
+ * plane's unless a case names another.
  */
-async function servedPlane(answer) {
-  const plane = planeFetch(planes.job, answer);
+async function servedPlane(answer, wire = planes.job) {
+  const plane = planeFetch(wire, answer);
   const asked = [];
   const server = createServer(async (request, response) => {
     const chunks = [];
@@ -397,6 +404,55 @@ test("a pod launched with an envelope fetches its task and runs it under the env
   } finally {
     await plane.close();
     await rm(minted, { recursive: true, force: true });
+  }
+});
+
+/** The routes a pool-held session's pod reaches: the task route its envelope's bearer asks first, and then the session plane's. */
+const poolHeldSessionWire = {
+  ...planes.session,
+  routes: { task: planes.job.routes.task, ...planes.session.routes },
+  answers: { task: planes.job.answers.task, ...planes.session.answers },
+};
+
+/**
+ * Catches an envelope's pod that refuses a pool-held session's task, runs it
+ * as work, or runs it anywhere but on the envelope's plane under its bearer
+ * with the credential the pool mounted. The credential is missing, so the
+ * session stops at its token, before any runtime is opened.
+ */
+test("a pod launched with an envelope whose task is a pool-held session runs that session", async () => {
+  const plane = await servedPlane(
+    (route) =>
+      route === "task"
+        ? { status: 200, body: poolHeldSessionAnswer }
+        : { status: 200, body: facts },
+    poolHeldSessionWire,
+  );
+  const root = await mkdtemp(join(tmpdir(), "chuggy-pool-session-"));
+  const providerCredentialFile = join(root, "claude-code");
+  try {
+    const ran = await launched({
+      [workerTaskVariable]: JSON.stringify({
+        ...envelope,
+        callbackUrl: plane.url,
+        workspace: root,
+        providerCredentialFile,
+      }),
+    });
+
+    assert.equal(ran.code, 1);
+    assert.ok(ran.stderr.includes(providerCredentialFile), ran.stderr);
+    assert.ok(!ran.stderr.includes(envelope.bearer));
+    assert.deepEqual(
+      plane.asked,
+      ["task", "facts"].map((route) => ({
+        route,
+        authorization: `Bearer ${envelope.bearer}`,
+      })),
+    );
+  } finally {
+    await plane.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -541,8 +597,10 @@ test("an envelope's pod clones into the workspace its envelope names", async () 
   const cloned = [];
   const mintedDirectory = await mkdtemp(join(tmpdir(), "chuggy-minted-"));
   try {
+    const served = { ...envelope, callbackUrl: plane.url };
+    const { task } = await envelopeTask(served);
     await assert.rejects(
-      workerAttempt(envelopeLaunch({ ...envelope, callbackUrl: plane.url }), {
+      workerAttempt(envelopeLaunch(served, task), {
         minted: mintedDirectory,
         write: async () => undefined,
         clone: async (_repository, _base, into) => {
@@ -1377,18 +1435,17 @@ test("a work attempt whose commit carries its Claude credential fails and pushes
       }
     });
     try {
-      const failed = await workerAttempt(
-        envelopeLaunch({
-          ...envelope,
-          callbackUrl: plane.url,
-          providerCredentialFile,
-        }),
-        {
-          minted: root,
-          write: async () => undefined,
-          clone: async () => directory,
-        },
-      ).then(
+      const served = {
+        ...envelope,
+        callbackUrl: plane.url,
+        providerCredentialFile,
+      };
+      const { task } = await envelopeTask(served);
+      const failed = await workerAttempt(envelopeLaunch(served, task), {
+        minted: root,
+        write: async () => undefined,
+        clone: async () => directory,
+      }).then(
         () => new Error("pushed"),
         (error) => error,
       );

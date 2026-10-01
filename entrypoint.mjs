@@ -23,6 +23,8 @@
  * from, the bearer to fetch it under, and what the pool itself mounted. What
  * the plane answers is the document less that plane, so the plane is joined
  * back on and the attempt runs from admission onwards exactly as a pushed one.
+ * A session's task, which a pool holds only with the site's API, bounds and
+ * model on it, runs as a session pod's own launch does (`./session.mjs`).
  *
  * WHAT PREPARING THE WORKSPACE LEAVES IS NOT THE WORK. Each file a block
  * provisions, and whatever its setup lines leave untracked, such as a lockfile
@@ -581,11 +583,11 @@ function envelopeTaskRefused(refused, settles) {
 }
 
 /**
- * The task the task route answered, less its kind, or why there is none to
- * run. The plane cannot take the end where it refuses this pod's release, since
- * it then refuses every route alike, nor where the bearer is a session's, which
- * the job plane never takes; the task route's own stop shares the status the
- * release refusal comes on.
+ * The work task the task route answered, less its kind, or the session's
+ * answer whole, or why there is none to run. The plane cannot take the end
+ * where it refuses this pod's release, since it then refuses every route
+ * alike, nor where the bearer is a session's, which the job plane never takes;
+ * the task route's own stop shares the status the release refusal comes on.
  */
 async function envelopeTaskRead(response) {
   if (response.status === taskRouteAbsent)
@@ -615,12 +617,13 @@ async function envelopeTaskRead(response) {
       true,
     );
   const { kind, ...task } = answer.data;
-  if (kind !== workKind)
-    return envelopeTaskRefused(
-      `the worker plane answered a ${kind} session's task, which an envelope's pod does not run`,
-      false,
-    );
-  return { task };
+  if (kind === workKind) return { task };
+  return answer.data.model === undefined
+    ? envelopeTaskRefused(
+        `the worker plane answered a ${kind} session's task without the API, bounds and model a pool-held session is answered with`,
+        false,
+      )
+    : { session: answer.data };
 }
 
 /** One refused attempt ended as a crashed run's is, with the refusal as its error text. */
@@ -633,9 +636,10 @@ async function envelopeTaskSettled(plane, bearer, request, message) {
 }
 
 /**
- * The task a pool's envelope stands for: fetched from the plane it names under
- * the bearer it carries, with that plane joined back on as the one field a
- * pushed document carries and the answer does not.
+ * The task a pool's envelope stands for, and which mode runs it: fetched from
+ * the plane it names under the bearer it carries. A work task has that plane
+ * joined back on as the one field a pushed document carries and the answer
+ * does not; a session's answer is the session's launch to assemble.
  *
  * A REFUSAL ENDS THE ATTEMPT NOW RATHER THAN AT ITS LEASE. A pod that only
  * exited would leave the attempt running until its lease lapsed and the reaper
@@ -652,7 +656,10 @@ export async function envelopeTask(envelope, request = workerRequest) {
       { settled: [taskRouteAbsent, contractVersionRefusalStatus] },
     ),
   );
-  if (read.task !== undefined) return { ...read.task, ...plane };
+  if (read.task !== undefined)
+    return { mode: "Work", task: { ...read.task, ...plane } };
+  if (read.session !== undefined)
+    return { mode: "Session", answer: read.session };
   if (read.settles)
     await envelopeTaskSettled(plane, envelope.bearer, request, read.refused);
   throw new Error(read.refused);
@@ -694,17 +701,17 @@ function documentLaunch(document) {
 }
 
 /**
- * What a pool's envelope stands for in their place. Its `timeoutSecsMax` is
- * the pool's to enforce, as a Kubernetes pool does at its pod's deadline, and
- * its `outputBytesMax` names no channel, every one this pod writes to the
- * plane being bounded by the contract already; so neither is read here. Its
- * `bearer` is held from the start, so a task refused at admission still ends
- * its attempt.
+ * What a pool's envelope stands for in their place, given the work task it was
+ * answered. Its `timeoutSecsMax` is the pool's to enforce, as a Kubernetes
+ * pool does at its pod's deadline, and its `outputBytesMax` names no channel,
+ * every one this pod writes to the plane being bounded by the contract
+ * already; so neither is read here. Its `bearer` is held from the start, so a
+ * task refused at admission still ends its attempt.
  */
-export function envelopeLaunch(envelope) {
+export function envelopeLaunch(envelope, task) {
   return {
     bearer: envelope.bearer,
-    task: () => envelopeTask(envelope),
+    task: async () => task,
     given: async (agent) => ({
       credentialFiles: envelopeCredentialFiles(envelope, agent),
       mounted:
@@ -932,10 +939,16 @@ function envelopeRead(value) {
 
 async function main() {
   const carried = parsed(workerTaskVariable);
-  await workerAttempt(
-    workerTaskCarrier(carried) === "Document"
-      ? documentLaunch(carried)
-      : envelopeLaunch(envelopeRead(carried)),
+  if (workerTaskCarrier(carried) === "Document")
+    return workerAttempt(documentLaunch(carried));
+  const envelope = envelopeRead(carried);
+  const fetched = await envelopeTask(envelope);
+  if (fetched.mode === "Work")
+    return workerAttempt(envelopeLaunch(envelope, fetched.task));
+  const { sessionEnvelopeServices, sessionMain } =
+    await import("./session.mjs");
+  process.exitCode = await sessionMain(
+    sessionEnvelopeServices(envelope, fetched.answer),
   );
 }
 

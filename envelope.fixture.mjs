@@ -2,13 +2,15 @@
  * The two things `CHUG_WORKER_TASK` may carry, as the suites hold them against
  * each other: the document a pushed pod is launched with, the answer the task
  * route gives for the same attempt, and a pool's envelope naming the same
- * plane. The document and the answer are read under the contract's schemas;
- * that a launcher writes such a document, and the route answers it, is the
- * server's suites' to hold.
+ * plane; and the answer that route gives a pool-held session's pod instead.
+ * The documents and the answers are read under the contract's schemas; that a
+ * launcher writes such a document, and the route answers it, is the server's
+ * suites' to hold.
  */
 
 import {
   poolEnvelopeSchema,
+  sessionTaskAnswerSchema,
   workTaskAnswerSchema,
   workTaskDocumentSchema,
 } from "@chuggy/worker-contract/workerTask";
@@ -74,4 +76,38 @@ export const envelope = poolEnvelopeSchema.parse({
   workspace: "/pool/workspace",
   timeoutSecsMax: 1_800,
   outputBytesMax: 4_096,
+});
+
+/** What the task route answers a pool-held lead's pod: its task, with the site's API, bounds and model beside it. */
+export const poolHeldSessionAnswer = sessionTaskAnswerSchema.parse({
+  tenant: "vteng",
+  project: "chuggy",
+  session: "session-1",
+  kind: "Lead",
+  attempt: "attempt-1",
+  generation: 1,
+  capabilities: [
+    "RepositoryRead",
+    "ProjectRead",
+    "DraftAuthor",
+    "LeadDecision",
+  ],
+  credentialSlot: "claude-code",
+  authority: {
+    tools: [],
+    credentials: [],
+    network: true,
+    filesystem: "ReadWorkspace",
+    mayCompleteTask: false,
+  },
+  api: { url: "http://chuggy-api.pool.test:3000" },
+  bounds: {
+    mailboxPollMs: 1,
+    idleMs: 1,
+    resultDrainMs: 50,
+    loadTimeoutMs: 2_000,
+    turnsMax: 30,
+    budgetUsd: 3,
+  },
+  model: "pool-model",
 });

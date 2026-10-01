@@ -17,6 +17,7 @@ const bearer = "0123456789abcdef".repeat(4);
 
 /** A workload that ended unreported, as a backend names it. */
 const ended = {
+  kind: "Job",
   job: {
     assignment: "assignment-one",
     callbackUrl: "https://worker-plane.invalid/v1/ticket-execution",

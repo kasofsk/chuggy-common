@@ -8,6 +8,7 @@ import {
   sessionStoreStreamCharsMax,
 } from "@chuggy/worker-contract/sessionPlane";
 
+import { credentialScrub } from "./runEvidence.mjs";
 import {
   sessionStoreAdapter,
   sessionStoreClipBudgetBytes,
@@ -332,7 +333,11 @@ function storeOf(answer, mode = {}) {
   const plane = planeOf(answer);
   return {
     ...plane,
-    store: sessionStoreAdapter(task, "chgs_b", { ...plane, ...mode }),
+    store: sessionStoreAdapter(task, "chgs_b", {
+      ...plane,
+      scrub: (text) => text,
+      ...mode,
+    }),
   };
 }
 
@@ -1316,6 +1321,112 @@ test("an entry at the bound is posted as the bytes it arrived as", async () => {
     "the entry at the bound was not the batch",
   );
   assert.equal(written[0].body, `${JSON.stringify(given)}\n`);
+});
+
+/** What a session holds and would never post: its runtime's token, its bearer and a minted password. */
+const sessionSecrets = [
+  "sk-ant-oat01-0123456789abcdefghijklmnop",
+  "chgs_0123456789abcdef0123456789abcdef",
+  "ghs_0123456789abcdefghijklmnopqrstuvwxyz",
+];
+
+function scrubbingStore(warned = []) {
+  return storeOf(undefined, {
+    scrub: credentialScrub(sessionSecrets),
+    warn: (text) => warned.push(text),
+  });
+}
+
+/** An assistant entry whose one block is `block`. */
+function blockEntry(uuid, block) {
+  return {
+    ...(uuid === undefined ? {} : { uuid }),
+    type: "assistant",
+    message: { role: "assistant", content: [block] },
+  };
+}
+
+test("a credential scrubbed out of a signed block is said in the pod's log, by where it is and nothing it held", async () => {
+  const warned = [];
+  const { calls, store } = scrubbingStore(warned);
+  const thought = `the token is ${sessionSecrets[0]}`;
+  const signed = (thinking) => ({
+    type: "thinking",
+    thinking,
+    signature: "EqQBCkYIBxgCKkA",
+  });
+
+  await store.append({ sessionId: "s" }, [
+    blockEntry("plain", { type: "text", text: thought }),
+    blockEntry("untouched", signed("nothing held here")),
+    blockEntry("signed", signed(thought)),
+    blockEntry(undefined, signed(thought)),
+  ]);
+
+  assert.deepEqual(warned, [
+    "the session store scrubbed a credential out of a signed block of s, entry signed; a later resume over it will be refused\n",
+    "the session store scrubbed a credential out of a signed block of s, in an entry with no uuid; a later resume over it will be refused\n",
+  ]);
+  assert.equal(bodies(calls).length, 1);
+});
+
+test("every string an entry carries is posted scrubbed of what its session holds", async () => {
+  const { calls, store } = scrubbingStore();
+  const echoed = sessionSecrets.map((secret) => `echo ${secret}`).join("\n");
+
+  await store.append({ sessionId: "s" }, [
+    bashEntry(echoed),
+    {
+      uuid: "b",
+      type: "assistant",
+      lines: [`pushed with ${sessionSecrets[2]}`],
+    },
+  ]);
+
+  const [{ body }] = bodies(calls);
+  for (const secret of sessionSecrets)
+    assert.ok(!body.includes(secret), `${secret.slice(0, 5)} was posted`);
+  const [result, listed] = postedEntries(calls);
+  assert.equal(
+    result.toolUseResult.stdout,
+    sessionSecrets.map(() => "echo [redacted credential]").join("\n"),
+  );
+  assert.deepEqual(listed.lines, ["pushed with [redacted credential]"]);
+});
+
+/**
+ * A clip keeps a head of each copy, and a head can end anywhere, so the text
+ * is shifted a character at a time across the length of one credential: if
+ * the cut came first, one of these would leave a long piece of it standing.
+ */
+test("a credential a clip would cut through is scrubbed before the cut", async () => {
+  const [secret] = sessionSecrets;
+  for (let shift = 0; shift <= secret.length; shift += 1) {
+    const { calls, store } = scrubbingStore();
+    const stdout = `${"x".repeat(shift)}${`${secret} `.repeat(4_000)}`;
+
+    await store.append({ sessionId: "s" }, [bashEntry(stdout)]);
+
+    const [{ body }] = bodies(calls);
+    assert.ok(body.includes("the session store clipped"), "nothing was cut");
+    assert.ok(
+      !body.includes(secret.slice(0, 8)),
+      `shifted ${String(shift)}, a cut left a piece of the credential`,
+    );
+  }
+});
+
+test("a store opened with no scrub, or with no options at all, is refused before it posts anything", () => {
+  const plane = planeOf();
+  for (const opened of [
+    () => sessionStoreAdapter(task, "chgs_b", { request: plane.request }),
+    () => sessionStoreAdapter(task, "chgs_b"),
+  ])
+    assert.throws(opened, {
+      name: "TypeError",
+      message: "a session store is opened with the scrub its session holds",
+    });
+  assert.deepEqual(plane.calls, []);
 });
 
 test("a clipped entry loads back off the store as an entry", async () => {

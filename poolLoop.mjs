@@ -5,6 +5,11 @@
  * chuggy's `src/interpreter/workerPoolClient.ts` is the same loop in
  * TypeScript, and a change to one is a change to both.
  *
+ * A JOB AND A SESSION ARE COUNTED APART. Each kind has its own ceiling, its
+ * own room on the poll and its own offers, so a session never takes a job's
+ * room nor a job a session's, and a pool that names no session ceiling asks
+ * for none. Each kind's end is reported to its own plane.
+ *
  * Nothing is held between passes. What is running is read from the backend,
  * so a restarted loop reconciles the work its predecessor placed, and a
  * settlement is never retried because the next poll's `held` renews the lease.
@@ -13,33 +18,52 @@
 
 /**
  * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolAssignment} WorkerPoolAssignment
+ * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolSessionAssignment} WorkerPoolSessionAssignment
  * @typedef {import("@chuggy/worker-contract/workerPool").AssignmentOutcome} AssignmentOutcome
+ * @typedef {import("@chuggy/worker-contract/sessionPlane").SessionContainerEnd} SessionContainerEnd
+ *
+ * @typedef {"Job" | "Session"} WorkerPoolWorkloadKind
+ * @typedef {{assignment: string, kind: WorkerPoolWorkloadKind}} WorkerPoolHeld
+ * @typedef {Pick<WorkerPoolAssignment, "assignment" | "callbackUrl" | "bearer">} WorkerPoolAttempt what an assignment's own plane is reached at, and under
  *
  * @typedef {{placed: "Placed"} | {placed: "Refused", evidence: string} | {placed: "Unavailable"}} WorkerPoolPlacement
  * @typedef {{stopped: "Stopped"} | {stopped: "Refused", evidence: string} | {stopped: "Unavailable", evidence: string}} WorkerPoolStopped
  *
- * @typedef {object} WorkerPoolEnded a workload that ended of itself, which its harness may never have reported
- * @property {Pick<WorkerPoolAssignment, "assignment" | "callbackUrl" | "bearer">} job
+ * @typedef {object} WorkerPoolJobEnd a job that ended of itself, which its harness may never have reported
+ * @property {"Job"} kind
+ * @property {WorkerPoolAttempt} job
  * @property {string} why the backend's own words, never the workload's, which may carry a secret no scrub here holds
  *
+ * @typedef {object} WorkerPoolSessionEnd a session whose container ended, which only the pool holding it sees
+ * @property {"Session"} kind
+ * @property {WorkerPoolAttempt} session
+ * @property {SessionContainerEnd} phase `Succeeded` for a container that exited cleanly, `Failed` for any other end
+ *
+ * @typedef {WorkerPoolJobEnd | WorkerPoolSessionEnd} WorkerPoolEnded
+ *
  * @typedef {object} WorkerPoolBackend where the work runs, and the only record of what is running
- * @property {(assignment: WorkerPoolAssignment) => Promise<WorkerPoolPlacement>} place
- * @property {(assignment: string) => Promise<WorkerPoolStopped>} stop idempotent
- * @property {() => Promise<readonly string[]>} held
+ * @property {((assignment: WorkerPoolAssignment, kind: "Job") => Promise<WorkerPoolPlacement>)
+ *   & ((assignment: WorkerPoolSessionAssignment, kind: "Session") => Promise<WorkerPoolPlacement>)} place
+ * @property {(assignment: string) => Promise<WorkerPoolStopped>} stop idempotent, whichever kind it is
+ * @property {() => Promise<readonly WorkerPoolHeld[]>} held every workload of either kind, each with the kind it was placed as
  * @property {() => Promise<readonly WorkerPoolEnded[]>} ended each one once, after `held` stopped naming it; never one this pool stopped
  *
- * @typedef {{polled: "Reconciled", assignments: readonly WorkerPoolAssignment[], stop: readonly string[]}
+ * @typedef {{polled: "Reconciled", assignments: readonly WorkerPoolAssignment[],
+ *   sessions: readonly WorkerPoolSessionAssignment[], stop: readonly string[]}
  *   | {polled: "Stale"} | {polled: "Denied", evidence: string} | {polled: "Unavailable", evidence: string}} WorkerPoolPolled
  * @typedef {"Settled" | "Lost" | "Stale" | "Denied" | "Unavailable"} WorkerPoolSettled
  *
  * @typedef {object} WorkerPoolPlane `Stale` is a token to replace; `Denied` a pool the plane will not serve
- * @property {(token: string, held: readonly string[], wanted: number) => Promise<WorkerPoolPolled>} poll
+ * @property {(token: string, held: readonly string[], wanted: number, wantedSessions: number) => Promise<WorkerPoolPolled>} poll
  * @property {(token: string, assignment: string, outcome: AssignmentOutcome) => Promise<WorkerPoolSettled>} settle
  *
- * @typedef {"Ended" | "Refused" | "Unavailable"} WorkerPoolJobEnded
+ * @typedef {"Ended" | "Refused" | "Unavailable"} WorkerPoolEndAnswer
  *
  * @typedef {object} WorkerPoolJobPlane `Refused` is an attempt no longer live, whose own report stands
- * @property {(ended: WorkerPoolEnded) => Promise<WorkerPoolJobEnded>} end
+ * @property {(ended: WorkerPoolJobEnd) => Promise<WorkerPoolEndAnswer>} end
+ *
+ * @typedef {object} WorkerPoolSessionPlane `Refused` is a session attempt no longer live, or one the plane refused to end
+ * @property {(ended: WorkerPoolSessionEnd) => Promise<WorkerPoolEndAnswer>} end
  *
  * @typedef {{acquired: "Token", token: string} | {acquired: "Denied", evidence: string}
  *   | {acquired: "Unavailable", evidence: string}} WorkerPoolTokenAcquired
@@ -49,7 +73,8 @@
  * @property {(token: string) => void} invalidate discards a token the plane rejected
  *
  * @typedef {object} WorkerPoolClientSettings
- * @property {number} concurrencyMax the assignments held at once, which each poll's `wanted` is measured from
+ * @property {number} concurrencyMax the jobs held at once, which each poll's `wanted` is measured from
+ * @property {number} [sessionsMax] the sessions held at once, which each poll's `wantedSessions` is measured from; none where absent
  * @property {number} outageBackoffMs the wait after a pass that met an outage
  * @property {number} passesMax the passes one run makes
  *
@@ -60,6 +85,7 @@
  * @property {WorkerPoolTokens} tokens
  * @property {WorkerPoolPlane} plane
  * @property {WorkerPoolJobPlane} jobs
+ * @property {WorkerPoolSessionPlane} sessions
  * @property {WorkerPoolBackend} backend
  * @property {WorkerPoolClientSettings} settings
  */
@@ -78,7 +104,112 @@ export function checkedWorkerPoolClientSettings(settings) {
       throw new RangeError(
         `worker pool client ${name} must be a positive safe integer`,
       );
+  const { sessionsMax } = settings;
+  if (
+    sessionsMax !== undefined &&
+    (!Number.isSafeInteger(sessionsMax) || sessionsMax < 0)
+  )
+    throw new RangeError(
+      "worker pool client sessionsMax must be a safe integer of zero or more, or absent",
+    );
   return settings;
+}
+
+/**
+ * How many of a kind the pool holds at once.
+ *
+ * @param {WorkerPoolClientSettings} settings
+ * @param {WorkerPoolWorkloadKind} kind
+ */
+function workerPoolClientCeiling(settings, kind) {
+  return kind === "Session"
+    ? (settings.sessionsMax ?? 0)
+    : settings.concurrencyMax;
+}
+
+/**
+ * How many of a kind are running, less those this pass has stopped.
+ *
+ * @param {readonly WorkerPoolHeld[]} held
+ * @param {WorkerPoolWorkloadKind} kind
+ * @param {readonly string[]} stopped
+ */
+function workerPoolClientRunning(held, kind, stopped) {
+  return held.filter(
+    (workload) =>
+      workload.kind === kind && !stopped.includes(workload.assignment),
+  ).length;
+}
+
+/**
+ * The room a poll asks for of a kind: its ceiling less what is running.
+ *
+ * @param {WorkerPoolClientSettings} settings
+ * @param {readonly WorkerPoolHeld[]} held
+ * @param {WorkerPoolWorkloadKind} kind
+ */
+function workerPoolClientRoom(settings, held, kind) {
+  return Math.max(
+    workerPoolClientCeiling(settings, kind) -
+      workerPoolClientRunning(held, kind, []),
+    0,
+  );
+}
+
+/**
+ * A pool that holds sessions has a plane to end them on. It is checked by the
+ * pass rather than with the settings, because a runner may check its settings
+ * before the client they go into exists, and drive the pass itself.
+ *
+ * @param {WorkerPoolClient} client
+ */
+function checkedWorkerPoolClientSessions(client) {
+  if (
+    workerPoolClientCeiling(client.settings, "Session") > 0 &&
+    client.sessions === undefined
+  )
+    throw new TypeError(
+      "worker pool client sessionsMax is above zero with no session plane to end a session on",
+    );
+}
+
+/**
+ * A backend's entry as a refusal names it: by its keys, never its values,
+ * which may carry an attempt's bearer.
+ *
+ * @param {unknown} entry
+ */
+function workerPoolClientShape(entry) {
+  if (entry === null || typeof entry !== "object")
+    return `an entry of type ${entry === null ? "null" : typeof entry}`;
+  const keys = Object.keys(entry).sort();
+  return keys.length === 0
+    ? "an entry with no keys"
+    : `an entry keyed ${keys.join(", ")}`;
+}
+
+/**
+ * What the backend holds, every entry checked before any is used: one naming
+ * no assignment would drop out of the poll's `held` and let a running
+ * workload's lease lapse, and one of no kind the loop knows would count
+ * against no ceiling.
+ *
+ * @param {WorkerPoolClient} client
+ * @returns {Promise<readonly WorkerPoolHeld[]>}
+ */
+async function workerPoolClientHeld(client) {
+  const held = await client.backend.held();
+  for (const workload of held) {
+    if (typeof workload?.assignment !== "string" || workload.assignment === "")
+      throw new TypeError(
+        `a backend held ${workerPoolClientShape(workload)}, which names no assignment`,
+      );
+    if (workload.kind !== "Job" && workload.kind !== "Session")
+      throw new TypeError(
+        `a backend held ${workerPoolClientShape(workload)}, whose kind is no workload's`,
+      );
+  }
+  return held;
 }
 
 /** @param {WorkerPoolClient} client */
@@ -113,15 +244,34 @@ async function workerPoolClientStopped(client, stop) {
 }
 
 /**
- * Ends each attempt whose workload ended unreported, counting the ends the
- * plane took. One it did not take is left to its lease.
+ * @param {WorkerPoolClient} client
+ * @param {WorkerPoolEnded} workload
+ * @returns {Promise<WorkerPoolEndAnswer>}
+ */
+function workerPoolClientEnd(client, workload) {
+  switch (workload.kind) {
+    case "Job":
+      return client.jobs.end(workload);
+    case "Session":
+      return client.sessions.end(workload);
+    default:
+      throw new TypeError(
+        `a backend ended ${workerPoolClientShape(workload)}, whose kind is no workload's`,
+      );
+  }
+}
+
+/**
+ * Ends each attempt whose workload ended unreported, each on its own kind's
+ * plane, counting the ends the plane took. One it did not take is left to its
+ * lease.
  *
  * @param {WorkerPoolClient} client
  */
 async function workerPoolClientEnded(client) {
   let ended = 0;
   for (const workload of await client.backend.ended())
-    if ((await client.jobs.end(workload)) === "Ended") ended += 1;
+    if ((await workerPoolClientEnd(client, workload)) === "Ended") ended += 1;
   return ended;
 }
 
@@ -145,21 +295,24 @@ function workerPoolClientOutcome(placement) {
 }
 
 /**
- * Places what there is room for and settles the rest as `Unavailable`: the
- * poll asked for no more than the room, so the rest is a plane that offered
- * past it. Room is what the backend held plus what this pass has placed.
+ * Places what there is room for of one kind and settles the rest as
+ * `Unavailable`: the poll asked for no more than the room, so the rest is a
+ * plane that offered past it. Room is the kind's ceiling less what is running
+ * of it and what this pass has placed of it.
  *
  * @param {WorkerPoolClient} client
  * @param {string} token
  * @param {readonly WorkerPoolAssignment[]} offered
+ * @param {WorkerPoolWorkloadKind} kind
  * @param {number} running
  */
-async function workerPoolClientPlaced(client, token, offered, running) {
+async function workerPoolClientPlaced(client, token, offered, kind, running) {
   const tally = { placed: 0, refused: 0 };
+  const ceiling = workerPoolClientCeiling(client.settings, kind);
   for (const assignment of offered) {
     const placement =
-      running + tally.placed < client.settings.concurrencyMax
-        ? await client.backend.place(assignment)
+      running + tally.placed < ceiling
+        ? await client.backend.place(assignment, kind)
         : { placed: "Unavailable" };
     const outcome = workerPoolClientOutcome(placement);
     if (placement.placed === "Placed") tally.placed += 1;
@@ -183,14 +336,16 @@ async function workerPoolClientPlaced(client, token, offered, running) {
  * @returns {Promise<WorkerPoolPass>}
  */
 export async function workerPoolClientPass(client) {
+  checkedWorkerPoolClientSessions(client);
   const minted = await workerPoolClientToken(client);
   if (!("token" in minted)) return minted;
-  const held = await client.backend.held();
+  const held = await workerPoolClientHeld(client);
   const ended = await workerPoolClientEnded(client);
   const polled = await client.plane.poll(
     minted.token,
-    held,
-    Math.max(client.settings.concurrencyMax - held.length, 0),
+    held.map(({ assignment }) => assignment),
+    workerPoolClientRoom(client.settings, held, "Job"),
+    workerPoolClientRoom(client.settings, held, "Session"),
   );
   if (polled.polled === "Stale") {
     client.tokens.invalidate(minted.token);
@@ -200,17 +355,25 @@ export async function workerPoolClientPass(client) {
     return { passed: polled.polled, evidence: polled.evidence };
   const stopped = await workerPoolClientStopped(client, polled.stop);
   if ("passed" in stopped) return stopped;
-  const tally = await workerPoolClientPlaced(
+  const jobs = await workerPoolClientPlaced(
     client,
     minted.token,
     polled.assignments,
-    held.length - stopped.stopped,
+    "Job",
+    workerPoolClientRunning(held, "Job", polled.stop),
+  );
+  const sessions = await workerPoolClientPlaced(
+    client,
+    minted.token,
+    polled.sessions,
+    "Session",
+    workerPoolClientRunning(held, "Session", polled.stop),
   );
   return {
     passed: "Reconciled",
-    placed: tally.placed,
+    placed: jobs.placed + sessions.placed,
     stopped: stopped.stopped,
-    refused: tally.refused,
+    refused: jobs.refused + sessions.refused,
     ended,
   };
 }

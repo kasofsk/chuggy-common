@@ -103,12 +103,17 @@ function poolPlaneUrl(settings, route) {
  * @param {PoolPlaneClientSettings} settings
  * @param {readonly string[]} held
  * @param {number} wanted
+ * @param {number} wantedSessions
  */
-function poolPlaneAssignmentsUrl(settings, held, wanted) {
+function poolPlaneAssignmentsUrl(settings, held, wanted, wantedSessions) {
   const url = poolPlaneUrl(settings, workerPoolPollRoute);
   for (const assignment of held)
     url.searchParams.append(workerPoolPollQuery.held, assignment);
   url.searchParams.set(workerPoolPollQuery.wanted, String(wanted));
+  url.searchParams.set(
+    workerPoolPollQuery.wantedSessions,
+    String(wantedSessions),
+  );
   return url;
 }
 
@@ -158,6 +163,7 @@ async function poolPlaneReconciled(answered) {
     ? {
         polled: "Reconciled",
         assignments: read.data.assignments,
+        sessions: read.data.sessions,
         stop: read.data.stop,
       }
     : {
@@ -172,12 +178,21 @@ async function poolPlaneReconciled(answered) {
  * @param {string} token
  * @param {readonly string[]} held
  * @param {number} wanted
+ * @param {number} wantedSessions
  * @returns {Promise<WorkerPoolPolled>}
  */
-async function poolPlanePolled(settings, fetcher, token, held, wanted) {
+async function poolPlanePolled(
+  settings,
+  fetcher,
+  token,
+  held,
+  wanted,
+  wantedSessions,
+) {
   let answered;
   try {
-    answered = await fetcher(poolPlaneAssignmentsUrl(settings, held, wanted), {
+    const url = poolPlaneAssignmentsUrl(settings, held, wanted, wantedSessions);
+    answered = await fetcher(url, {
       method: "GET",
       signal: globalThis.AbortSignal.timeout(settings.pollTimeoutMs),
       headers: workerPlaneHeaders(token, { accept: "application/json" }),
@@ -272,8 +287,8 @@ async function poolPlaneSettled(settings, fetcher, token, assignment, outcome) {
 export function poolPlaneClient(input, fetcher = globalThis.fetch) {
   const settings = checkedPoolPlaneClientSettings(input);
   return {
-    poll: (token, held, wanted) =>
-      poolPlanePolled(settings, fetcher, token, held, wanted),
+    poll: (token, held, wanted, wantedSessions = 0) =>
+      poolPlanePolled(settings, fetcher, token, held, wanted, wantedSessions),
     settle: (token, assignment, outcome) =>
       poolPlaneSettled(settings, fetcher, token, assignment, outcome),
   };

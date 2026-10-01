@@ -68,6 +68,7 @@ import {
   workerWorkspaceVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
 
+import { workerStageEnvironment } from "./checks.mjs";
 import {
   chuggyToolContext,
   chuggyToolServer,
@@ -158,14 +159,15 @@ export const sessionBoundNames = Object.keys(sessionBounds);
  * Every bound the launcher owes this pod, refused by name where one is missing
  * or not positive. There is no default to fall back to: a bound this image
  * invented would be a loop nobody chose the cap of, and an absent one silently
- * makes its loop unbounded rather than short.
+ * makes its loop unbounded rather than short. `carrier` names what carried
+ * them.
  */
-export function checkedSessionBounds(bounds) {
+export function checkedSessionBounds(bounds, carrier = sessionTaskVariable) {
   for (const [name, valid] of Object.entries(sessionBounds)) {
     const value = bounds?.[name];
     if (!valid(value) || value <= 0)
       throw new Error(
-        `${sessionTaskVariable} needs a positive ${name} and carries ${JSON.stringify(value)}`,
+        `${carrier} needs a positive ${name} and carries ${JSON.stringify(value)}`,
       );
   }
   return bounds;
@@ -935,6 +937,8 @@ async function sessionRun(context, facts, opened) {
   context.store = sessionStoreAdapter(context.task, context.bearer, {
     request: context.request,
     retain: !context.inquiry,
+    scrub: context.scrub,
+    warn,
   });
   sessionStagedMailbox(context, {
     request: context.request,
@@ -954,6 +958,52 @@ async function sessionRun(context, facts, opened) {
   return await runSessionTurns(context);
 }
 
+/**
+ * A pod's own launch: the task document its launcher wrote, and the bearer in
+ * the file that document names.
+ */
+async function sessionPodLaunch(environment, read) {
+  const task = JSON.parse(required(environment, sessionTaskVariable));
+  checkedSessionBounds(task.bounds);
+  const bearer = (await read(task.workerPlane.capabilityFile)).trim();
+  return { task, bearer };
+}
+
+/**
+ * What a pool's envelope runs a session with, where the plane answered it a
+ * session's task carrying the site's API, bounds and model: the pod's own
+ * launch, assembled from the two. The document is the answer joined to the
+ * envelope's plane, the credential map is the one file the pool mounted, in
+ * the slot the task names, and the model is the answer's.
+ *
+ * THE BEARER IS HELD IN MEMORY. No file names it, and the envelope that
+ * carries it is left out of the environment the runtime inherits, as a task
+ * document is left out of a check's.
+ */
+export function sessionEnvelopeServices(
+  envelope,
+  answer,
+  environment = process.env,
+) {
+  const { model, ...task } = answer;
+  const document = { ...task, workerPlane: { url: envelope.callbackUrl } };
+  const mounted = envelope.providerCredentialFile;
+  return {
+    environment: {
+      ...workerStageEnvironment(environment),
+      [workerCredentialFilesVariable]: JSON.stringify(
+        mounted === undefined ? {} : { [task.credentialSlot]: mounted },
+      ),
+      [sessionModelVariable]: model,
+      [workerWorkspaceVariable]: envelope.workspace,
+    },
+    launch: async () => {
+      checkedSessionBounds(document.bounds, "the worker plane's session task");
+      return { task: document, bearer: envelope.bearer };
+    },
+  };
+}
+
 export async function sessionMain(services = {}) {
   const {
     environment = process.env,
@@ -966,13 +1016,12 @@ export async function sessionMain(services = {}) {
     warn = (text) => process.stderr.write(text),
     checkout: takeCheckout = sessionCheckout,
     lease: startLease = sessionLease,
+    launch = () => sessionPodLaunch(environment, read),
   } = services;
   let scrub = (text) => text;
   let stopLease = async () => undefined;
   try {
-    const task = JSON.parse(required(environment, sessionTaskVariable));
-    checkedSessionBounds(task.bounds);
-    const bearer = (await read(task.workerPlane.capabilityFile)).trim();
+    const { task, bearer } = await launch();
     const context = {
       task,
       bearer,
