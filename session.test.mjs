@@ -1303,9 +1303,10 @@ test("a minted password is scrubbed out of everything this pod writes", async ()
   assert.ok(answered.includes("[redacted credential]"));
 });
 
-test("a transcript the session stores is scrubbed of every secret the pod holds", async () => {
+test("a transcript the session stores is scrubbed of every secret the pod holds, and a signed block it scrubbed is logged", async () => {
   const plane = planeOf([turnOne], facts, () => undefined, mintedCredential);
   const echoed = [token, bearer, mintedCredential.password];
+  const warned = [];
   const { query } = queryOf((_asked, _index, options) => [
     { type: "system", subtype: "init", session_id: "runtime-1" },
     () =>
@@ -1321,6 +1322,16 @@ test("a transcript the session stores is scrubbed of every secret the pod holds"
             })),
           },
         },
+        {
+          uuid: "thought",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: `read ${token}`, signature: "Eq" },
+            ],
+          },
+        },
       ]),
     result("success", { result: "stored" }),
   ]);
@@ -1331,6 +1342,7 @@ test("a transcript the session stores is scrubbed of every secret the pod holds"
     environment: boundEnvironment,
     write: async () => undefined,
     checkout: async () => undefined,
+    warn: (text) => warned.push(text),
   });
 
   const stored = plane.calls.find(
@@ -1340,7 +1352,13 @@ test("a transcript the session stores is scrubbed of every secret the pod holds"
   const body = String(stored.body);
   for (const secret of echoed)
     assert.ok(!body.includes(secret), `${secret.slice(0, 5)} was stored`);
-  assert.equal(body.split("read [redacted credential]").length - 1, 3);
+  assert.equal(body.split("read [redacted credential]").length - 1, 4);
+  assert.deepEqual(
+    warned.filter((text) => text.includes("signed block")),
+    [
+      "the session store scrubbed a credential out of a signed block of runtime-1, entry thought; a later resume over it will be refused\n",
+    ],
+  );
 });
 
 test("a plane that mints nothing leaves the checkout on the launcher's mount", async () => {

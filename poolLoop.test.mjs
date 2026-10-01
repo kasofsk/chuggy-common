@@ -137,18 +137,28 @@ test("what the pool holds is read from the backend rather than remembered", asyn
   assert.equal(passed.passed, "Reconciled");
 });
 
+/**
+ * Each refusal is matched whole, so it names the entry by its keys and prints
+ * nothing it holds: a backend's record of an attempt carries that attempt's
+ * bearer.
+ */
 test("a backend holding a workload by name alone, or as no kind the loop knows, fails the pass before it polls", async () => {
+  const bearer = "chgb_0123456789abcdef0123456789abcdef";
   for (const [held, refusal] of [
-    [["running-one"], /"running-one", which names no assignment/u],
-    [[{ kind: "Job" }], /\{"kind":"Job"\}, which names no assignment/u],
-    [holding("Job", ""), /"assignment":"".*, which names no assignment/u],
+    [[bearer], "an entry of type string, which names no assignment"],
+    [[null], "an entry of type null, which names no assignment"],
+    [[{ kind: "Job" }], "an entry keyed kind, which names no assignment"],
     [
-      holding("job", "running-one"),
-      /running-one of kind job, which is no workload/u,
+      [{ ...holding("Job", "")[0], bearer }],
+      "an entry keyed assignment, bearer, kind, which names no assignment",
+    ],
+    [
+      [{ ...holding("job", "running-one")[0], bearer }],
+      "an entry keyed assignment, bearer, kind, whose kind is no workload's",
     ],
     [
       [...holding("Session", "session-one"), { assignment: "running-one" }],
-      /running-one of kind undefined, which is no workload/u,
+      "an entry keyed assignment, whose kind is no workload's",
     ],
   ]) {
     const polled = [];
@@ -173,7 +183,7 @@ test("a backend holding a workload by name alone, or as no kind the loop knows, 
           },
         }),
       ),
-      refusal,
+      { name: "TypeError", message: `a backend held ${refusal}` },
     );
     assert.deepEqual([polled, told], [[], []]);
   }
@@ -420,23 +430,55 @@ test("an ended session is told to the session plane and an ended job to the job 
   assert.equal(passed.ended, 1);
 });
 
-test("a backend ending a workload of no kind the loop knows fails the pass before it is told anywhere", async () => {
-  const told = [];
-  const telling = { end: async (ended) => told.push(ended) };
+test("a backend ending a workload of no kind the loop knows fails the pass before it is told anywhere, naming none of it", async () => {
+  for (const [ended, refusal] of [
+    [{ job: assignment("crashed"), why: "exited" }, "an entry keyed job, why"],
+    [
+      { kind: "chgb_0123456789abcdef0123456789abcdef", why: "exited" },
+      "an entry keyed kind, why",
+    ],
+  ]) {
+    const told = [];
+    const telling = { end: async (end) => told.push(end) };
+    await assert.rejects(
+      workerPoolClientPass(
+        client({
+          backend: { ...idle, ended: async () => [ended] },
+          jobs: telling,
+          sessions: telling,
+        }),
+      ),
+      {
+        name: "TypeError",
+        message: `a backend ended ${refusal}, whose kind is no workload's`,
+      },
+    );
+    assert.deepEqual(told, []);
+  }
+});
+
+test("a pool with a session ceiling and no session plane to end one on is refused before it acts", async () => {
+  const source = counting();
   await assert.rejects(
     workerPoolClientPass(
       client({
-        backend: {
-          ...idle,
-          ended: async () => [{ job: assignment("crashed"), why: "exited" }],
-        },
-        jobs: telling,
-        sessions: telling,
+        tokens: source.tokens,
+        sessions: undefined,
+        settings: { ...settings, sessionsMax: 1 },
       }),
     ),
-    /undefined, which is no workload/u,
+    /sessionsMax is above zero with no session plane to end a session on/u,
   );
-  assert.deepEqual(told, []);
+  assert.deepEqual(source.minted, []);
+  for (const taken of [{}, { sessionsMax: 0 }])
+    assert.equal(
+      (
+        await workerPoolClientPass(
+          client({ sessions: undefined, settings: { ...settings, ...taken } }),
+        )
+      ).passed,
+      "Reconciled",
+    );
 });
 
 test("a workload that ended unreported has its attempt ended, each one once, counting the ends taken", async () => {

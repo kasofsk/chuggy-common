@@ -1330,9 +1330,45 @@ const sessionSecrets = [
   "ghs_0123456789abcdefghijklmnopqrstuvwxyz",
 ];
 
-function scrubbingStore() {
-  return storeOf(undefined, { scrub: credentialScrub(sessionSecrets) });
+function scrubbingStore(warned = []) {
+  return storeOf(undefined, {
+    scrub: credentialScrub(sessionSecrets),
+    warn: (text) => warned.push(text),
+  });
 }
+
+/** An assistant entry whose one block is `block`. */
+function blockEntry(uuid, block) {
+  return {
+    ...(uuid === undefined ? {} : { uuid }),
+    type: "assistant",
+    message: { role: "assistant", content: [block] },
+  };
+}
+
+test("a credential scrubbed out of a signed block is said in the pod's log, by where it is and nothing it held", async () => {
+  const warned = [];
+  const { calls, store } = scrubbingStore(warned);
+  const thought = `the token is ${sessionSecrets[0]}`;
+  const signed = (thinking) => ({
+    type: "thinking",
+    thinking,
+    signature: "EqQBCkYIBxgCKkA",
+  });
+
+  await store.append({ sessionId: "s" }, [
+    blockEntry("plain", { type: "text", text: thought }),
+    blockEntry("untouched", signed("nothing held here")),
+    blockEntry("signed", signed(thought)),
+    blockEntry(undefined, signed(thought)),
+  ]);
+
+  assert.deepEqual(warned, [
+    "the session store scrubbed a credential out of a signed block of s, entry signed; a later resume over it will be refused\n",
+    "the session store scrubbed a credential out of a signed block of s, in an entry with no uuid; a later resume over it will be refused\n",
+  ]);
+  assert.equal(bodies(calls).length, 1);
+});
 
 test("every string an entry carries is posted scrubbed of what its session holds", async () => {
   const { calls, store } = scrubbingStore();
@@ -1380,12 +1416,16 @@ test("a credential a clip would cut through is scrubbed before the cut", async (
   }
 });
 
-test("a store opened with no scrub is refused before it posts anything", () => {
+test("a store opened with no scrub, or with no options at all, is refused before it posts anything", () => {
   const plane = planeOf();
-  assert.throws(
+  for (const opened of [
     () => sessionStoreAdapter(task, "chgs_b", { request: plane.request }),
-    /opened with the scrub its session holds/u,
-  );
+    () => sessionStoreAdapter(task, "chgs_b"),
+  ])
+    assert.throws(opened, {
+      name: "TypeError",
+      message: "a session store is opened with the scrub its session holds",
+    });
   assert.deepEqual(plane.calls, []);
 });
 

@@ -157,6 +157,38 @@ function workerPoolClientRoom(settings, held, kind) {
 }
 
 /**
+ * A pool that holds sessions has a plane to end them on. It is checked by the
+ * pass rather than with the settings, because a runner may check its settings
+ * before the client they go into exists, and drive the pass itself.
+ *
+ * @param {WorkerPoolClient} client
+ */
+function checkedWorkerPoolClientSessions(client) {
+  if (
+    workerPoolClientCeiling(client.settings, "Session") > 0 &&
+    client.sessions === undefined
+  )
+    throw new TypeError(
+      "worker pool client sessionsMax is above zero with no session plane to end a session on",
+    );
+}
+
+/**
+ * A backend's entry as a refusal names it: by its keys, never its values,
+ * which may carry an attempt's bearer.
+ *
+ * @param {unknown} entry
+ */
+function workerPoolClientShape(entry) {
+  if (entry === null || typeof entry !== "object")
+    return `an entry of type ${entry === null ? "null" : typeof entry}`;
+  const keys = Object.keys(entry).sort();
+  return keys.length === 0
+    ? "an entry with no keys"
+    : `an entry keyed ${keys.join(", ")}`;
+}
+
+/**
  * What the backend holds, every entry checked before any is used: one naming
  * no assignment would drop out of the poll's `held` and let a running
  * workload's lease lapse, and one of no kind the loop knows would count
@@ -170,11 +202,11 @@ async function workerPoolClientHeld(client) {
   for (const workload of held) {
     if (typeof workload?.assignment !== "string" || workload.assignment === "")
       throw new TypeError(
-        `a backend held ${String(JSON.stringify(workload))}, which names no assignment`,
+        `a backend held ${workerPoolClientShape(workload)}, which names no assignment`,
       );
     if (workload.kind !== "Job" && workload.kind !== "Session")
       throw new TypeError(
-        `a backend held ${workload.assignment} of kind ${String(workload.kind)}, which is no workload`,
+        `a backend held ${workerPoolClientShape(workload)}, whose kind is no workload's`,
       );
   }
   return held;
@@ -224,7 +256,7 @@ function workerPoolClientEnd(client, workload) {
       return client.sessions.end(workload);
     default:
       throw new TypeError(
-        `a backend ended a ${String(workload.kind)}, which is no workload`,
+        `a backend ended ${workerPoolClientShape(workload)}, whose kind is no workload's`,
       );
   }
 }
@@ -304,6 +336,7 @@ async function workerPoolClientPlaced(client, token, offered, kind, running) {
  * @returns {Promise<WorkerPoolPass>}
  */
 export async function workerPoolClientPass(client) {
+  checkedWorkerPoolClientSessions(client);
   const minted = await workerPoolClientToken(client);
   if (!("token" in minted)) return minted;
   const held = await workerPoolClientHeld(client);

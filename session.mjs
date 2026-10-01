@@ -938,6 +938,7 @@ async function sessionRun(context, facts, opened) {
     request: context.request,
     retain: !context.inquiry,
     scrub: context.scrub,
+    warn,
   });
   sessionStagedMailbox(context, {
     request: context.request,

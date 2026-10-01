@@ -5,6 +5,7 @@ import { URL } from "node:url";
 
 import {
   sessionConfigDirectoryVariable,
+  workerCredentialFilesVariable,
   workerTaskVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
 import { poolEnvelopeSchema } from "@chuggy/worker-contract/workerTask";
@@ -156,6 +157,19 @@ test("an envelope's session leaves the envelope out of the runtime's environment
     options.env[sessionConfigDirectoryVariable],
     join(envelope.workspace, ".claude"),
   );
+});
+
+/** Catches the pool's credential file mounted under any slot but the one the plane's task names. */
+test("an envelope's credential file is mounted in the slot the plane's task names", () => {
+  const { environment } = sessionEnvelopeServices(
+    envelope,
+    { ...answer, credentialSlot: "pool-slot" },
+    site,
+  );
+
+  assert.deepEqual(JSON.parse(environment[workerCredentialFilesVariable]), {
+    "pool-slot": envelope.providerCredentialFile,
+  });
 });
 
 /** Catches a bound the plane answered unchecked, which the contract reads as any number at all. */
