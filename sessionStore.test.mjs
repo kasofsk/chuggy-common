@@ -8,6 +8,7 @@ import {
   sessionStoreStreamCharsMax,
 } from "@chuggy/worker-contract/sessionPlane";
 
+import { credentialScrub } from "./runEvidence.mjs";
 import {
   sessionStoreAdapter,
   sessionStoreClipBudgetBytes,
@@ -332,7 +333,11 @@ function storeOf(answer, mode = {}) {
   const plane = planeOf(answer);
   return {
     ...plane,
-    store: sessionStoreAdapter(task, "chgs_b", { ...plane, ...mode }),
+    store: sessionStoreAdapter(task, "chgs_b", {
+      ...plane,
+      scrub: (text) => text,
+      ...mode,
+    }),
   };
 }
 
@@ -1316,6 +1321,72 @@ test("an entry at the bound is posted as the bytes it arrived as", async () => {
     "the entry at the bound was not the batch",
   );
   assert.equal(written[0].body, `${JSON.stringify(given)}\n`);
+});
+
+/** What a session holds and would never post: its runtime's token, its bearer and a minted password. */
+const sessionSecrets = [
+  "sk-ant-oat01-0123456789abcdefghijklmnop",
+  "chgs_0123456789abcdef0123456789abcdef",
+  "ghs_0123456789abcdefghijklmnopqrstuvwxyz",
+];
+
+function scrubbingStore() {
+  return storeOf(undefined, { scrub: credentialScrub(sessionSecrets) });
+}
+
+test("every string an entry carries is posted scrubbed of what its session holds", async () => {
+  const { calls, store } = scrubbingStore();
+  const echoed = sessionSecrets.map((secret) => `echo ${secret}`).join("\n");
+
+  await store.append({ sessionId: "s" }, [
+    bashEntry(echoed),
+    {
+      uuid: "b",
+      type: "assistant",
+      lines: [`pushed with ${sessionSecrets[2]}`],
+    },
+  ]);
+
+  const [{ body }] = bodies(calls);
+  for (const secret of sessionSecrets)
+    assert.ok(!body.includes(secret), `${secret.slice(0, 5)} was posted`);
+  const [result, listed] = postedEntries(calls);
+  assert.equal(
+    result.toolUseResult.stdout,
+    sessionSecrets.map(() => "echo [redacted credential]").join("\n"),
+  );
+  assert.deepEqual(listed.lines, ["pushed with [redacted credential]"]);
+});
+
+/**
+ * A clip keeps a head of each copy, and a head can end anywhere, so the text
+ * is shifted a character at a time across the length of one credential: if
+ * the cut came first, one of these would leave a long piece of it standing.
+ */
+test("a credential a clip would cut through is scrubbed before the cut", async () => {
+  const [secret] = sessionSecrets;
+  for (let shift = 0; shift <= secret.length; shift += 1) {
+    const { calls, store } = scrubbingStore();
+    const stdout = `${"x".repeat(shift)}${`${secret} `.repeat(4_000)}`;
+
+    await store.append({ sessionId: "s" }, [bashEntry(stdout)]);
+
+    const [{ body }] = bodies(calls);
+    assert.ok(body.includes("the session store clipped"), "nothing was cut");
+    assert.ok(
+      !body.includes(secret.slice(0, 8)),
+      `shifted ${String(shift)}, a cut left a piece of the credential`,
+    );
+  }
+});
+
+test("a store opened with no scrub is refused before it posts anything", () => {
+  const plane = planeOf();
+  assert.throws(
+    () => sessionStoreAdapter(task, "chgs_b", { request: plane.request }),
+    /opened with the scrub its session holds/u,
+  );
+  assert.deepEqual(plane.calls, []);
 });
 
 test("a clipped entry loads back off the store as an entry", async () => {

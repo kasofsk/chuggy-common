@@ -156,6 +156,30 @@ function workerPoolClientRoom(settings, held, kind) {
   );
 }
 
+/**
+ * What the backend holds, every entry checked before any is used: one naming
+ * no assignment would drop out of the poll's `held` and let a running
+ * workload's lease lapse, and one of no kind the loop knows would count
+ * against no ceiling.
+ *
+ * @param {WorkerPoolClient} client
+ * @returns {Promise<readonly WorkerPoolHeld[]>}
+ */
+async function workerPoolClientHeld(client) {
+  const held = await client.backend.held();
+  for (const workload of held) {
+    if (typeof workload?.assignment !== "string" || workload.assignment === "")
+      throw new TypeError(
+        `a backend held ${String(JSON.stringify(workload))}, which names no assignment`,
+      );
+    if (workload.kind !== "Job" && workload.kind !== "Session")
+      throw new TypeError(
+        `a backend held ${workload.assignment} of kind ${String(workload.kind)}, which is no workload`,
+      );
+  }
+  return held;
+}
+
 /** @param {WorkerPoolClient} client */
 async function workerPoolClientToken(client) {
   const acquired = await client.tokens.acquire();
@@ -282,7 +306,7 @@ async function workerPoolClientPlaced(client, token, offered, kind, running) {
 export async function workerPoolClientPass(client) {
   const minted = await workerPoolClientToken(client);
   if (!("token" in minted)) return minted;
-  const held = await client.backend.held();
+  const held = await workerPoolClientHeld(client);
   const ended = await workerPoolClientEnded(client);
   const polled = await client.plane.poll(
     minted.token,

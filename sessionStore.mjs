@@ -13,6 +13,13 @@
  * would be a second and weaker authority for the tenant, project and session the
  * bearer already names.
  *
+ * EVERY STRING IS SCRUBBED BEFORE IT IS WEIGHED. The store is opened with the
+ * scrub its session holds, and every string value in an entry passes through
+ * it as the runtime holds it, unescaped, before any clip: the bound then counts
+ * what is posted, and no cut falls inside a credential and leaves a head the
+ * scrub no longer knows. A signed block is scrubbed too, because a credential
+ * kept is worse than a resume refused.
+ *
  * BATCHES ARE FROZEN WHEN THEY ARE NUMBERED. Once entries are given a number the
  * bytes never change: a batch the plane did not acknowledge is re-sent under the
  * same number with the same body, which is what lets the plane deduplicate by
@@ -495,8 +502,10 @@ function growSites(clipped, cut) {
  * escaping and the copies are what a line is charged for and neither is visible
  * in one.
  */
-function storedLine(entry) {
-  const line = JSON.stringify(entry);
+function storedLine(entry, scrub) {
+  const line = JSON.stringify(entry, (_key, value) =>
+    typeof value === "string" ? scrub(value) : value,
+  );
   if (lineBytes(line) <= sessionStoreBatchBytesMax) return { line };
   const clipped = JSON.parse(line);
   const cut = cutSites(clipped);
@@ -506,12 +515,12 @@ function storedLine(entry) {
 }
 
 /** The lines this call still owes the store, in order, with the settled ones dropped. */
-function owedLines(state, entries) {
+function owedLines(state, entries, scrub) {
   const owed = [];
   for (const entry of entries) {
     const uuid = entryUuid(entry);
     if (uuid !== undefined && state.confirmed.has(uuid)) continue;
-    const { line, cut } = storedLine(entry);
+    const { line, cut } = storedLine(entry, scrub);
     if (state.pending?.lines.has(line)) continue;
     owed.push({ line, uuid, cut });
   }
@@ -592,7 +601,7 @@ async function appendOnce(held, stream, entries) {
   // Owed before the resend, because what the pending batch already carries is
   // read off it; planned after, because planning may raise on an entry nothing
   // can post and the unacknowledged batch is still owed either way.
-  const owed = owedLines(state, entries);
+  const owed = owedLines(state, entries, held.scrub);
   if (resent !== undefined) {
     await sendBatch(held, stream, resent);
     confirm(held, state, stream, resent);
@@ -682,13 +691,22 @@ async function listStreamSubkeys(held, sessionId) {
     .map((stream) => stream.slice(prefix.length));
 }
 
-/** One session's store, held open for the life of the pod, retained unless it is a fork's. */
-export function sessionStoreAdapter(task, bearer, options = {}) {
-  const { request = sessionRequest, retain = true } = options;
+/**
+ * One session's store, held open for the life of the pod, retained unless it
+ * is a fork's. It has no scrub of its own to fall back on, so one not handed
+ * is refused rather than replaced by none.
+ */
+export function sessionStoreAdapter(task, bearer, options) {
+  const { request = sessionRequest, retain = true, scrub } = options;
+  if (typeof scrub !== "function")
+    throw new TypeError(
+      "a session store is opened with the scrub its session holds",
+    );
   const held = {
     streams: new Map(),
     turn: { first: undefined, last: undefined },
     call: (path, init) => request(task, bearer, path, init),
+    scrub,
   };
   let chain = Promise.resolve();
   return {

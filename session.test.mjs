@@ -1303,6 +1303,46 @@ test("a minted password is scrubbed out of everything this pod writes", async ()
   assert.ok(answered.includes("[redacted credential]"));
 });
 
+test("a transcript the session stores is scrubbed of every secret the pod holds", async () => {
+  const plane = planeOf([turnOne], facts, () => undefined, mintedCredential);
+  const echoed = [token, bearer, mintedCredential.password];
+  const { query } = queryOf((_asked, _index, options) => [
+    { type: "system", subtype: "init", session_id: "runtime-1" },
+    () =>
+      options.sessionStore.append({ sessionId: "runtime-1" }, [
+        {
+          uuid: "a",
+          type: "user",
+          message: {
+            role: "user",
+            content: echoed.map((secret) => ({
+              type: "text",
+              text: `read ${secret}`,
+            })),
+          },
+        },
+      ]),
+    result("success", { result: "stored" }),
+  ]);
+
+  await run({
+    request: plane.request,
+    query,
+    environment: boundEnvironment,
+    write: async () => undefined,
+    checkout: async () => undefined,
+  });
+
+  const stored = plane.calls.find(
+    ({ path }) => path === "/v1/session/store/runtime-1/1",
+  );
+  assert.ok(stored, "the transcript was never stored");
+  const body = String(stored.body);
+  for (const secret of echoed)
+    assert.ok(!body.includes(secret), `${secret.slice(0, 5)} was stored`);
+  assert.equal(body.split("read [redacted credential]").length - 1, 3);
+});
+
 test("a plane that mints nothing leaves the checkout on the launcher's mount", async () => {
   const plane = planeOf([], facts);
   const { query } = queryOf(() => []);

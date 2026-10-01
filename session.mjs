@@ -937,6 +937,7 @@ async function sessionRun(context, facts, opened) {
   context.store = sessionStoreAdapter(context.task, context.bearer, {
     request: context.request,
     retain: !context.inquiry,
+    scrub: context.scrub,
   });
   sessionStagedMailbox(context, {
     request: context.request,

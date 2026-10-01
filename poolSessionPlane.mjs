@@ -40,7 +40,8 @@ export function checkedPoolSessionPlaneClientSettings(input) {
 
 /**
  * The body is checked before anything is sent, so a backend naming no end the
- * contract knows fails the pass rather than reading as an outage.
+ * contract knows throws out of the run, as an unknown placement does, rather
+ * than reading as an outage.
  *
  * @param {PoolSessionPlaneClientSettings} settings
  * @param {typeof fetch} fetcher

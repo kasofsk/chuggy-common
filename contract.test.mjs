@@ -260,6 +260,14 @@ const answeredTurn = sessionRun(() => [
   result("success", { result: "ok" }),
 ]);
 
+/** A session's store over `request`, whose wire is what this suite asks about. */
+function sessionStoreOver(request) {
+  return sessionStoreAdapter(sessionTask, bearer, {
+    request,
+    scrub: (text) => text,
+  });
+}
+
 /** The caller of each session route, reached through `sessionRequest`. */
 const sessionCallers = {
   facts: answeredTurn,
@@ -285,18 +293,13 @@ const sessionCallers = {
   turnFailure: sessionRun(() => [result("error_during_execution")]),
   held: sessionRun(() => [rejection, result("error_during_execution")]),
   storeStreams: (request) =>
-    sessionStoreAdapter(sessionTask, bearer, { request }).listSubkeys({
-      sessionId: "runtime-1",
-    }),
+    sessionStoreOver(request).listSubkeys({ sessionId: "runtime-1" }),
   storeBatch: (request) =>
-    sessionStoreAdapter(sessionTask, bearer, { request }).append(
-      { sessionId: "runtime-1" },
-      [{ uuid: "a", type: "assistant" }],
-    ),
+    sessionStoreOver(request).append({ sessionId: "runtime-1" }, [
+      { uuid: "a", type: "assistant" },
+    ]),
   storePage: (request) =>
-    sessionStoreAdapter(sessionTask, bearer, { request }).load({
-      sessionId: "runtime-1",
-    }),
+    sessionStoreOver(request).load({ sessionId: "runtime-1" }),
   credential: (request) =>
     planeCredential({
       task: sessionTask,

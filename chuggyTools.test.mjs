@@ -474,6 +474,7 @@ test("a maximal answer inside the captured entry is one batch the store can post
         posted.push(init.body);
         return { status: 204 };
       },
+      scrub: (text) => text,
     },
   );
   const entry = capturedEntry();

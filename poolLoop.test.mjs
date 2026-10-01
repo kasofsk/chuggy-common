@@ -137,6 +137,48 @@ test("what the pool holds is read from the backend rather than remembered", asyn
   assert.equal(passed.passed, "Reconciled");
 });
 
+test("a backend holding a workload by name alone, or as no kind the loop knows, fails the pass before it polls", async () => {
+  for (const [held, refusal] of [
+    [["running-one"], /"running-one", which names no assignment/u],
+    [[{ kind: "Job" }], /\{"kind":"Job"\}, which names no assignment/u],
+    [holding("Job", ""), /"assignment":"".*, which names no assignment/u],
+    [
+      holding("job", "running-one"),
+      /running-one of kind job, which is no workload/u,
+    ],
+    [
+      [...holding("Session", "session-one"), { assignment: "running-one" }],
+      /running-one of kind undefined, which is no workload/u,
+    ],
+  ]) {
+    const polled = [];
+    const told = [];
+    await assert.rejects(
+      workerPoolClientPass(
+        client({
+          backend: {
+            ...idle,
+            held: async () => held,
+            ended: async () => [
+              { kind: "Job", job: assignment("crashed"), why: "exited" },
+            ],
+          },
+          jobs: { end: async (ended) => told.push(ended) },
+          plane: {
+            ...quiet,
+            poll: async (...asked) => {
+              polled.push(asked);
+              return reconciled([assignment("offered")]);
+            },
+          },
+        }),
+      ),
+      refusal,
+    );
+    assert.deepEqual([polled, told], [[], []]);
+  }
+});
+
 test("a poll asks for the room left under the ceiling, and none at it", async () => {
   const asked = [];
   const plane = {
