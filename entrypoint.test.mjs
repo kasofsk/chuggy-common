@@ -602,7 +602,7 @@ test("a setup line sees the pod's environment but not the task document", async 
  * ticket's scope then fails every attempt for a file nothing asked for.
  *
  * Each odd leftover sits beside a file of the agent's that a pattern wider
- * than the leftover would swallow, so every escape, the anchor, and the names
+ * than the leftover would swallow, so every escape, the anchor, and the name
  * no pattern can hold are each the one thing between that file and the commit.
  */
 test("what setup leaves untracked is excluded, and the work is not", async () => {
@@ -616,8 +616,9 @@ test("what setup leaves untracked is excluded, and the work is not", async () =>
     "#hash": undefined,
     "!bang": undefined,
     "build dir/out": undefined,
+    "stamp\r": "stamp",
   };
-  const unheld = { "a\nsrc": "lib/src/new.py", "stamp\r": "stamp" };
+  const unheld = { "a\nsrc": "lib/src/new.py" };
   const created = (name) => `printf x > "$(printf '%s' '${name}')"`;
   await inCheckout(async ({ remote, directory, base }) => {
     const worker = {

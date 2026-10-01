@@ -30,7 +30,7 @@
  * the clone before anything runs. Neither the attempt's commit nor what the
  * agent sees as its changes carries them, and a file the agent adds under such
  * a directory goes with it. A tracked file setup changes is still the work's,
- * as is a name with a line break or carriage return, which no pattern holds.
+ * as is a name with a line break, which no pattern holds.
  */
 
 import { execFile, spawn } from "node:child_process";
@@ -182,10 +182,14 @@ function workspaceFile(directory, path) {
 }
 
 /** `path` as a gitignore pattern naming it alone, from the repository's root;
- * none where git would end the pattern inside the name. */
+ * none for a name with a line break, where git ends every pattern. A carriage
+ * return is bracketed, because git drops one that ends a line. */
 function excludedPattern(path) {
-  if (/[\n\r]/u.test(path)) return undefined;
-  return `/${path.replace(/[\\*?[]/gu, "\\$&").replace(/ $/u, "\\ ")}`;
+  if (path.includes("\n")) return undefined;
+  return `/${path
+    .replace(/[\\*?[]/gu, "\\$&")
+    .replace(/\r/gu, "[\r]")
+    .replace(/ $/u, "\\ ")}`;
 }
 
 /** `paths` excluded in the clone at `directory`, each by a pattern naming it alone. */
