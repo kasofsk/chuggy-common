@@ -45,6 +45,7 @@ import {
   blockStart,
   blockStop,
   liveClock,
+  liveHeard,
   liveNothing,
   livePlane,
   liveReader,
@@ -215,6 +216,39 @@ test("a block the plane never acknowledged begins again in the next post", () =>
   hear(state, "turn-1", [textDelta(0, "two")]);
 
   assert.deepEqual(taken(state), [begun(0, "Text"), written(0, 0, "one two")]);
+});
+
+/** The body a post is sent as. */
+const bodyOf = ({ turn, events }) => ({ turn, events });
+
+/**
+ * A post the sender gave up on can reach the plane after the one sent in its
+ * place. Catches a sender whose resend the late post undoes: a block begun
+ * again and emptied, or text placed back where the late post left off.
+ */
+test("a post given up on and taken after the one sent in its place leaves the reader whole", () => {
+  const state = writing(["one "]);
+  const reader = liveReader();
+  const lost = sessionLivePost(state, clear);
+  hear(state, "turn-1", [textDelta(0, "two ")]);
+  const again = sessionLivePost(state, clear);
+  sessionLiveAcknowledged(state, again);
+  assert.deepEqual(lost.events, [begun(0, "Text"), written(0, 0, "one ")]);
+  assert.deepEqual(again.events, [begun(0, "Text"), written(0, 0, "one two ")]);
+  reader.posted(bodyOf(again));
+  reader.posted(bodyOf(lost));
+  assert.equal(reader.held().blocks[0].text, "one two ");
+
+  hear(state, "turn-1", [textDelta(0, "three ")]);
+  const late = sessionLivePost(state, clear);
+  hear(state, "turn-1", [textDelta(0, "four")]);
+  const after = sessionLivePost(state, clear);
+  sessionLiveAcknowledged(state, after);
+  assert.deepEqual(late.events, [written(0, 8, "three ")]);
+  assert.deepEqual(after.events, [written(0, 8, "three four")]);
+  reader.posted(bodyOf(after));
+  reader.posted(bodyOf(late));
+  assert.equal(reader.held().blocks[0].text, "one two three four");
 });
 
 /**
@@ -631,18 +665,46 @@ test("a message's identity and a tool's name pass the scrub the store passes the
 test("a credential learned mid-block is left out of every later post, and its block begins again", () => {
   const scrubbing = credentialScrubbing([]);
   const state = writing([`saw ${secret} once`], scrubbing);
-  assert.deepEqual(taken(state, scrubbing), [
-    begun(0, "Text"),
-    written(0, 0, `saw ${secret} once`),
+  const reader = liveReader();
+  assert.deepEqual(drained(state, reader, scrubbing), [
+    [begun(0, "Text"), written(0, 0, `saw ${secret} once`)],
   ]);
 
   hear(state, "turn-1", [textDelta(0, ` and ${secret.slice(0, 20)}`)]);
   scrubbing.keepSecret({ kind: "minted", value: secret });
 
-  assert.deepEqual(taken(state, scrubbing), [
-    begun(0, "Text"),
-    written(0, 0, "saw [redacted credential] once and "),
+  const shorter = "saw [redacted credential] once and ";
+  assert.deepEqual(drained(state, reader, scrubbing), [
+    [begun(0, "Text"), written(0, 0, shorter)],
   ]);
+  assert.equal(reader.held().blocks[0].text, shorter);
+});
+
+/**
+ * A reader keeps a block that begins again, so the text sent from its start
+ * is what moves it. Catches a resend that leaves the reader holding what was
+ * sent before the credential was known, where the text only differs past the
+ * first event and where it has grown shorter.
+ */
+test("a block that begins again carries its reader to the new text, however far in the two part", () => {
+  const far = "a".repeat(2 * sessionLiveTextBytesMax);
+  for (const before of ["", far]) {
+    const scrubbing = credentialScrubbing([]);
+    const state = writing([`${before}${secret} and ${secret}`], scrubbing);
+    const reader = liveReader();
+    drained(state, reader, scrubbing);
+    assert.equal(reader.held().blocks[0].text, state.blocks.get(0).raw);
+
+    scrubbing.keepSecret({ kind: "minted", value: secret });
+    hear(state, "turn-1", [blockStop(0)]);
+    const [again] = drained(state, reader, scrubbing);
+
+    assert.deepEqual(again[0], begun(0, "Text"));
+    assert.equal(
+      reader.held().blocks[0].text,
+      `${before}[redacted credential] and [redacted credential]`,
+    );
+  }
 });
 
 /** A sender over a plane and a clock the case holds, and what it warned. `services` replaces any of what it is built on. */
@@ -853,6 +915,38 @@ test("an ended turn's end is sent again after the retry wait where the plane cou
   assert.equal(plane.posts.length, 3, "an end the plane took was sent again");
 });
 
+/**
+ * An end the plane took without the sender hearing so is sent again, with
+ * whatever text went with it. The reader has let the turn go by then: it
+ * holds none of that text as a block's, and the second end leaves nothing
+ * again.
+ */
+test("an end the plane took unheard is sent again, and its reader is left holding nothing", async () => {
+  for (const last of [[], [textDelta(0, "last words")]]) {
+    const { plane, clock, sender, hearing } = senderOf();
+
+    hearing("turn-1", opening);
+    await plane.answer();
+    hearing("turn-1", last);
+    sender.ended("turn-1");
+    await clock.advance(sessionLiveBounds.postGapMsMin);
+    await plane.answer(new Error("the answer was lost"));
+    await clock.advance(sessionLiveBounds.postRetryMs);
+    await plane.answer();
+
+    const [, ending, again] = plane.posts;
+    assert.deepEqual(ending.events.at(-1), end);
+    assert.deepEqual(again, ending);
+    let held = liveNothing;
+    for (const [at, { turn, events }] of plane.posts.entries())
+      for (const event of events) {
+        held = liveHeard(held, turn, event);
+        if (at === 2) assert.ok(held.blocks.every(({ text }) => text === ""));
+      }
+    assert.deepEqual(held, liveNothing);
+  }
+});
+
 test("a post the plane refuses stops the turn's stream, and the next turn's is sent", async () => {
   const { plane, clock, sender, hearing, warned } = senderOf();
 
@@ -1024,8 +1118,9 @@ function turnEvents(messages) {
 /**
  * A drawn turn heard by a sender whose plane takes, refuses and loses posts
  * at drawn moments, until the turn has ended and the plane holds all of it.
- * A lost post is one the plane may have taken without the sender hearing so,
- * which the reader is shown or not by another draw.
+ * A lost post is one the plane may have taken without the sender hearing so:
+ * by another draw the reader is shown it at once, never, or late, after the
+ * next post it is shown, where that is still a post of the same message.
  */
 async function streamedTurn(random, messages, held) {
   const bounds = {
@@ -1035,11 +1130,19 @@ async function streamedTurn(random, messages, held) {
   const { plane, clock, sender } = senderOf({ ...held, bounds });
   const reader = liveReader();
   const unheard = turnEvents(messages);
+  const late = [];
+  const shown = (post) => {
+    reader.posted(post);
+    for (const stale of late.splice(0))
+      if (stale.events[0].message === reader.held().message)
+        reader.posted(stale);
+  };
   let answered = 0;
   const answer = async (status) => {
-    const lost = status instanceof Error;
-    if (status === 204 || (lost && drawnBelow(random, 2) === 0))
-      reader.posted(plane.posts[answered]);
+    const post = plane.posts[answered];
+    const fate = status instanceof Error ? drawnBelow(random, 3) : status;
+    if (fate === 204 || fate === 0) shown(post);
+    if (fate === 1) late.push(post);
     answered += 1;
     await plane.answer(status);
   };
@@ -1059,6 +1162,52 @@ async function streamedTurn(random, messages, held) {
   }
   return { posts: plane.posts, reader };
 }
+
+/**
+ * A credential the session learns of while a block is written, over drawn
+ * credentials, texts, cuts and posts the plane takes or does not: no text
+ * sent once it is known is anything but the scrubbed block's, and the reader
+ * ends holding that block.
+ */
+test("a credential learned while a block is written is in no later post, and its reader ends holding what the store does", () => {
+  for (let seed = 1; seed <= 500; seed += 1) {
+    const random = seeded(seed);
+    const secrets = drawnSecrets(random);
+    const scrubbing = credentialScrubbing(
+      secrets.slice(0, -1).map((value) => ({ kind: "agent", value })),
+    );
+    const text = drawnText(random, secrets, 10);
+    const deltas = drawnCuts(random, text, 7);
+    const learnedAt = drawnBelow(random, deltas.length + 1);
+    const whole = credentialScrub(secrets)(text);
+    const state = writing([], scrubbing);
+    const reader = liveReader();
+    const named = `seed ${String(seed)}`;
+    const posting = (known) => {
+      const post = sessionLivePost(state, scrubbing);
+      if (post === undefined) return;
+      for (const { live, offset, text: sent } of known ? post.events : [])
+        if (live === "Text")
+          assert.equal(sent, whole.slice(offset, offset + sent.length), named);
+      if (drawnBelow(random, 3) === 0) return;
+      reader.posted(bodyOf(post));
+      sessionLiveAcknowledged(state, post);
+    };
+
+    for (const [at, delta] of [...deltas, undefined].entries()) {
+      if (at === learnedAt)
+        scrubbing.keepSecret({ kind: "minted", value: secrets.at(-1) });
+      if (delta === undefined) break;
+      hear(state, "turn-1", [textDelta(0, delta)], scrubbing);
+      if (drawnBelow(random, 2) === 0) posting(at >= learnedAt);
+    }
+    hear(state, "turn-1", [blockStop(0)], scrubbing);
+    posting(true);
+    drained(state, reader, scrubbing);
+
+    assert.equal(reader.held().blocks[0].text, whole, named);
+  }
+});
 
 /**
  * Over drawn credentials, texts, cuts and plane answers: every text sent of a

@@ -6,7 +6,9 @@
  * THE READER IS WRITTEN HERE BECAUSE THE PACK DOES NOT CARRY IT. The worker
  * contract ships the live events and not `threadLiveHeard`, the fold the plane
  * reads them with, so `liveHeard` is that fold again: a sender is right when
- * this reader is never left with a block it missed text of.
+ * this reader is never left with a block it missed text of. The fold takes a
+ * post it has already heard as nothing new, because a post the sender gave up
+ * on can still arrive after the one sent in its place.
  */
 
 import { setImmediate } from "node:timers";
@@ -45,13 +47,35 @@ export const settled = () => new Promise((resolve) => setImmediate(resolve));
 
 export const liveNothing = { blocks: [] };
 
-/** A text block once more of its text is heard, gapped where the text does not join what is held. */
+/**
+ * A text block once more of its text is heard, gapped where the text does not
+ * join what is held. Text the block already holds at its offset changes
+ * nothing, which is a post heard again after a later one.
+ */
 function liveTextHeard(block, event) {
   if (block === undefined)
     return { index: event.index, kind: "Text", text: "", gapped: true };
   if (block.gapped || block.kind !== "Text" || event.offset > block.text.length)
     return { ...block, text: "", gapped: true };
+  if (block.text.startsWith(event.text, event.offset)) return block;
   return { ...block, text: block.text.slice(0, event.offset) + event.text };
+}
+
+/** A block once it is said to begin: the one held where that is whole and the same block, and otherwise an empty one. */
+function liveBlockHeard(block, event) {
+  const same =
+    block !== undefined &&
+    !block.gapped &&
+    block.kind === event.kind &&
+    block.name === event.name;
+  if (same) return block;
+  return {
+    index: event.index,
+    kind: event.kind,
+    ...(event.name === undefined ? {} : { name: event.name }),
+    text: "",
+    gapped: false,
+  };
 }
 
 /** What a reader holds once `event` of `turn` is heard. */
@@ -59,19 +83,11 @@ export function liveHeard(held, turn, event) {
   if (event.live === "End") return held.turn === turn ? liveNothing : held;
   const blocks =
     held.turn === turn && held.message === event.message ? held.blocks : [];
+  const block = blocks.find(({ index }) => index === event.index);
   const heard =
     event.live === "Block"
-      ? {
-          index: event.index,
-          kind: event.kind,
-          ...(event.name === undefined ? {} : { name: event.name }),
-          text: "",
-          gapped: false,
-        }
-      : liveTextHeard(
-          blocks.find((block) => block.index === event.index),
-          event,
-        );
+      ? liveBlockHeard(block, event)
+      : liveTextHeard(block, event);
   return {
     turn,
     message: event.message,
