@@ -19,7 +19,7 @@ import { z } from "zod";
 
 import { overPlane, planeFetch, planes } from "./plane.fixture.mjs";
 import { sessionMain } from "./session.mjs";
-import { sessionRequest } from "./sessionTransport.mjs";
+import { sessionRequest, sessionRequestOnce } from "./sessionTransport.mjs";
 
 /**
  * The rosters the session suites open a lead and a thread with. They are cases
@@ -126,7 +126,11 @@ export function planeOf(turns, facts, refuse = () => undefined, minted) {
         return { status: 204 };
     }
   });
-  return { calls, request: overPlane(sessionRequest, plane.fetch) };
+  return {
+    calls,
+    request: overPlane(sessionRequest, plane.fetch),
+    requestOnce: overPlane(sessionRequestOnce, plane.fetch),
+  };
 }
 
 export function queryOf(script) {
