@@ -130,16 +130,28 @@ test("a hold the plane spent is followed at once, and an answer sooner than the 
   assert.equal(seen.interrupts, 1);
 });
 
-test("a plane that could not be asked is asked again after the mailbox's pause", async () => {
-  for (const failure of [new Error("unreachable"), answered(503)]) {
+/**
+ * A condition is asked past: a plane that raised or failed, and the answers
+ * something between the runner and the plane gives of its own accord. Taken
+ * as the plane's decision, one of those would leave every later stop of the
+ * session unheard.
+ */
+test("a plane that could not be asked, or was answered for with a condition that passes, is asked again after the mailbox's pause", async () => {
+  for (const failure of [
+    new Error("unreachable"),
+    answered(503),
+    answered(408),
+    answered(425),
+    answered(429),
+  ]) {
     const { watch, seen } = watchOver([failure, stopped("turn-1")]);
 
     watch.watching("turn-1");
     await settled();
 
-    assert.equal(seen.asks.length, 2);
-    assert.deepEqual(seen.pauses, [pollMs]);
-    assert.equal(seen.interrupts, 1);
+    assert.equal(seen.asks.length, 2, String(failure.status));
+    assert.deepEqual(seen.pauses, [pollMs], String(failure.status));
+    assert.equal(seen.interrupts, 1, String(failure.status));
   }
 });
 
@@ -147,6 +159,7 @@ test("a plane that answers anything else is asked nothing more, of that turn or 
   for (const refusal of [
     answered(400),
     answered(401),
+    answered(403),
     answered(404),
     answered(409),
     stopped("turn-9"),
@@ -573,6 +586,50 @@ test("a store refusal behind a stopped turn's result is charged to the turn afte
       ],
     ],
   });
+});
+
+/**
+ * The session over the same condition: the plane is the suites' own from the
+ * second question on, and the first is answered for it as something between
+ * the two would.
+ */
+test("one condition answered to the watch leaves the stop of a later turn heard", async () => {
+  const plane = planeOf(
+    [turnOne, turnTwo],
+    threadFacts,
+    undefined,
+    undefined,
+    stoppedOnce(["turn-2"]),
+  );
+  let conditions = 0;
+  const requestOnce = (asked, held, path, ...rest) => {
+    if (path !== stopPath || conditions > 0)
+      return plane.requestOnce(asked, held, path, ...rest);
+    conditions += 1;
+    return Promise.resolve(new globalThis.Response(null, { status: 429 }));
+  };
+  const heardWithin = 200;
+  const runtime = interruptible((turn, interrupted) =>
+    turn === 0
+      ? [init, settled, settled, result("success", { result: "whole" })]
+      : [
+          () => Promise.race([interrupted(), wait(heardWithin)]),
+          result("error_during_execution"),
+        ],
+  );
+
+  const session = await threadOver(plane, runtime, { requestOnce });
+
+  assert.equal(conditions, 1);
+  assert.deepEqual(runtime.seen.interrupts, [1]);
+  assert.deepEqual(session.settlements, [
+    [sessionPlaneRoutes.turnAnswer.path, { turn: "turn-1", result: "whole" }],
+    [
+      sessionPlaneRoutes.turnFailure.path,
+      { turn: "turn-2", failure: "AgentFailed" },
+    ],
+  ]);
+  assert.equal(session.code, 0);
 });
 
 /**

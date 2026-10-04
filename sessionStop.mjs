@@ -18,8 +18,9 @@
  * with the runtime's own result and is settled as that result says, which the
  * plane takes and keeps nothing of; `stopped` is how the session knows the
  * result it read is such a turn's. A plane that could not be asked is asked
- * again, and one that answers anything else has decided, so this session asks
- * it nothing more.
+ * again, and so is one answered for by whatever stands between it and this
+ * with a condition of its own, which a runner on a public host is. Any other
+ * answer is the plane's decision, so this session asks it nothing more.
  */
 
 import { sessionPlaneRoutes } from "@chuggy/worker-contract/sessionPlane";
@@ -30,6 +31,9 @@ export const sessionStopBounds = Object.freeze({ askDeadlineMs: 60_000 });
 const stoppedStatus = 200;
 const runningStatus = 204;
 const serverErrorStatusMin = 500;
+
+/** The statuses that say a request waited too long, came too early or came too often: conditions that pass, and none the plane's route answers. */
+const passingStatuses = [408, 425, 429];
 
 /**
  * What the plane made of one question about `held`: its turn was stopped, it
@@ -55,7 +59,10 @@ async function stopAsked(watch, held) {
         : "Refused";
     await response.body?.cancel();
     if (response.status === runningStatus) return "Running";
-    return response.status < serverErrorStatusMin ? "Refused" : "Unavailable";
+    return response.status >= serverErrorStatusMin ||
+      passingStatuses.includes(response.status)
+      ? "Unavailable"
+      : "Refused";
   } catch {
     return "Unavailable";
   }
