@@ -990,7 +990,9 @@ async function sessionRuntime(
 /**
  * The live sender a session that reports live holds, under the session's own
  * clock, pauses and scrub. It reaches the plane through the request that is
- * asked once, because `context.request` waits out a plane that is down.
+ * asked once, because `context.request` waits out a plane that is down. A
+ * turn the plane answers a post of as stopped is handed to the session's
+ * watch, where it holds one.
  */
 function sessionLive(context, facts, { services, pause, warn }) {
   if (!sessionReportsLive(facts)) return undefined;
@@ -1001,6 +1003,7 @@ function sessionLive(context, facts, { services, pause, warn }) {
     scrub: context.scrub,
     scrubHead: context.scrubHead,
     warn,
+    turnStopped: (turn) => context.stops?.told(turn),
     bounds: services.liveBounds,
   });
 }

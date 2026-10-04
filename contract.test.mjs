@@ -290,6 +290,7 @@ async function reportedLive(request) {
     scrub: (text) => text,
     scrubHead: (text) => text,
     warn: (text) => warned.push(text),
+    turnStopped: () => undefined,
   });
   sender.heard("turn-1", messageStart("message-1"));
   sender.heard("turn-1", blockStart(0, { type: "text", text: "kestrel" }));
@@ -466,6 +467,7 @@ const sessionReactions = {
   turnAnswer: { 204: "reads", 400: "stops", 401: "stops", 409: "stops" },
   turnFailure: { 204: "reads", 400: "stops", 401: "stops", 409: "stops" },
   turnLive: {
+    200: "reads",
     204: "reads",
     400: "stops",
     401: "stops",
@@ -513,11 +515,16 @@ const sessionReactions = {
   },
 };
 
-/** Each way `route` may answer `status`: its success where that is what it is, and otherwise once for every body the status carries. */
-function answersOf(wire, success, route, status) {
+/** The body of a status that is neither its route's success nor a refusal: the stopped turn a live post is answered with. */
+const sessionBodies = { turnLive: { 200: { turn: turnOne.turn } } };
+
+/** Each way `route` may answer `status`: its success where that is what it is, the body `bodies` names for it, and otherwise once for every refusal the status carries. */
+function answersOf(wire, success, bodies, route, status) {
   const schema = wire.answers[route][status];
   if (schema === "empty" || success(route, 1).status === status)
     return [{ status }];
+  const named = bodies[route]?.[status];
+  if (named !== undefined) return [{ status, body: named }];
   return refusalBodies(schema).map((body) => ({ status, body }));
 }
 
@@ -529,6 +536,7 @@ async function heldToMap(
   callers,
   success,
   transport,
+  bodies = {},
 ) {
   assert.deepEqual(
     [...Object.keys(reactions), ...uncalled].sort(),
@@ -542,7 +550,13 @@ async function heldToMap(
       `${route} answers statuses this suite does not name`,
     );
     for (const [status, expected] of Object.entries(statuses))
-      for (const answer of answersOf(wire, success, route, Number(status)))
+      for (const answer of answersOf(
+        wire,
+        success,
+        bodies,
+        route,
+        Number(status),
+      ))
         assert.equal(
           await reaction(
             wire,
@@ -580,6 +594,7 @@ test("every status a session route the pod calls may answer is one the pod has a
     sessionCallers,
     sessionSuccess,
     sessionTransport,
+    sessionBodies,
   );
 });
 

@@ -707,23 +707,25 @@ test("a block that begins again carries its reader to the new text, however far 
   }
 });
 
-/** A sender over a plane and a clock the case holds, and what it warned. `services` replaces any of what it is built on. */
+/** A sender over a plane and a clock the case holds, what it warned, and each turn it was told was stopped. `services` replaces any of what it is built on. */
 function senderOf(services = {}) {
   const plane = livePlane();
   const clock = liveClock();
   const warned = [];
+  const told = [];
   const sender = sessionLiveSender(task, bearer, {
     request: plane.request,
     now: clock.now,
     pause: clock.pause,
     ...clear,
     warn: (text) => warned.push(text),
+    turnStopped: (turn) => told.push(turn),
     ...services,
   });
   const hearing = (turn, events) => {
     for (const event of events) sender.heard(turn, event);
   };
-  return { plane, clock, warned, sender, hearing };
+  return { plane, clock, warned, told, sender, hearing };
 }
 
 const opening = [messageStart("message-1"), textStart(0)];
@@ -969,20 +971,77 @@ test("a post the plane refuses stops the turn's stream, and the next turn's is s
   ]);
 });
 
-test("a late refusal of the last turn's post leaves the turn that followed it streaming", async () => {
-  const { plane, sender, hearing } = senderOf({ bounds: { postGapMsMin: 0 } });
+/**
+ * The soonest a session that is writing can hear of its member's stop is the
+ * answer to what it posts. Nothing more of the turn is posted, because none
+ * of it would reach a reader, and it is no post the plane failed to take.
+ */
+test("a post the plane answers with its turn as stopped is told once, and nothing more of that turn is posted", async () => {
+  const { plane, clock, sender, hearing, warned, told } = senderOf();
 
-  hearing("turn-1", opening);
-  hearing("turn-2", [...opening, textDelta(0, "next")]);
-  await plane.answer(400);
+  hearing("turn-1", [...opening, textDelta(0, "written")]);
+  await plane.answer(200, { turn: "turn-1" });
+  assert.deepEqual(told, ["turn-1"]);
 
+  hearing("turn-1", [textDelta(0, " after the stop")]);
+  sender.ended("turn-1");
+  await clock.advance(sessionLiveBounds.postRetryMs);
+  assert.equal(plane.posts.length, 1, "a stopped turn went on being sent");
+
+  hearing("turn-2", opening);
   assert.deepEqual(plane.posts[1], {
     turn: "turn-2",
-    events: [begun(0, "Text"), written(0, 0, "next")],
+    events: [begun(0, "Text")],
   });
   await plane.answer();
-  sender.ended("turn-2");
-  assert.deepEqual(plane.posts[2], { turn: "turn-2", events: [end] });
+  sender.close();
+  assert.deepEqual(told, ["turn-1"]);
+  assert.deepEqual(warned, []);
+});
+
+test("a stop answered naming a turn the post was not of is a refusal, and is told of no turn", async () => {
+  const { plane, clock, sender, hearing, warned, told } = senderOf();
+
+  hearing("turn-1", opening);
+  await plane.answer(200, { turn: "turn-9" });
+  hearing("turn-1", [textDelta(0, "unsent")]);
+  await clock.advance(sessionLiveBounds.postRetryMs);
+  sender.close();
+
+  assert.deepEqual(told, []);
+  assert.equal(plane.posts.length, 1);
+  assert.deepEqual(warned, [
+    "the worker plane did not take 1 of 1 live posts\n",
+  ]);
+});
+
+test("a late answer to the last turn's post, a refusal or a stop of that turn, leaves the turn that followed it streaming", async () => {
+  for (const [status, body, tells] of [
+    [400, undefined, []],
+    [200, { turn: "turn-1" }, ["turn-1"]],
+  ]) {
+    const { plane, sender, hearing, told } = senderOf({
+      bounds: { postGapMsMin: 0 },
+    });
+
+    hearing("turn-1", opening);
+    hearing("turn-2", [...opening, textDelta(0, "next")]);
+    await plane.answer(status, body);
+
+    assert.deepEqual(told, tells, String(status));
+    assert.deepEqual(
+      plane.posts[1],
+      { turn: "turn-2", events: [begun(0, "Text"), written(0, 0, "next")] },
+      String(status),
+    );
+    await plane.answer();
+    sender.ended("turn-2");
+    assert.deepEqual(
+      plane.posts[2],
+      { turn: "turn-2", events: [end] },
+      String(status),
+    );
+  }
 });
 
 /**

@@ -9,6 +9,11 @@
  * spent is followed at once, and a plane holding nothing is asked no more
  * often than an empty mailbox is.
  *
+ * A TURN THAT IS BEING WRITTEN HEARS SOONER. The plane answers a live post of
+ * a stopped turn with the turn, and `./sessionLive.mjs` hands that to `told`,
+ * which is the plane's same answer by another road: whichever of the two
+ * arrives first interrupts, and the other finds it done.
+ *
  * A STOP INTERRUPTS THE TURN IT NAMES AND NO OTHER. The session lets go of a
  * turn when it reads the turn's result, which abandons the question in
  * flight, and an answer read after that interrupts nothing: the turn after
@@ -18,9 +23,10 @@
  * with the runtime's own result and is settled as that result says, which the
  * plane takes and keeps nothing of; `stopped` is how the session knows the
  * result it read is such a turn's. A plane that could not be asked is asked
- * again, and so is one answered for by whatever stands between it and this
- * with a condition of its own, which a runner on a public host is. Any other
- * answer is the plane's decision, so this session asks it nothing more.
+ * again. So is one that was answered for with a condition that passes, by
+ * whatever stands between a runner and a plane it reaches on a public host.
+ * Any other answer is the plane's decision, so this session asks it nothing
+ * more.
  */
 
 import { sessionPlaneRoutes } from "@chuggy/worker-contract/sessionPlane";
@@ -86,7 +92,7 @@ async function stopWatched(watch, held) {
   while (watch.held === held && watch.asking) {
     const began = watch.now();
     const answer = await stopAsked(watch, held);
-    if (watch.held !== held) return;
+    if (watch.held !== held || watch.stopped === held.turn) return;
     if (answer === "Stopped") return stopInterrupted(watch, held);
     if (answer === "Refused") {
       watch.asking = false;
@@ -101,8 +107,10 @@ async function stopWatched(watch, held) {
  * The watch a thread's session holds. `watching` takes the turn the session
  * has just claimed and `released` is told its result was read or its session
  * is over; neither waits for the plane, and nothing here raises into its
- * caller. `stopped` says whether the plane said `turn` was stopped while the
- * session held it. `interrupt` is the runtime's own.
+ * caller. `told` takes a turn the plane said was stopped in answer to
+ * something else, and interrupts where that is the turn held and no answer
+ * has interrupted it yet. `stopped` says whether the plane said `turn` was
+ * stopped while the session held it. `interrupt` is the runtime's own.
  */
 export function sessionStopWatch(task, bearer, services) {
   const { request, now, pause, interrupt, warn } = services;
@@ -127,12 +135,18 @@ export function sessionStopWatch(task, bearer, services) {
   return {
     watching(turn) {
       released();
-      if (!watch.asking) return;
       const held = { turn, letGo: new globalThis.AbortController() };
       watch.held = held;
+      if (!watch.asking) return;
       stopWatched(watch, held).catch(() => {
         watch.asking = false;
       });
+    },
+    told(turn) {
+      const held = watch.held;
+      if (held?.turn !== turn || watch.stopped === turn) return;
+      held.letGo.abort();
+      stopInterrupted(watch, held).catch(() => undefined);
     },
     released,
     stopped: (turn) => turn !== undefined && watch.stopped === turn,

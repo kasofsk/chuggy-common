@@ -21,7 +21,13 @@ import {
   threadRoster,
   turnOne,
 } from "./sessionHarness.fixture.mjs";
-import { settled } from "./sessionLive.fixture.mjs";
+import {
+  messageStart,
+  settled,
+  streamed,
+  textDelta,
+  textStart,
+} from "./sessionLive.fixture.mjs";
 import { sessionStopBounds, sessionStopWatch } from "./sessionStop.mjs";
 
 const stopPath = sessionPlaneRoutes.turnStopped.path;
@@ -226,6 +232,97 @@ test("a turn watched lets go of the one before it, and is the one asked after", 
   watch.released();
 });
 
+/**
+ * The plane's answer to a live post is the same stop by another road, and
+ * sooner where the turn is being written. It interrupts as the watch's own
+ * answer does, and lets go of the question the watch still has in flight.
+ */
+test("a turn told as stopped is interrupted once, and its question is abandoned and not asked again", async () => {
+  const { watch, seen } = watchOver([
+    (signal) => heldUntilLetGo(signal),
+    () => new Promise(() => undefined),
+  ]);
+
+  watch.watching("turn-1");
+  await settled();
+  watch.told("turn-1");
+  await settled();
+
+  assert.equal(seen.interrupts, 1);
+  assert.deepEqual(seen.warned, ["turn turn-1 was stopped by its member\n"]);
+  assert.equal(watch.stopped("turn-1"), true);
+  assert.equal(seen.asks.length, 1);
+  assert.equal(seen.asks[0].transport.signal.aborted, true);
+  assert.deepEqual(seen.pauses, []);
+});
+
+test("a stop that arrives by both roads interrupts once, whichever is first", async () => {
+  let give = () => undefined;
+  const sent = new Promise((resolve) => {
+    give = resolve;
+  });
+  const toldFirst = watchOver([() => sent]);
+  toldFirst.watch.watching("turn-1");
+  await settled();
+  toldFirst.watch.told("turn-1");
+  give(stopped("turn-1"));
+  await settled();
+  toldFirst.watch.told("turn-1");
+  await settled();
+
+  const answeredFirst = watchOver([stopped("turn-1")]);
+  answeredFirst.watch.watching("turn-1");
+  await settled();
+  answeredFirst.watch.told("turn-1");
+  await settled();
+
+  for (const { seen } of [toldFirst, answeredFirst]) {
+    assert.equal(seen.interrupts, 1);
+    assert.deepEqual(seen.warned, ["turn turn-1 was stopped by its member\n"]);
+    assert.equal(seen.asks.length, 1);
+  }
+});
+
+/**
+ * A post answered late names a turn the session has since let go of. The
+ * turn after is the one the runtime would be interrupted in.
+ */
+test("a turn told as stopped that is not the one held interrupts nothing", async () => {
+  const { watch, seen } = watchOver([(signal) => heldUntilLetGo(signal)]);
+
+  watch.told("turn-1");
+  watch.watching("turn-1");
+  await settled();
+  watch.told("turn-0");
+  watch.released();
+  watch.told("turn-1");
+  watch.watching("turn-2");
+  await settled();
+  watch.told("turn-1");
+  await settled();
+
+  assert.equal(seen.interrupts, 0);
+  assert.deepEqual(seen.warned, []);
+  assert.equal(watch.stopped("turn-1"), false);
+  assert.equal(watch.stopped("turn-2"), false);
+  watch.released();
+});
+
+test("a watch the plane decided against still interrupts a turn told as stopped", async () => {
+  const { watch, seen } = watchOver([answered(401)]);
+
+  watch.watching("turn-1");
+  await settled();
+  watch.watching("turn-2");
+  await settled();
+  watch.told("turn-2");
+  await settled();
+
+  assert.equal(seen.asks.length, 1);
+  assert.equal(seen.interrupts, 1);
+  assert.equal(watch.stopped("turn-2"), true);
+});
+
 test("a runtime that cannot be interrupted is said, and raises into nothing", async () => {
   for (const failure of [new Error("the query is closed"), "closed"]) {
     const { watch, seen } = watchOver([stopped("turn-1")], {
@@ -243,6 +340,28 @@ test("a runtime that cannot be interrupted is said, and raises into nothing", as
     ]);
     assert.equal(seen.asks.length, 1);
   }
+});
+
+test("a turn told as stopped whose interrupt cannot be said raises into nothing", async () => {
+  let interrupts = 0;
+  const { watch } = watchOver([(signal) => heldUntilLetGo(signal)], {
+    interrupt: async () => {
+      interrupts += 1;
+      throw new Error("the query is closed");
+    },
+    warn: () => {
+      throw new Error("no stderr");
+    },
+  });
+
+  watch.watching("turn-1");
+  await settled();
+  watch.told("turn-1");
+  await settled();
+
+  assert.equal(interrupts, 0);
+  assert.equal(watch.stopped("turn-1"), true);
+  watch.released();
 });
 
 test("a watch whose own pause fails asks nothing more and raises into nothing", async () => {
@@ -586,6 +705,62 @@ test("a store refusal behind a stopped turn's result is charged to the turn afte
       ],
     ],
   });
+});
+
+/**
+ * The stop of a turn that is being written, heard from a post and not from
+ * the watch, whose question the plane holds throughout. The turn after is
+ * written too and nobody stops it, so its posts are answered as taken.
+ */
+test("a thread's turn whose live post is answered as stopped is interrupted, and the turn after is answered", async () => {
+  const posts = [];
+  const plane = planeOf(
+    [turnOne, turnTwo],
+    threadFacts,
+    undefined,
+    undefined,
+    undefined,
+    ({ turn }) => {
+      posts.push(turn);
+      return turn === "turn-1"
+        ? { status: 200, body: { turn } }
+        : { status: 204 };
+    },
+  );
+  const written = [
+    streamed(messageStart("message-1")),
+    streamed(textStart(0)),
+    streamed(textDelta(0, "kestrels hover")),
+  ];
+  const heardWithin = 500;
+  const runtime = interruptible((turn, interrupted) =>
+    turn === 0
+      ? [
+          init,
+          ...written,
+          () => Promise.race([interrupted(), wait(heardWithin)]),
+          result("error_during_execution"),
+        ]
+      : [...written, settled, result("success", { result: "after" })],
+  );
+
+  const session = await threadOver(plane, runtime, {
+    liveBounds: { postGapMsMin: 0 },
+  });
+
+  assert.equal(session.code, 0);
+  assert.deepEqual(runtime.seen.interrupts, [0]);
+  assert.deepEqual(session.warned, ["turn turn-1 was stopped by its member\n"]);
+  assert.deepEqual(session.settlements, [
+    [
+      sessionPlaneRoutes.turnFailure.path,
+      { turn: "turn-1", failure: "AgentFailed" },
+    ],
+    [sessionPlaneRoutes.turnAnswer.path, { turn: "turn-2", result: "after" }],
+  ]);
+  assert.equal(posts[0], "turn-1");
+  assert.equal(posts.filter((turn) => turn === "turn-1").length, 1);
+  assert.ok(posts.includes("turn-2"));
 });
 
 /**

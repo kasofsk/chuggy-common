@@ -120,7 +120,8 @@ export function heldUntilLetGo(signal) {
  * to answer a path with instead, which must be one its route answers.
  * `stopped(turn, signal)` answers the watch on a turn, which without one is
  * held for as long as the turn is watched, as a plane holds it for a turn
- * nobody stopped.
+ * nobody stopped. `live(post)` answers a post of live events, which without
+ * one is taken.
  */
 export function planeOf(
   turns,
@@ -128,6 +129,7 @@ export function planeOf(
   refuse = () => undefined,
   minted,
   stopped = (_turn, signal) => heldUntilLetGo(signal),
+  live = () => ({ status: 204 }),
 ) {
   const calls = [];
   let claims = 0;
@@ -154,6 +156,8 @@ export function planeOf(
       }
       case "turnStopped":
         return stopped(body.turn, signal);
+      case "turnLive":
+        return live(body);
       case "storeStreams":
         return { status: 200, body: { streams: [] } };
       case "storePage":
