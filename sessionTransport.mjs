@@ -1,7 +1,8 @@
 /**
- * The session pod's one way to reach the worker plane: `workerRequest`'s bounded
+ * The session pod's way to reach the worker plane: `workerRequest`'s bounded
  * retry, against the same base URL, with the same headers and under the session
- * bearer.
+ * bearer. `sessionRequestOnce` is the same request with no retry, for the one
+ * caller that may not wait.
  *
  * A RETRY IS FOR A CONDITION, NEVER FOR A DECISION. The session routes answer
  * `stop` and `retry` as distinct things — a fenced attempt is `401`, a batch
@@ -78,6 +79,27 @@ export async function sessionRequest(
     await pause(delay);
   }
   throw refusal ?? new Error("worker plane retry bound was exhausted");
+}
+
+/**
+ * One request under the same headers, asked once and abandoned at
+ * `deadlineMs`. It is what a caller no turn waits for reaches the plane
+ * through: every status is returned for it to read, and a thrown fetch or a
+ * passed deadline raises at once.
+ */
+export async function sessionRequestOnce(
+  task,
+  bearer,
+  path,
+  init = {},
+  transport = {},
+) {
+  const { fetch: send = globalThis.fetch, deadlineMs } = transport;
+  return send(new URL(path, task.workerPlane.url), {
+    ...init,
+    headers: workerPlaneHeaders(bearer, init.headers),
+    signal: globalThis.AbortSignal.timeout(deadlineMs),
+  });
 }
 
 /** What the plane answers a heartbeat with once the lease is gone, which is a stop on every route. */
