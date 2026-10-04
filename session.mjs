@@ -49,10 +49,15 @@
  * `./sessionStop.mjs` interrupts the runtime, whose query stays open, and the
  * turn's result is read and settled as that result says: the plane has already
  * ended the turn and keeps nothing of the settlement. The drain is what the
- * member's next turn would wait out, and it guards a result the plane records,
- * which this one is not. A batch the interrupt left that the store refuses is
- * reported ahead of the interrupted turn's result, so it is still that turn's
- * `StoreRefused` and still stops the session.
+ * member's next turn would wait out. What the interrupted turn wrote is
+ * mirrored before its result is handed on, so a batch of it the store refuses
+ * is reported ahead of that result and is still the stopped turn's
+ * `StoreRefused`. What the runtime writes on its own clock is mirrored behind
+ * the result, as the title it gives a session is where the first turn is
+ * stopped before the title is ready. A refusal of that is reported behind the
+ * result too, and with no drain it is charged to the turn after, which runs to
+ * its result, fails `StoreRefused` and ends the session, as a refusal later
+ * than the drain is charged after any turn.
  */
 
 import { mkdir, readFile } from "node:fs/promises";

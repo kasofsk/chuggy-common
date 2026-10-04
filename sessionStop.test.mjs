@@ -474,10 +474,17 @@ test("a turn its member stopped is settled at its result, and a turn that ran to
   assert.equal(neither.drains, 2);
 });
 
+const mirrorError = {
+  type: "system",
+  subtype: "mirror_error",
+  error: "gave up",
+};
+
 /**
- * The runtime reports a batch the store refused ahead of the result of the
- * turn that wrote it, an interrupted turn's among them. So the refusal is
- * still the stopped turn's with no drain behind its result.
+ * What a turn wrote is mirrored before its result is handed on, an
+ * interrupted turn's too, so a batch of it the store refused is reported
+ * ahead of that result. That refusal is still the stopped turn's with no
+ * drain behind its result.
  */
 test("a store refusal ahead of an interrupted turn's result fails that turn and stops the session before the turn after", async () => {
   const plane = planeOf(
@@ -489,12 +496,7 @@ test("a store refusal ahead of an interrupted turn's result fails that turn and 
   );
   const runtime = interruptible((turn, interrupted) =>
     turn === 0
-      ? [
-          init,
-          interrupted,
-          { type: "system", subtype: "mirror_error", error: "gave up" },
-          result("error_during_execution"),
-        ]
+      ? [init, interrupted, mirrorError, result("error_during_execution")]
       : [result("success", { result: "after" })],
   );
 
@@ -508,6 +510,69 @@ test("a store refusal ahead of an interrupted turn's result fails that turn and 
     ],
   ]);
   assert.deepEqual(session.asked, ["turn-1"]);
+});
+
+/**
+ * What the skipped drain costs, held so that it is not taken for an accident.
+ * What the runtime writes on its own clock is mirrored behind a result, the
+ * title it gives a session among it, and a refusal of that is reported behind
+ * the result: the drain makes it the turn's own, and with no drain it is the
+ * next turn's, as a refusal later than the drain is after any turn.
+ */
+test("a store refusal behind a stopped turn's result is charged to the turn after, which runs to its result and ends the session", async () => {
+  const session = async (stops, first) => {
+    const ran = [];
+    const runtime = interruptible((turn, interrupted) => {
+      ran.push(turn);
+      return turn === 0
+        ? [init, ...first(interrupted), mirrorError]
+        : [result("success", { result: "after" })];
+    });
+    const over = await threadOver(
+      planeOf(
+        [turnOne, turnTwo],
+        threadFacts,
+        undefined,
+        undefined,
+        stoppedOnce(stops),
+      ),
+      runtime,
+    );
+    return { code: over.code, ran, settled: over.settlements };
+  };
+
+  const stoppedFirst = await session(["turn-1"], (interrupted) => [
+    interrupted,
+    result("error_during_execution"),
+  ]);
+  const neither = await session([], () => [
+    result("success", { result: "whole" }),
+  ]);
+
+  assert.deepEqual(stoppedFirst, {
+    code: 1,
+    ran: [0, 1],
+    settled: [
+      [
+        sessionPlaneRoutes.turnFailure.path,
+        { turn: "turn-1", failure: "AgentFailed" },
+      ],
+      [
+        sessionPlaneRoutes.turnFailure.path,
+        { turn: "turn-2", failure: "StoreRefused" },
+      ],
+    ],
+  });
+  assert.deepEqual(neither, {
+    code: 1,
+    ran: [0],
+    settled: [
+      [
+        sessionPlaneRoutes.turnFailure.path,
+        { turn: "turn-1", failure: "StoreRefused" },
+      ],
+    ],
+  });
 });
 
 /**
