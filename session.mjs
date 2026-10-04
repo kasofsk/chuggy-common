@@ -84,11 +84,16 @@ import {
 } from "./rateLimit.mjs";
 import { planeCredential, sessionCredentialPath } from "./planeCredential.mjs";
 import { workerRepositories } from "./repository.mjs";
-import { credentialScrub } from "./runEvidence.mjs";
+import { credentialScrub, credentialScrubHead } from "./runEvidence.mjs";
 import { sessionCheckout } from "./sessionCheckout.mjs";
+import { sessionLiveSender } from "./sessionLive.mjs";
 import { sessionMailbox } from "./sessionMailbox.mjs";
 import { sessionStoreAdapter } from "./sessionStore.mjs";
-import { sessionRequest, sessionStopped } from "./sessionTransport.mjs";
+import {
+  sessionRequest,
+  sessionRequestOnce,
+  sessionStopped,
+} from "./sessionTransport.mjs";
 import { rosterLabel } from "./wire.mjs";
 
 /** The failures this pod names for a turn, each one the plane's roster carries. */
@@ -487,6 +492,15 @@ function sessionSystemPrompt(facts) {
 }
 
 /**
+ * Whether this session reports its answer while its model writes it, which a
+ * thread does and no other kind: it is what asks the runtime for partial
+ * messages, and what a live sender is opened for.
+ */
+function sessionReportsLive(facts) {
+  return facts.kind === "Thread";
+}
+
+/**
  * The options one session's query runs under, every bound the pod was launched
  * with.
  *
@@ -543,6 +557,7 @@ export function sessionQueryOptions(
         ? { resume: facts.agentReference }
         : {}),
     ...(typeof model === "string" && model.length > 0 ? { model } : {}),
+    ...(sessionReportsLive(facts) ? { includePartialMessages: true } : {}),
   };
 }
 
@@ -587,9 +602,22 @@ async function bindReference(context, message) {
   context.bound = true;
 }
 
+/**
+ * One event of the message being written, handed to the live sender where the
+ * session has one. A subagent's stream names the call that began it and is
+ * not the session's answer.
+ */
+function observeStream(context, message) {
+  if (message.parent_tool_use_id !== null) return;
+  context.live?.heard(context.mailbox.claimed()?.turn, message.event);
+}
+
 async function observe(context, message) {
+  if (message.type === "stream_event") return observeStream(context, message);
   observeRateLimit(context.sightings, message);
   context.measure.saw(message);
+  if (message.type === "result")
+    context.live?.ended(context.mailbox.claimed()?.turn);
   if (message.type !== "system") return;
   if (message.subtype === "init") await bindReference(context, message);
   if (message.subtype === "mirror_error") context.mirrored = true;
@@ -698,6 +726,8 @@ export async function runSessionTurns(context) {
     const { result, ended } = await runSessionTurn(context);
     const turn = context.mailbox.claimed();
     if (turn === undefined) return context.mirrored ? 1 : 0;
+    // A turn whose stream ended with no result is over too.
+    context.live?.ended(turn.turn);
     const verdict = await settleTurn(context, turn, result);
     if (verdict === "Held" || verdict === "Spent") {
       context.mailbox.stop();
@@ -828,15 +858,17 @@ async function sessionHeld(context, environment, read, write, facts) {
     facts.credentialSlot,
   );
   const minted = await sessionMintedCredential(task, bearer, request, write);
+  const secrets = [
+    token,
+    bearer,
+    ...(minted === undefined ? [] : [minted.password]),
+  ];
   return {
     credentialFiles: files,
     token,
     minted,
-    scrub: credentialScrub([
-      token,
-      bearer,
-      ...(minted === undefined ? [] : [minted.password]),
-    ]),
+    scrub: credentialScrub(secrets),
+    scrubHead: credentialScrubHead(secrets),
   };
 }
 
@@ -924,6 +956,24 @@ async function sessionRuntime(
 }
 
 /**
+ * The live sender a session that reports live holds, under the session's own
+ * clock, pauses and scrub. It reaches the plane through the request that is
+ * asked once, because `context.request` waits out a plane that is down.
+ */
+function sessionLive(context, facts, { services, pause, warn }) {
+  if (!sessionReportsLive(facts)) return undefined;
+  return sessionLiveSender(context.task, context.bearer, {
+    request: services.requestOnce ?? sessionRequestOnce,
+    now: context.now,
+    pause,
+    scrub: context.scrub,
+    scrubHead: context.scrubHead,
+    warn,
+    bounds: services.liveBounds,
+  });
+}
+
+/**
  * The session once everything it runs on is in hand: the store its kind decides
  * the mode of, the mailbox its turns arrive through, and either the runtime it
  * speaks with or one of the refusals that stands in place of one. Both
@@ -955,7 +1005,12 @@ async function sessionRun(context, facts, opened) {
     return await refuseSession(context, warn, opened.checkout.refused);
   const stream = await sessionRuntime(context, { ...opened, facts });
   context.reader = messageReader(stream, pause);
-  return await runSessionTurns(context);
+  context.live = sessionLive(context, facts, opened);
+  try {
+    return await runSessionTurns(context);
+  } finally {
+    context.live?.close();
+  }
 }
 
 /**
@@ -1037,6 +1092,7 @@ export async function sessionMain(services = {}) {
     const { credentialFiles, token, minted } = held;
     scrub = held.scrub;
     context.scrub = scrub;
+    context.scrubHead = held.scrubHead;
     const workspace = environment[workerWorkspaceVariable] ?? defaultWorkspace;
     await ensureDirectory(sessionConfigDirectory(environment, workspace));
     stopLease = startLease(task, bearer, request);

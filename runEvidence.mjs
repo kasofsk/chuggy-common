@@ -79,9 +79,7 @@ const [runFailed, runRateLimited, runTurnsExhausted, runUploadRefused] = [
  * not where JSON has escaped it.
  */
 export function credentialScrub(secrets) {
-  const values = [...new Set(secrets)]
-    .filter(credentialScrubReplaces)
-    .sort((left, right) => right.length - left.length);
+  const values = credentialScrubValues(secrets);
   return (text) =>
     values.reduce(
       (scrubbed, value) => scrubbed.split(value).join(credentialRedaction),
@@ -89,8 +87,39 @@ export function credentialScrub(secrets) {
     );
 }
 
+/** The values a scrub replaces, in the order it replaces them: longest first. */
+function credentialScrubValues(secrets) {
+  return [...new Set(secrets)]
+    .filter(credentialScrubReplaces)
+    .sort((left, right) => right.length - left.length);
+}
+
 function credentialScrubReplaces(secret) {
   return typeof secret === "string" && secret.length >= credentialScrubCharsMin;
+}
+
+/**
+ * The scrub of a text still being written: a head of what `credentialScrub`
+ * makes of `text` followed by anything at all. Each value is replaced in the
+ * scrub's own order, and each is handed only what the one before it settled,
+ * so no later text changes a character of what this returns. What is left out
+ * is a tail that may be a credential's beginning, and it is returned once
+ * later text says it was not one.
+ */
+export function credentialScrubHead(secrets) {
+  const values = credentialScrubValues(secrets);
+  return (text) => values.reduce(credentialScrubSettled, text);
+}
+
+/** `text` with `value` replaced, less the longest tail that begins `value`. */
+function credentialScrubSettled(text, value) {
+  const pieces = text.split(value);
+  const tail = pieces.pop();
+  let undecided = Math.min(tail.length, value.length - 1);
+  while (undecided > 0 && !tail.endsWith(value.slice(0, undecided)))
+    undecided -= 1;
+  pieces.push(tail.slice(0, tail.length - undecided));
+  return pieces.join(credentialRedaction);
 }
 
 /**
@@ -102,17 +131,21 @@ function credentialScrubReplaces(secret) {
  *
  * Each secret is a `{ kind, value }`, and `held` answers the ones the scrub
  * replaces, each once under the first kind it was held as, so a secret can be
- * named without being printed.
+ * named without being printed. `scrubHead` is `credentialScrubHead` over the
+ * same set.
  */
 export function credentialScrubbing(secrets) {
   const held = [...secrets];
   const values = () => held.map(({ value }) => value);
   let scrubbing = credentialScrub(values());
+  let heading = credentialScrubHead(values());
   return {
     scrub: (text) => scrubbing(text),
+    scrubHead: (text) => heading(text),
     keepSecret: (secret) => {
       held.push(secret);
       scrubbing = credentialScrub(values());
+      heading = credentialScrubHead(values());
     },
     held: () => {
       const kinds = new Map();

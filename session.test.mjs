@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setTimeout as wait } from "node:timers/promises";
 
 import {
   sessionPlaneAnswers,
@@ -23,6 +24,7 @@ import {
 import { observeRateLimit, rateLimitSightings } from "./rateLimit.mjs";
 import {
   bearer,
+  boundEnvironment,
   credentialFile,
   environment,
   facts,
@@ -100,6 +102,94 @@ test("a successful turn is answered with its result text and the batches it wrot
       `a ${kind}'s append never reached the plane`,
     );
   }
+});
+
+const storePath = "/v1/session/store/runtime-1/1";
+const answerPath = "/v1/session/turn/answer";
+
+/**
+ * A session's one turn over a store route that answers after the drain bound
+ * has passed, and what the plane was asked of that turn's batch and answer, in
+ * order. `appended` is how the runtime's script hands its one append over.
+ */
+async function turnOverSlowStore(refuse, appended) {
+  const plane = planeOf([turnOne], facts, refuse);
+  const request = async (asking, held, path, ...rest) => {
+    if (path === storePath) await wait(3 * task.bounds.resultDrainMs);
+    return plane.request(asking, held, path, ...rest);
+  };
+  const { query } = queryOf((_asked, _index, options) => [
+    { type: "system", subtype: "init", session_id: "runtime-1" },
+    () =>
+      appended(
+        options.sessionStore.append({ sessionId: "runtime-1" }, [
+          { uuid: "a", type: "assistant" },
+        ]),
+      ),
+    result("success", { result: "kestrel" }),
+  ]);
+
+  const code = await run({ request, query });
+
+  return {
+    code,
+    asked: () =>
+      plane.calls.filter(({ path }) => [storePath, answerPath].includes(path)),
+  };
+}
+
+/**
+ * The runtime holds a turn's result until every append it began has resolved,
+ * which a script's function step does here by returning the append. So a turn
+ * is answered behind its own transcript for as long as an append resolves only
+ * once the plane has taken its batch, a retried one included. Catches an
+ * append that resolves sooner: the answer then goes first and names no batch.
+ */
+test("a turn is answered after the plane has taken the batches the runtime waited for, however slow the store is", async () => {
+  let refused = false;
+  const downOnce = (path) => {
+    if (path !== storePath || refused) return undefined;
+    refused = true;
+    return 503;
+  };
+
+  const { code, asked } = await turnOverSlowStore(downOnce, (append) => append);
+
+  assert.equal(code, 0);
+  assert.deepEqual(
+    asked().map(({ path }) => path),
+    [storePath, storePath, answerPath],
+  );
+  assert.deepEqual(asked().at(-1).body, {
+    turn: "turn-1",
+    result: "kestrel",
+    batchFirst: 1,
+    batchLast: 1,
+  });
+});
+
+/**
+ * The pod itself waits for no append, so a store that is down holds no
+ * settlement open longer than the runtime holds the result. An append the
+ * runtime did not wait for is put behind the answer, which names only what
+ * the plane had taken.
+ */
+test("an append the runtime did not wait for holds no settlement open", async () => {
+  let trailing;
+
+  const { code, asked } = await turnOverSlowStore(
+    () => undefined,
+    (append) => {
+      trailing = append;
+    },
+  );
+  await trailing;
+
+  assert.equal(code, 0);
+  assert.deepEqual(
+    asked().map(({ path, body }) => (path === answerPath ? body : path)),
+    [{ turn: "turn-1", result: "kestrel" }, storePath],
+  );
 });
 
 test("a result the runtime could not finish is the failure that names why", async () => {
@@ -1243,15 +1333,6 @@ test("a bound session placed with no repository map is given an empty one", asyn
 });
 
 /** The environment a session is placed with when the placement bound a repository. */
-const boundEnvironment = {
-  ...environment,
-  [sessionTaskVariable]: JSON.stringify({
-    ...task,
-    repository: { reference: "chuggy" },
-  }),
-  [workerRepositoriesVariable]: JSON.stringify({ chuggy: { url: "git://x" } }),
-};
-
 test("a bound session asks the plane for its own repository and hands the mint to the checkout", async () => {
   const plane = planeOf([], facts, () => undefined, mintedCredential);
   const { query } = queryOf(() => []);

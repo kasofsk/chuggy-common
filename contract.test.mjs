@@ -85,6 +85,8 @@ import {
 } from "./plane.fixture.mjs";
 import { runEvidenceRecorder } from "./runEvidence.mjs";
 import { sessionLease } from "./session.mjs";
+import { sessionLiveSender } from "./sessionLive.mjs";
+import { blockStart, messageStart, settled } from "./sessionLive.fixture.mjs";
 import {
   bearer,
   facts,
@@ -100,7 +102,7 @@ import {
 } from "./sessionHarness.fixture.mjs";
 import { sessionMailbox } from "./sessionMailbox.mjs";
 import { sessionStoreAdapter } from "./sessionStore.mjs";
-import { sessionRequest } from "./sessionTransport.mjs";
+import { sessionRequest, sessionRequestOnce } from "./sessionTransport.mjs";
 import { workerRequest } from "./transport.mjs";
 
 const jobTask = {
@@ -268,7 +270,32 @@ function sessionStoreOver(request) {
   });
 }
 
-/** The caller of each session route, reached through `sessionRequest`. */
+/**
+ * One block of a thread's answer reported live, carrying on where the plane
+ * took the post. The sender never raises, so what it says when it closes is
+ * what tells a post that was taken from one that was not.
+ */
+async function reportedLive(request) {
+  const warned = [];
+  let time = 0;
+  const sender = sessionLiveSender(sessionTask, bearer, {
+    request,
+    now: () => time,
+    pause: async (milliseconds) => {
+      time += milliseconds;
+    },
+    scrub: (text) => text,
+    scrubHead: (text) => text,
+    warn: (text) => warned.push(text),
+  });
+  sender.heard("turn-1", messageStart("message-1"));
+  sender.heard("turn-1", blockStart(0, { type: "text", text: "kestrel" }));
+  await settled();
+  sender.close();
+  if (warned.length > 0) throw new Error(warned.join(""));
+}
+
+/** The caller of each session route, reached through `sessionTransport`'s choice for it. */
 const sessionCallers = {
   facts: answeredTurn,
   heartbeat: async (request) => {
@@ -291,6 +318,7 @@ const sessionCallers = {
   },
   turnAnswer: answeredTurn,
   turnFailure: sessionRun(() => [result("error_during_execution")]),
+  turnLive: reportedLive,
   held: sessionRun(() => [rejection, result("error_during_execution")]),
   storeStreams: (request) =>
     sessionStoreOver(request).listSubkeys({ sessionId: "runtime-1" }),
@@ -311,10 +339,18 @@ const sessionCallers = {
     }),
 };
 
+/** The transport a job pod reaches every route through. */
+const jobTransport = () => workerRequest;
+
+/** The transport a session reaches each route through: the one that asks once for a live post, which no turn waits for. */
+const sessionTransport = (route) =>
+  route === "turnLive" ? sessionRequestOnce : sessionRequest;
+
 /**
  * What one caller did when `route` gave `answer` once, every other ask
  * answering as it does on success: `reads` where it carried on after one ask,
  * `stops` where it gave up after one, and `retries` where it asked again.
+ * `transport(route)` is what the caller reaches the plane through.
  */
 async function reaction(wire, success, transport, caller, route, answer) {
   const counts = new Map();
@@ -326,7 +362,7 @@ async function reaction(wire, success, transport, caller, route, answer) {
       ? succeeded
       : answer;
   });
-  const carried = await caller(overPlane(transport, plane.fetch)).then(
+  const carried = await caller(overPlane(transport(route), plane.fetch)).then(
     () => true,
     () => false,
   );
@@ -401,6 +437,13 @@ const sessionReactions = {
   turn: { 200: "reads", 204: "retries", 401: "stops", 409: "stops" },
   turnAnswer: { 204: "reads", 400: "stops", 401: "stops", 409: "stops" },
   turnFailure: { 204: "reads", 400: "stops", 401: "stops", 409: "stops" },
+  turnLive: {
+    204: "reads",
+    400: "stops",
+    401: "stops",
+    409: "stops",
+    503: "retries",
+  },
   held: { 204: "reads", 401: "stops", 409: "stops" },
   storeStreams: {
     200: "reads",
@@ -487,7 +530,7 @@ test("every status a job route the pod calls may answer is one the pod has a nam
     [],
     jobCallers,
     jobSuccess,
-    workerRequest,
+    jobTransport,
   );
 });
 
@@ -501,7 +544,7 @@ test("every status a session route the pod calls may answer is one the pod has a
     poolSessionRoutes,
     sessionCallers,
     sessionSuccess,
-    sessionRequest,
+    sessionTransport,
   );
 });
 
@@ -511,8 +554,8 @@ test("every status a session route the pod calls may answer is one the pod has a
  */
 test("a plane refusing the pod's release is asked once per route, and the pod stops", async () => {
   for (const [wire, callers, transport, first] of [
-    [planes.job, jobCallers, workerRequest, "input"],
-    [planes.session, sessionCallers, sessionRequest, "facts"],
+    [planes.job, jobCallers, jobTransport, "input"],
+    [planes.session, sessionCallers, sessionTransport, "facts"],
   ])
     for (const [route, caller] of Object.entries(callers)) {
       const asked = [];
@@ -520,7 +563,9 @@ test("a plane refusing the pod's release is asked once per route, and the pod st
         asked.push(named);
         return { status: contractVersionRefusalStatus, body: versionRefusal };
       });
-      const carried = await caller(overPlane(transport, plane.fetch)).then(
+      const carried = await caller(
+        overPlane(transport(route), plane.fetch),
+      ).then(
         () => true,
         () => false,
       );

@@ -13,13 +13,14 @@
 import {
   sessionTaskVariable,
   workerCredentialFilesVariable,
+  workerRepositoriesVariable,
   workerWorkspaceVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
 import { z } from "zod";
 
 import { overPlane, planeFetch, planes } from "./plane.fixture.mjs";
 import { sessionMain } from "./session.mjs";
-import { sessionRequest } from "./sessionTransport.mjs";
+import { sessionRequest, sessionRequestOnce } from "./sessionTransport.mjs";
 
 /**
  * The rosters the session suites open a lead and a thread with. They are cases
@@ -81,6 +82,16 @@ export const environment = {
   [workerWorkspaceVariable]: "/workspace",
 };
 
+/** The environment of a session placed against a repository the site's map holds. */
+export const boundEnvironment = {
+  ...environment,
+  [sessionTaskVariable]: JSON.stringify({
+    ...task,
+    repository: { reference: "chuggy" },
+  }),
+  [workerRepositoriesVariable]: JSON.stringify({ chuggy: { url: "git://x" } }),
+};
+
 /** What a plane that mints answers, and what this pod would then present to git. */
 export const mintedCredential = {
   username: "x-access-token",
@@ -126,7 +137,11 @@ export function planeOf(turns, facts, refuse = () => undefined, minted) {
         return { status: 204 };
     }
   });
-  return { calls, request: overPlane(sessionRequest, plane.fetch) };
+  return {
+    calls,
+    request: overPlane(sessionRequest, plane.fetch),
+    requestOnce: overPlane(sessionRequestOnce, plane.fetch),
+  };
 }
 
 export function queryOf(script) {

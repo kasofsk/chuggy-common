@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { clearTimeout, setTimeout } from "node:timers";
 
 import {
   workerContractHeader,
   workerContractRelease,
 } from "@chuggy/worker-contract/workerContract";
 
-import { sessionRequest, sessionStopped } from "./sessionTransport.mjs";
+import {
+  sessionRequest,
+  sessionRequestOnce,
+  sessionStopped,
+} from "./sessionTransport.mjs";
 
 const task = { workerPlane: { url: "http://worker-plane.test:3001" } };
 
@@ -106,4 +111,70 @@ test("stop is the status the plane fences with, and nothing else", () => {
   assert.ok(!sessionStopped({ status: 200 }));
   assert.ok(!sessionStopped({ status: 204 }));
   assert.ok(!sessionStopped({ status: 413 }));
+});
+
+const livePath = "/v1/session/turn/live";
+
+test("a request asked once is asked once, whatever the plane answers, under the same headers", async () => {
+  for (const status of [204, 400, 401, 409, 503]) {
+    const { calls, waits, transport } = transportOf([{ status }]);
+
+    const response = await sessionRequestOnce(
+      task,
+      "chgs_secret",
+      livePath,
+      { method: "POST", headers: { "content-type": "application/json" } },
+      { ...transport, deadlineMs: 1_000 },
+    );
+
+    assert.equal(response.status, status);
+    assert.equal(calls.length, 1, `status ${String(status)} was asked again`);
+    assert.deepEqual(waits, [], `status ${String(status)} was waited on`);
+    assert.equal(calls[0].url, `http://worker-plane.test:3001${livePath}`);
+    assert.deepEqual(calls[0].init.headers, {
+      "content-type": "application/json",
+      authorization: "Bearer chgs_secret",
+      [workerContractHeader]: workerContractRelease,
+    });
+  }
+});
+
+test("a request asked once raises the fetch that failed, and does not ask again", async () => {
+  const { calls, waits, transport } = transportOf([new Error("unreachable")]);
+
+  await assert.rejects(
+    sessionRequestOnce(
+      task,
+      "b",
+      livePath,
+      {},
+      { ...transport, deadlineMs: 1_000 },
+    ),
+    /unreachable/u,
+  );
+  assert.equal(calls.length, 1);
+  assert.deepEqual(waits, []);
+});
+
+test("a request asked once is abandoned at its deadline", async () => {
+  // The deadline's own timer does not hold the process open, and nothing else here would.
+  const held = setTimeout(() => undefined, 60_000);
+  const unanswered = (_url, init) =>
+    new Promise((_resolve, reject) => {
+      init.signal.addEventListener("abort", () => reject(init.signal.reason));
+    });
+  try {
+    await assert.rejects(
+      sessionRequestOnce(
+        task,
+        "b",
+        livePath,
+        {},
+        { fetch: unanswered, deadlineMs: 5 },
+      ),
+      { name: "TimeoutError" },
+    );
+  } finally {
+    clearTimeout(held);
+  }
 });
