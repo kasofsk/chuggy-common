@@ -13,6 +13,7 @@
 import {
   sessionTaskVariable,
   workerCredentialFilesVariable,
+  workerRepositoriesVariable,
   workerWorkspaceVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
 import { z } from "zod";
@@ -79,6 +80,16 @@ export const environment = {
     "claude-code": credentialFile,
   }),
   [workerWorkspaceVariable]: "/workspace",
+};
+
+/** The environment of a session placed against a repository the site's map holds. */
+export const boundEnvironment = {
+  ...environment,
+  [sessionTaskVariable]: JSON.stringify({
+    ...task,
+    repository: { reference: "chuggy" },
+  }),
+  [workerRepositoriesVariable]: JSON.stringify({ chuggy: { url: "git://x" } }),
 };
 
 /** What a plane that mints answers, and what this pod would then present to git. */

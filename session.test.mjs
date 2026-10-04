@@ -23,6 +23,7 @@ import {
 import { observeRateLimit, rateLimitSightings } from "./rateLimit.mjs";
 import {
   bearer,
+  boundEnvironment,
   credentialFile,
   environment,
   facts,
@@ -1243,15 +1244,6 @@ test("a bound session placed with no repository map is given an empty one", asyn
 });
 
 /** The environment a session is placed with when the placement bound a repository. */
-const boundEnvironment = {
-  ...environment,
-  [sessionTaskVariable]: JSON.stringify({
-    ...task,
-    repository: { reference: "chuggy" },
-  }),
-  [workerRepositoriesVariable]: JSON.stringify({ chuggy: { url: "git://x" } }),
-};
-
 test("a bound session asks the plane for its own repository and hands the mint to the checkout", async () => {
   const plane = planeOf([], facts, () => undefined, mintedCredential);
   const { query } = queryOf(() => []);

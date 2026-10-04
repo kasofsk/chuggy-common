@@ -16,10 +16,13 @@ import { URL } from "node:url";
 import { sessionPlaneRoutes } from "@chuggy/worker-contract/sessionPlane";
 
 import { observeRateLimit, rateLimitSightings } from "./rateLimit.mjs";
+import { credentialScrubHead } from "./runEvidence.mjs";
 import { sessionMeasure } from "./session.mjs";
 import {
   bearer,
+  boundEnvironment,
   facts,
+  mintedCredential,
   planeOf,
   queryOf,
   result,
@@ -339,18 +342,11 @@ test("a plane that is down is asked once in a turn shorter than the retry wait, 
   ]);
 });
 
-/**
- * Catches text that left before the scrub could see the whole of a
- * credential: every delta is posted on its own here, so each cut of each
- * credential is a post that could have carried its head.
- */
-test("a credential the model writes is never posted, wherever the runtime cuts it", async () => {
-  const text = `the token ${token} and the bearer ${bearer} are held`;
-  const deltas = text.match(/.{1,7}/gsu);
-  const messages = [
-    { type: "system", subtype: "init", session_id: "runtime-1" },
+/** One turn of one text block, written in `deltas`, as the runtime streams and ends it. */
+function writtenTurn(deltas, message = "message-1") {
+  return [
     ...[
-      messageStart("message-1"),
+      messageStart(message),
       textStart(0),
       ...deltas.map((delta) => textDelta(0, delta)),
       blockStop(0),
@@ -358,22 +354,87 @@ test("a credential the model writes is never posted, wherever the runtime cuts i
     ].map((event) => streamed(event)),
     result("success", { result: "held" }),
   ];
+}
 
-  const { posts } = await sessionOver(scriptOf(messages));
-  const reader = liveReader();
-  for (const post of posts) reader.posted(post);
-
+/**
+ * Catches text that left before the scrub could see the whole of a
+ * credential: every delta is posted on its own here, so each cut of each
+ * credential is a post that could have carried its head. The session holds
+ * all three kinds: the one its launcher mounted, its own bearer, and the one
+ * the plane minted for its repository.
+ */
+test("a credential the model writes is never posted, wherever the runtime cuts it", async () => {
+  const secrets = [token, bearer, mintedCredential.password];
+  const settledHead = credentialScrubHead(secrets);
+  const text = `the token ${token}, the bearer ${bearer} and the mint ${mintedCredential.password} are held`;
   const scrubbed =
-    "the token [redacted credential] and the bearer [redacted credential] are held";
-  assert.ok(
-    posts.length > deltas.length / 2,
-    "the deltas were not posted apart",
+    "the token [redacted credential], the bearer [redacted credential] and the mint [redacted credential] are held";
+
+  for (const cutChars of [1, 7, 16]) {
+    const deltas = text.match(new RegExp(`.{1,${String(cutChars)}}`, "gsu"));
+    const { posts } = await sessionOver(
+      scriptOf([
+        { type: "system", subtype: "init", session_id: "runtime-1" },
+        ...writtenTurn(deltas),
+      ]),
+      {
+        plane: planeOf([turnOne], threadFacts, undefined, mintedCredential),
+        services: {
+          environment: boundEnvironment,
+          write: async () => undefined,
+          checkout: async () => undefined,
+        },
+      },
+    );
+    const reader = liveReader();
+    for (const post of posts) reader.posted(post);
+
+    const grown = new Set(
+      deltas.map((_, at) => settledHead(deltas.slice(0, at + 1).join(""))),
+    );
+    assert.ok(posts.length >= grown.size, "the deltas were not posted apart");
+    for (const post of posts)
+      for (const secret of secrets)
+        assert.ok(!JSON.stringify(post).includes(secret.slice(0, 4)));
+    for (const held of reader.states)
+      for (const block of held.blocks)
+        assert.ok(scrubbed.startsWith(block.text), block.text);
+    assert.equal(reader.states.at(-2).blocks[0].text, scrubbed);
+  }
+});
+
+/**
+ * Catches a stream event named by a turn it is not of: one read after its
+ * turn's result, while the turn is drained and after it is settled, posted
+ * under that turn or under the next.
+ */
+test("a stream read after its turn's result is posted under no turn", async () => {
+  const turnTwo = { ...turnOne, turn: "turn-2", ordinal: 2 };
+  const late = writtenTurn(["late text"], "message-late").filter(isStream);
+
+  const { code, posts } = await sessionOver(
+    (_asked, index) =>
+      [
+        ...(index === 0
+          ? [{ type: "system", subtype: "init", session_id: "runtime-1" }]
+          : []),
+        ...writtenTurn([`answer ${String(index)}`], `message-${String(index)}`),
+        ...late,
+      ].flatMap((message) => [message, settled]),
+    { turns: [turnOne, turnTwo] },
   );
-  for (const post of posts)
-    for (const secret of [token, bearer])
-      assert.ok(!JSON.stringify(post).includes(secret.slice(0, 4)));
-  for (const held of reader.states)
-    for (const block of held.blocks)
-      assert.ok(scrubbed.startsWith(block.text), block.text);
-  assert.equal(reader.states.at(-2).blocks[0].text, scrubbed);
+
+  assert.equal(code, 0);
+  assert.deepEqual(
+    posts.map(({ turn, events }) => [turn, events.at(-1).live]),
+    [
+      ["turn-1", "Block"],
+      ["turn-1", "Text"],
+      ["turn-1", "End"],
+      ["turn-2", "Block"],
+      ["turn-2", "Text"],
+      ["turn-2", "End"],
+    ],
+  );
+  assert.ok(!JSON.stringify(posts).includes("message-late"));
 });

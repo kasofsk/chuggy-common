@@ -267,6 +267,23 @@ test("a block longer than a live block holds stops where it passed the bound, an
   assert.deepEqual(taken(state), [end]);
 });
 
+test("a block holds no more text than a live block does, however much is written to it", () => {
+  const head = "a".repeat(sessionLiveBlockCharsMax - 1);
+  const state = writing([head]);
+  const [block] = state.blocks.values();
+
+  hear(state, "turn-1", [textDelta(0, "bc")]);
+  assert.equal(block.raw, head, "text past the bound was held");
+  for (const text of ["d".repeat(sessionLiveBlockCharsMax), "e", "f"])
+    hear(state, "turn-1", [textDelta(0, text)]);
+  assert.ok(block.raw.length <= sessionLiveBlockCharsMax);
+
+  hear(state, "turn-1", [textStart(1), textDelta(1, head), textDelta(1, "z")]);
+  assert.equal(state.blocks.get(1).raw, `${head}z`, "a full block was cut");
+  hear(state, "turn-1", [blockStart(2, { type: "text", text: `${head}zz` })]);
+  assert.equal(state.blocks.get(2).raw, "", "a block began past the bound");
+});
+
 /**
  * Catches a stopped block treated as whole once it ends: what it holds is cut
  * short of the block, so scrubbing it as the whole block would send the head
@@ -362,8 +379,9 @@ test("a message whose identity a live event cannot carry reports nothing, and th
     "",
     "m".repeat(sessionLiveMessageCharsMax + 1),
     undefined,
+    7,
   ]) {
-    const state = sessionLiveState(undefined);
+    const state = writing(["named first"], held);
     hear(
       state,
       "turn-1",
@@ -415,6 +433,28 @@ test("a character cut between two deltas is sent once it is whole", () => {
 
   hear(state, "turn-1", [textDelta(0, "\udc26b")]);
   assert.deepEqual(taken(state), [written(0, 1, "\u{1f426}b")]);
+});
+
+/**
+ * The plane stops a session that posts a text event holding no text. A block
+ * with nothing to send yet says only that it began: its text all held back
+ * for a credential, cut inside its first character, empty, or not written.
+ */
+test("a block with nothing to send is posted as begun, and never as text of nothing", () => {
+  const held = holding(secret);
+  for (const texts of [[], [""], [secret.slice(0, 5)], ["\ud83d"]]) {
+    const state = writing(texts, held);
+    assert.deepEqual(taken(state, held), [begun(0, "Text")], String(texts));
+
+    hear(state, "turn-1", [textDelta(0, "")], held);
+    assert.equal(taken(state, held), undefined, String(texts));
+  }
+
+  const scrubbing = credentialScrubbing([]);
+  const state = writing([secret.slice(0, 5)], scrubbing);
+  taken(state, scrubbing);
+  scrubbing.keepSecret({ kind: "minted", value: secret });
+  assert.deepEqual(taken(state, scrubbing), [begun(0, "Text")]);
 });
 
 test("a turn's end follows whatever text remains, and nothing follows it", () => {
@@ -1021,10 +1061,10 @@ async function streamedTurn(random, messages, held) {
 }
 
 /**
- * The invariant the brief names, over drawn credentials, texts, cuts and
- * plane answers: every text sent of a block, taken or not, is the scrubbed
- * whole block's text at its offset, no reader is left gapped, and a plane
- * that ends up taking posts holds all of the last message before its end.
+ * Over drawn credentials, texts, cuts and plane answers: every text sent of a
+ * block, taken or not, is the scrubbed whole block's text at its offset, no
+ * reader is left gapped, and a plane that ends up taking posts holds all of
+ * the last message before its end.
  */
 test("everything sent of a block is how the scrubbed whole block begins, whatever comes next", async () => {
   for (let seed = 1; seed <= 250; seed += 1) {
