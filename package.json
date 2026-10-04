@@ -49,6 +49,7 @@
     "sdkProbe.mjs",
     "session.mjs",
     "sessionCheckout.mjs",
+    "sessionLive.mjs",
     "sessionMailbox.mjs",
     "sessionStore.mjs",
     "sessionTransport.mjs",

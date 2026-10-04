@@ -23,6 +23,7 @@ import {
   sessionReferenceSchema,
   sessionTurnAnswerSchema,
   sessionTurnFailureSchema,
+  sessionTurnLiveSchema,
 } from "@chuggy/worker-contract/sessionPlane";
 import {
   contractVersionRefusalSchema,
@@ -65,6 +66,7 @@ export const planes = {
       reference: sessionReferenceSchema,
       turnAnswer: sessionTurnAnswerSchema,
       turnFailure: sessionTurnFailureSchema,
+      turnLive: sessionTurnLiveSchema,
       credential: sessionCredentialSchema,
       ended: sessionEndedSchema,
     },
