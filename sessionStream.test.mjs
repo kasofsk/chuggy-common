@@ -11,9 +11,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { setTimeout as wait } from "node:timers/promises";
 import { URL } from "node:url";
 
 import { sessionPlaneRoutes } from "@chuggy/worker-contract/sessionPlane";
+import { sessionTaskVariable } from "@chuggy/worker-contract/workerEnvironment";
 
 import { observeRateLimit, rateLimitSightings } from "./rateLimit.mjs";
 import { credentialScrubHead } from "./runEvidence.mjs";
@@ -21,16 +23,19 @@ import { sessionMeasure } from "./session.mjs";
 import {
   bearer,
   boundEnvironment,
+  environment,
   facts,
   mintedCredential,
   planeOf,
   queryOf,
   result,
   run,
+  task,
   threadRoster,
   token,
   turnOne,
 } from "./sessionHarness.fixture.mjs";
+import { sessionLiveBounds } from "./sessionLive.mjs";
 import {
   blockStop,
   liveNothing,
@@ -108,7 +113,8 @@ const isPoll = ({ path }) => path === sessionPlaneRoutes.turn.path;
  * One session run over `script`, and what it asked the plane: its live posts,
  * and everything else but its polls of the mailbox, which an idle session
  * repeats as often as its clock allows. `services.query` replaces the runtime
- * `script` drives.
+ * `script` drives. Its posts wait out no gap, so that what a script yields is
+ * posted as it is read, unless `services.liveBounds` says they do.
  */
 async function sessionOver(script, options = {}) {
   const { sessionFacts = threadFacts, refuse, services = {} } = options;
@@ -197,21 +203,34 @@ test("the recorded turn reaches the plane block by block under the identity its 
 });
 
 /**
- * Catches an end held back until the turn is drained or settled: the runtime
- * is asked for its next message only once the result is read, and by then the
- * end is posted and the answer is not.
+ * Catches an end held back until the turn is drained or settled, under the gap
+ * a session posts with: the runtime is asked for its next message only once
+ * the result is read and is held there past the gap, in a drain longer than
+ * that, and by then the end is posted and the answer is not.
  */
-test("a turn's end is posted when its result is read, before the turn is settled", async () => {
+test("a turn's end is posted while the turn is drained, before it is settled", async () => {
+  const { postGapMsMin } = sessionLiveBounds;
+  const bounds = { ...task.bounds, resultDrainMs: 4 * postGapMsMin };
   const plane = planeOf([turnOne], threadFacts);
   let seen;
   const script = (...asked) => [
     ...scriptOf(recorded)(...asked),
-    () => {
+    async () => {
+      await wait(2 * postGapMsMin);
       seen = plane.calls.map(({ path, body }) => [path, body?.events?.at(-1)]);
     },
   ];
 
-  await sessionOver(script, { plane });
+  await sessionOver(script, {
+    plane,
+    services: {
+      liveBounds: sessionLiveBounds,
+      environment: {
+        ...environment,
+        [sessionTaskVariable]: JSON.stringify({ ...task, bounds }),
+      },
+    },
+  });
 
   assert.deepEqual(seen.at(-1), [livePath, { live: "End" }]);
   assert.ok(
@@ -220,6 +239,11 @@ test("a turn's end is posted when its result is read, before the turn is settled
   );
 });
 
+/**
+ * Catches an end that waits out a gap the session does not: a turn with no
+ * result is settled at once and the session closes behind it, inside the gap
+ * the turn's first post began.
+ */
 test("a turn the runtime ends without a result still says it is over", async () => {
   const events = [messageStart("message-1"), textStart(0), textDelta(0, "cut")];
   const query = ({ prompt }) =>
@@ -229,11 +253,17 @@ test("a turn the runtime ends without a result still says it is over", async () 
       await settled();
     })();
 
-  const { posts } = await sessionOver(undefined, { services: { query } });
+  const { posts, settled: asked } = await sessionOver(undefined, {
+    services: { query, liveBounds: sessionLiveBounds },
+  });
 
   assert.deepEqual(
     posts.flatMap(({ events: posted }) => posted).map(({ live }) => live),
     ["Block", "Text", "End"],
+  );
+  assert.ok(
+    asked.some(({ path }) => path === sessionPlaneRoutes.turnFailure.path),
+    "the turn was not one the runtime gave no result for",
   );
 });
 

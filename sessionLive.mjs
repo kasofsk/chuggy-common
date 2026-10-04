@@ -41,9 +41,9 @@ const liveBlockKinds = new Map([
 
 /**
  * The bounds a sender posts under, each a default its opener may replace: the
- * least time between the starts of two posts, how long one may take, how long
- * the next waits after one the plane could not take, and how many in a row it
- * may not take before the turn's stream stops.
+ * least time between the starts of two posts while its session is open, how
+ * long one may take, how long the next waits after one the plane could not
+ * take, and how many in a row it may not take before the turn's stream stops.
  */
 export const sessionLiveBounds = Object.freeze({
   postGapMsMin: 50,
@@ -339,13 +339,32 @@ function liveSenderWake(sender, waitMs) {
 }
 
 /**
+ * The one post a closing sender still sends, which shuts it: what remains of
+ * a turn that ended. It waits out no gap, because a closed session leaves no
+ * time to wait in, and for the same reason it is not sent to a plane that
+ * could not take the post before it. Nothing is made of its answer.
+ */
+function liveSenderLast(sender) {
+  sender.open = false;
+  if (!sender.state.ended || sender.failures > 0) return;
+  const post = sessionLivePost(sender.state, sender.held);
+  if (post === undefined) return;
+  sender.asked += 1;
+  liveSenderAnswer(sender, post);
+}
+
+/**
  * The next post sent, where the sender is open, there is one and none is in
  * flight, or the wait until one may be. Every post waits out the gap, an ended
  * turn's among them, so the gap and what a post holds bound what a plane is
- * sent in any stretch of time.
+ * sent in any stretch of time, but for the one post a close sends.
  */
 function liveSenderStep(sender) {
   if (!sender.open || sender.flying) return;
+  if (sender.closing) {
+    liveSenderLast(sender);
+    return;
+  }
   const waitMs = sender.notBefore - sender.now();
   if (waitMs > 0) {
     liveSenderWake(sender, waitMs);
@@ -369,8 +388,9 @@ function liveSenderStep(sender) {
  * The sender a thread's session holds. `heard` and `ended` take what the
  * session read and return, and the posts go behind them, one in flight at a
  * time: no turn waits for one, and nothing here raises into its caller.
- * `close` ends it with the session, leaving a post in flight to its own
- * deadline and saying once what the plane did not take.
+ * `close` ends it with the session and hears nothing after. It sends an ended
+ * turn's last post, behind the one in flight where the plane takes that one,
+ * leaves each to its own deadline, and says once what the plane had not taken.
  */
 export function sessionLiveSender(task, bearer, services) {
   const { request, now, pause, scrub, scrubHead, warn } = services;
@@ -384,6 +404,7 @@ export function sessionLiveSender(task, bearer, services) {
     bounds: { ...sessionLiveBounds, ...services.bounds },
     state: sessionLiveState(undefined),
     open: true,
+    closing: false,
     faulted: false,
     flying: false,
     waking: false,
@@ -392,20 +413,24 @@ export function sessionLiveSender(task, bearer, services) {
     asked: 0,
     lost: 0,
   };
+  const told = (folded) => {
+    if (sender.closing) return;
+    liveSenderGuarded(sender, () => {
+      if (folded()) liveSenderStep(sender);
+    });
+  };
   return {
     heard(turn, event) {
-      liveSenderGuarded(sender, () => {
-        if (sessionLiveHeard(sender.state, turn, event, sender.held.scrub))
-          liveSenderStep(sender);
-      });
+      told(() =>
+        sessionLiveHeard(sender.state, turn, event, sender.held.scrub),
+      );
     },
     ended(turn) {
-      liveSenderGuarded(sender, () => {
-        if (sessionLiveEnded(sender.state, turn)) liveSenderStep(sender);
-      });
+      told(() => sessionLiveEnded(sender.state, turn));
     },
     close() {
-      sender.open = false;
+      sender.closing = true;
+      liveSenderGuarded(sender, () => liveSenderStep(sender));
       try {
         if (sender.lost > 0)
           warn(

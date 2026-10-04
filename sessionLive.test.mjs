@@ -1019,19 +1019,100 @@ test("a plane that stops the session is posted nothing more, in this turn or any
   }
 });
 
-test("a session that closes posts nothing more, and says nothing where every post was taken", async () => {
+/**
+ * Catches a last post that waits out the gap a close leaves no time for, one
+ * sent more than once, and one left out of what the session says it asked.
+ */
+test("a close sends what remains of an ended turn at once, in one post under its own deadline", async () => {
   const { plane, clock, sender, hearing, warned } = senderOf();
+  const { postDeadlineMs, postRetryMs } = sessionLiveBounds;
 
   hearing("turn-1", opening);
+  await plane.answer(503);
+  await clock.advance(postRetryMs);
   await plane.answer();
-  hearing("turn-1", [textDelta(0, "unsent")]);
-  sender.close();
-  await clock.advance(sessionLiveBounds.postGapMsMin);
-  hearing("turn-1", [textDelta(0, "unheard")]);
+  hearing("turn-1", [textDelta(0, "last words")]);
   sender.ended("turn-1");
+  assert.equal(plane.posts.length, 2, "an ended turn's post did not wait");
+
+  sender.close();
+  assert.deepEqual(plane.posts[2], {
+    turn: "turn-1",
+    events: [written(0, 0, "last words"), end],
+  });
+  assert.deepEqual(plane.asked[2].transport, { deadlineMs: postDeadlineMs });
+  assert.deepEqual(warned, [
+    "the worker plane did not take 1 of 3 live posts\n",
+  ]);
+
+  await plane.answer(503);
+  await clock.advance(postRetryMs);
+  assert.equal(plane.posts.length, 3, "the last post was sent again");
+});
+
+/**
+ * One post is in flight at a time through a close too: the last waits for the
+ * answer to the one before it, and goes only where the plane took that one.
+ */
+test("a post in flight at a close is followed by the last where the plane takes it, and by nothing where it does not", async () => {
+  const last = { turn: "turn-1", events: [written(0, 0, "last words"), end] };
+  const answers = [
+    [204, [last]],
+    [400, []],
+    [401, []],
+    [503, []],
+    [new Error("the plane is unreachable"), []],
+  ];
+  for (const [answer, followed] of answers) {
+    const { plane, clock, sender, hearing } = senderOf();
+
+    hearing("turn-1", [...opening, textDelta(0, "last words")]);
+    sender.ended("turn-1");
+    sender.close();
+    assert.equal(plane.posts.length, 1, "two posts were in flight");
+
+    await plane.answer(answer);
+    assert.deepEqual(plane.posts.slice(1), followed, String(answer));
+    await clock.advance(sessionLiveBounds.postRetryMs);
+    assert.deepEqual(plane.posts.slice(1), followed, String(answer));
+  }
+});
+
+test("a plane left alone after a post it could not take is not asked at a close", async () => {
+  const { plane, sender, hearing, warned } = senderOf();
+
+  hearing("turn-1", [...opening, textDelta(0, "unsent")]);
+  await plane.answer(503);
+  sender.ended("turn-1");
+  sender.close();
 
   assert.equal(plane.posts.length, 1);
-  assert.deepEqual(warned, []);
+  assert.deepEqual(warned, [
+    "the worker plane did not take 1 of 1 live posts\n",
+  ]);
+});
+
+/**
+ * A turn still written when its session closes has no last post, with a post
+ * in flight or without, and nothing heard after the close gives it one.
+ */
+test("a session that closes on a turn still written posts nothing more, and says nothing where every post was taken", async () => {
+  for (const flying of [false, true]) {
+    const { plane, clock, sender, hearing, warned } = senderOf();
+
+    hearing("turn-1", opening);
+    if (!flying) await plane.answer();
+    hearing("turn-1", [textDelta(0, "unsent")]);
+    sender.close();
+    sender.ended("turn-1");
+    if (flying) await plane.answer();
+    await clock.advance(sessionLiveBounds.postGapMsMin);
+    hearing("turn-1", [textDelta(0, "unheard")]);
+    sender.ended("turn-1");
+
+    assert.equal(plane.posts.length, 1, flying ? "in flight" : "answered");
+    assert.deepEqual(warned, []);
+  }
 });
 
 /**
@@ -1067,6 +1148,25 @@ test("a fault in what the sender is built on closes the stream and raises nothin
       named,
     );
   }
+});
+
+test("a fault in making the last post closes the stream as any other does, and raises nothing", async () => {
+  let faulted = false;
+  const scrubHead = (text) => {
+    if (faulted) throw new Error("a fault");
+    return text;
+  };
+  const { plane, sender, hearing, warned } = senderOf({ scrubHead });
+
+  hearing("turn-1", opening);
+  await plane.answer();
+  hearing("turn-1", [textDelta(0, "last words")]);
+  sender.ended("turn-1");
+  faulted = true;
+  sender.close();
+
+  assert.equal(plane.posts.length, 1);
+  assert.deepEqual(warned, ["the live stream stopped on its own fault\n"]);
 });
 
 test("a request that raises where it is called, and a warning that cannot be written, raise nothing", async () => {
