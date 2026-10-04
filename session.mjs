@@ -44,6 +44,15 @@
  * what bounds an inquiry — nothing enqueues a second turn on one — so this is
  * the weaker of the two walls, and it is here because the pod is what would
  * otherwise spend the account's attempt on a turn the member never asked for.
+ *
+ * A TURN ITS MEMBER STOPPED IS INTERRUPTED, AND ITS RESULT IS NOT DRAINED PAST.
+ * `./sessionStop.mjs` interrupts the runtime, whose query stays open, and the
+ * turn's result is read and settled as that result says: the plane has already
+ * ended the turn and keeps nothing of the settlement. The drain is what the
+ * member's next turn would wait out, and it guards a result the plane records,
+ * which this one is not. A batch the interrupt left that the store refuses is
+ * reported ahead of the interrupted turn's result, so it is still that turn's
+ * `StoreRefused` and still stops the session.
  */
 
 import { mkdir, readFile } from "node:fs/promises";
@@ -88,6 +97,7 @@ import { credentialScrub, credentialScrubHead } from "./runEvidence.mjs";
 import { sessionCheckout } from "./sessionCheckout.mjs";
 import { sessionLiveSender } from "./sessionLive.mjs";
 import { sessionMailbox } from "./sessionMailbox.mjs";
+import { sessionStopWatch } from "./sessionStop.mjs";
 import { sessionStoreAdapter } from "./sessionStore.mjs";
 import {
   sessionRequest,
@@ -501,6 +511,15 @@ function sessionReportsLive(facts) {
 }
 
 /**
+ * Whether a member can stop a turn of this session, which the plane's door
+ * lets them of a thread and of no other kind: it is what a watch on each turn
+ * is opened for.
+ */
+function sessionTakesStops(facts) {
+  return facts.kind === "Thread";
+}
+
+/**
  * The options one session's query runs under, every bound the pod was launched
  * with.
  *
@@ -616,14 +635,16 @@ async function observe(context, message) {
   if (message.type === "stream_event") return observeStream(context, message);
   observeRateLimit(context.sightings, message);
   context.measure.saw(message);
-  if (message.type === "result")
+  if (message.type === "result") {
+    context.stops?.released();
     context.live?.ended(context.mailbox.claimed()?.turn);
+  }
   if (message.type !== "system") return;
   if (message.subtype === "init") await bindReference(context, message);
   if (message.subtype === "mirror_error") context.mirrored = true;
 }
 
-/** One turn's messages, read to its result and then drained past it. */
+/** One turn's messages, read to its result and then drained past it, unless its member stopped the turn. */
 export async function runSessionTurn(context) {
   context.store.startTurn();
   context.sightings = rateLimitSightings();
@@ -638,6 +659,8 @@ export async function runSessionTurn(context) {
       break;
     }
   }
+  if (context.stops?.stopped(context.mailbox.claimed()?.turn))
+    return { result, ended: false };
   const until = context.now() + context.task.bounds.resultDrainMs;
   for (;;) {
     const remaining = until - context.now();
@@ -727,6 +750,7 @@ export async function runSessionTurns(context) {
     const turn = context.mailbox.claimed();
     if (turn === undefined) return context.mirrored ? 1 : 0;
     // A turn whose stream ended with no result is over too.
+    context.stops?.released();
     context.live?.ended(turn.turn);
     const verdict = await settleTurn(context, turn, result);
     if (verdict === "Held" || verdict === "Spent") {
@@ -916,7 +940,8 @@ function sessionToolServers(context, facts, environment, services, sdk) {
 /**
  * The mailbox and the buffer its claims reset, hung on the context as one thing
  * rather than two: the reset is bound to the claim, so a turn that fails leaves
- * nothing for the next one to inherit.
+ * nothing for the next one to inherit. A claim is also where the watch for a
+ * member's stop of the turn begins, in a session that holds one.
  */
 function sessionStagedMailbox(context, { request, wait: pause, now }) {
   const staging = leadDecisionStaging();
@@ -925,7 +950,10 @@ function sessionStagedMailbox(context, { request, wait: pause, now }) {
     request,
     wait: pause,
     now,
-    claim: (turn) => staging.reset(turn.input),
+    claim: (turn) => {
+      staging.reset(turn.input);
+      context.stops?.watching(turn.turn);
+    },
   });
 }
 
@@ -974,6 +1002,24 @@ function sessionLive(context, facts, { services, pause, warn }) {
 }
 
 /**
+ * The watch a session whose turns a member can stop holds, under the session's
+ * own clock and pauses and through the request that is asked once. What it
+ * interrupts is the runtime the session then opens, which is why it is handed
+ * the context and not the runtime.
+ */
+function sessionStops(context, facts, { services, pause, warn }) {
+  if (!sessionTakesStops(facts)) return undefined;
+  return sessionStopWatch(context.task, context.bearer, {
+    request: services.requestOnce ?? sessionRequestOnce,
+    now: context.now,
+    pause,
+    interrupt: () => context.runtime.interrupt(),
+    warn: (text) => warn(context.scrub(text)),
+    bounds: services.stopBounds,
+  });
+}
+
+/**
  * The session once everything it runs on is in hand: the store its kind decides
  * the mode of, the mailbox its turns arrive through, and either the runtime it
  * speaks with or one of the refusals that stands in place of one. Both
@@ -1003,12 +1049,14 @@ async function sessionRun(context, facts, opened) {
     );
   if (opened.checkout?.refused !== undefined)
     return await refuseSession(context, warn, opened.checkout.refused);
-  const stream = await sessionRuntime(context, { ...opened, facts });
-  context.reader = messageReader(stream, pause);
+  context.stops = sessionStops(context, facts, opened);
+  context.runtime = await sessionRuntime(context, { ...opened, facts });
+  context.reader = messageReader(context.runtime, pause);
   context.live = sessionLive(context, facts, opened);
   try {
     return await runSessionTurns(context);
   } finally {
+    context.stops?.released();
     context.live?.close();
   }
 }

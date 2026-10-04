@@ -101,6 +101,7 @@ import {
   turnOne,
 } from "./sessionHarness.fixture.mjs";
 import { sessionMailbox } from "./sessionMailbox.mjs";
+import { sessionStopWatch } from "./sessionStop.mjs";
 import { sessionStoreAdapter } from "./sessionStore.mjs";
 import { sessionRequest, sessionRequestOnce } from "./sessionTransport.mjs";
 import { workerRequest } from "./transport.mjs";
@@ -153,6 +154,8 @@ function sessionSuccess(route, nth) {
       return { status: 200, body: facts };
     case "turn":
       return nth === 1 ? { status: 200, body: turnOne } : { status: 204 };
+    case "turnStopped":
+      return { status: 200, body: { turn: turnOne.turn } };
     case "credential":
       return { status: 200, body: mintedCredential };
     case "storeStreams":
@@ -295,6 +298,28 @@ async function reportedLive(request) {
   if (warned.length > 0) throw new Error(warned.join(""));
 }
 
+/**
+ * One turn watched for its member's stop, carrying on where the plane said it
+ * was stopped. The watch never raises, so the interrupt it was to make is
+ * what tells a stop it heard from a plane it gave up asking.
+ */
+async function watchedStop(request) {
+  let interrupts = 0;
+  const watch = sessionStopWatch(sessionTask, bearer, {
+    request,
+    now: () => 0,
+    pause: async () => undefined,
+    interrupt: async () => {
+      interrupts += 1;
+    },
+    warn: () => undefined,
+  });
+  watch.watching(turnOne.turn);
+  await settled();
+  watch.released();
+  if (interrupts !== 1) throw new Error("the watch heard no stop");
+}
+
 /** The caller of each session route, reached through `sessionTransport`'s choice for it. */
 const sessionCallers = {
   facts: answeredTurn,
@@ -319,6 +344,7 @@ const sessionCallers = {
   turnAnswer: answeredTurn,
   turnFailure: sessionRun(() => [result("error_during_execution")]),
   turnLive: reportedLive,
+  turnStopped: watchedStop,
   held: sessionRun(() => [rejection, result("error_during_execution")]),
   storeStreams: (request) =>
     sessionStoreOver(request).listSubkeys({ sessionId: "runtime-1" }),
@@ -342,9 +368,11 @@ const sessionCallers = {
 /** The transport a job pod reaches every route through. */
 const jobTransport = () => workerRequest;
 
-/** The transport a session reaches each route through: the one that asks once for a live post, which no turn waits for. */
+/** The transport a session reaches each route through: the one that asks once for a live post and for the watch on a turn, which no turn waits for. */
 const sessionTransport = (route) =>
-  route === "turnLive" ? sessionRequestOnce : sessionRequest;
+  route === "turnLive" || route === "turnStopped"
+    ? sessionRequestOnce
+    : sessionRequest;
 
 /**
  * What one caller did when `route` gave `answer` once, every other ask
@@ -443,6 +471,13 @@ const sessionReactions = {
     401: "stops",
     409: "stops",
     503: "retries",
+  },
+  turnStopped: {
+    200: "reads",
+    204: "retries",
+    400: "stops",
+    401: "stops",
+    409: "stops",
   },
   held: { 204: "reads", 401: "stops", 409: "stops" },
   storeStreams: {

@@ -51,6 +51,7 @@
     "sessionCheckout.mjs",
     "sessionLive.mjs",
     "sessionMailbox.mjs",
+    "sessionStop.mjs",
     "sessionStore.mjs",
     "sessionTransport.mjs",
     "snapshot.mjs",

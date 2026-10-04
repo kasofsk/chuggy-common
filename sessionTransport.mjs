@@ -1,8 +1,8 @@
 /**
  * The session pod's way to reach the worker plane: `workerRequest`'s bounded
  * retry, against the same base URL, with the same headers and under the session
- * bearer. `sessionRequestOnce` is the same request with no retry, for the one
- * caller that may not wait.
+ * bearer. `sessionRequestOnce` is the same request with no retry, for the
+ * callers that may not wait.
  *
  * A RETRY IS FOR A CONDITION, NEVER FOR A DECISION. The session routes answer
  * `stop` and `retry` as distinct things — a fenced attempt is `401`, a batch
@@ -83,9 +83,10 @@ export async function sessionRequest(
 
 /**
  * One request under the same headers, asked once and abandoned at
- * `deadlineMs`. It is what a caller no turn waits for reaches the plane
- * through: every status is returned for it to read, and a thrown fetch or a
- * passed deadline raises at once.
+ * `deadlineMs`, or when `signal` says its asker has let go of it. It is what
+ * a caller no turn waits for reaches the plane through: every status is
+ * returned for it to read, and a thrown fetch, a passed deadline or an asker
+ * that let go raises at once.
  */
 export async function sessionRequestOnce(
   task,
@@ -94,11 +95,15 @@ export async function sessionRequestOnce(
   init = {},
   transport = {},
 ) {
-  const { fetch: send = globalThis.fetch, deadlineMs } = transport;
+  const { fetch: send = globalThis.fetch, deadlineMs, signal } = transport;
+  const deadline = globalThis.AbortSignal.timeout(deadlineMs);
   return send(new URL(path, task.workerPlane.url), {
     ...init,
     headers: workerPlaneHeaders(bearer, init.headers),
-    signal: globalThis.AbortSignal.timeout(deadlineMs),
+    signal:
+      signal === undefined
+        ? deadline
+        : globalThis.AbortSignal.any([signal, deadline]),
   });
 }
 
