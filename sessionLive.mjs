@@ -339,11 +339,12 @@ function liveSenderWake(sender, waitMs) {
 }
 
 /**
- * The next post sent, where there is one and none is in flight, or the wait
- * until one may be. An ended turn's last posts do not wait out the gap.
+ * The next post sent, where the sender is open, there is one and none is in
+ * flight, or the wait until one may be. An ended turn's last posts do not wait
+ * out the gap.
  */
 function liveSenderStep(sender) {
-  if (sender.flying) return;
+  if (!sender.open || sender.flying) return;
   const waitMs =
     sender.state.ended && sender.failures === 0
       ? 0

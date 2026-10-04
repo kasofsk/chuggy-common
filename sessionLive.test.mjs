@@ -817,18 +817,37 @@ test("a late refusal of the last turn's post leaves the turn that followed it st
   assert.deepEqual(plane.posts[2], { turn: "turn-2", events: [end] });
 });
 
+/**
+ * Catches a stop read only where an act begins: the answer that stops the
+ * session arrives with the gap already passed and more to send, in a turn
+ * still written and in one that has ended, and the step after it posts.
+ */
 test("a plane that stops the session is posted nothing more, in this turn or any other", async () => {
   for (const status of [401, 409]) {
-    const { plane, clock, sender, hearing } = senderOf();
+    for (const over of [false, true]) {
+      const { plane, clock, warned, sender, hearing } = senderOf();
+      const named = `${String(status)}, the turn ${over ? "over" : "written"}`;
 
-    hearing("turn-1", opening);
-    await plane.answer(status);
-    hearing("turn-1", [textDelta(0, "unsent")]);
-    sender.ended("turn-1");
-    hearing("turn-2", [...opening, textDelta(0, "unsent too")]);
-    await clock.advance(sessionLiveBounds.postRetryMs);
+      hearing("turn-1", opening);
+      await clock.advance(sessionLiveBounds.postGapMsMin);
+      hearing("turn-1", [textDelta(0, "heard while the post flew")]);
+      if (over) sender.ended("turn-1");
+      await plane.answer(status);
+      assert.equal(plane.posts.length, 1, named);
 
-    assert.equal(plane.posts.length, 1, String(status));
+      hearing("turn-1", [textDelta(0, "unsent")]);
+      sender.ended("turn-1");
+      hearing("turn-2", [...opening, textDelta(0, "unsent too")]);
+      await clock.advance(sessionLiveBounds.postRetryMs);
+      sender.close();
+
+      assert.equal(plane.posts.length, 1, named);
+      assert.deepEqual(
+        warned,
+        ["the worker plane did not take 1 of 1 live posts\n"],
+        named,
+      );
+    }
   }
 });
 
