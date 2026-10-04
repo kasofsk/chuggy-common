@@ -589,6 +589,41 @@ test("a store refusal behind a stopped turn's result is charged to the turn afte
 });
 
 /**
+ * A session can end with a turn still watched: its runtime died before the
+ * turn's result. The question in flight is one the plane would hold, and
+ * answer, for a session that is no longer there.
+ */
+test("a session that ends inside a turn lets go of the turn's watch", async () => {
+  const signals = [];
+  const plane = planeOf(
+    [turnOne],
+    threadFacts,
+    undefined,
+    undefined,
+    (_turn, signal) => {
+      signals.push(signal);
+      return heldUntilLetGo(signal);
+    },
+  );
+  const runtime = interruptible(() => [
+    init,
+    settled,
+    () => {
+      throw new Error("the runtime died");
+    },
+  ]);
+
+  const session = await threadOver(plane, runtime);
+
+  assert.equal(session.code, 1);
+  assert.deepEqual(session.warned, ["the runtime died\n"]);
+  assert.deepEqual(
+    signals.map((signal) => signal.aborted),
+    [true],
+  );
+});
+
+/**
  * The session over the same condition: the plane is the suites' own from the
  * second question on, and the first is answered for it as something between
  * the two would.

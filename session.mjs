@@ -755,7 +755,6 @@ export async function runSessionTurns(context) {
     const turn = context.mailbox.claimed();
     if (turn === undefined) return context.mirrored ? 1 : 0;
     // A turn whose stream ended with no result is over too.
-    context.stops?.released();
     context.live?.ended(turn.turn);
     const verdict = await settleTurn(context, turn, result);
     if (verdict === "Held" || verdict === "Spent") {
