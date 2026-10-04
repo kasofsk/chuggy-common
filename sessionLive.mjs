@@ -340,15 +340,13 @@ function liveSenderWake(sender, waitMs) {
 
 /**
  * The next post sent, where the sender is open, there is one and none is in
- * flight, or the wait until one may be. An ended turn's last posts do not wait
- * out the gap.
+ * flight, or the wait until one may be. Every post waits out the gap, an ended
+ * turn's among them, so the gap and what a post holds bound what a plane is
+ * sent in any stretch of time.
  */
 function liveSenderStep(sender) {
   if (!sender.open || sender.flying) return;
-  const waitMs =
-    sender.state.ended && sender.failures === 0
-      ? 0
-      : sender.notBefore - sender.now();
+  const waitMs = sender.notBefore - sender.now();
   if (waitMs > 0) {
     liveSenderWake(sender, waitMs);
     return;

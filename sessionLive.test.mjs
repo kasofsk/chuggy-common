@@ -670,7 +670,7 @@ test("an answer's body is released unread, whatever the plane answered", async (
   }
 });
 
-test("two posts start no closer than the gap, and an ended turn's last post does not wait for it", async () => {
+test("two posts start no closer than the gap, an ended turn's last among them", async () => {
   const { plane, clock, sender, hearing } = senderOf();
   const { postGapMsMin } = sessionLiveBounds;
 
@@ -687,7 +687,40 @@ test("two posts start no closer than the gap, and an ended turn's last post does
 
   hearing("turn-1", [textDelta(0, "three")]);
   sender.ended("turn-1");
+  await clock.advance(postGapMsMin - 1);
+  assert.equal(plane.posts.length, 2, "an ended turn's post did not wait");
+
+  await clock.advance(1);
   assert.deepEqual(plane.posts[2].events, [written(0, 8, "three"), end]);
+});
+
+/**
+ * The most a plane is sent: one post a gap, each as many events as the route
+ * takes, with the plane answering at once and the turn already over.
+ */
+test("a backlog is caught up one full post a gap, however quickly the plane answers", async () => {
+  const { plane, clock, sender, hearing } = senderOf();
+  const text = "a".repeat(sessionLiveBlockCharsMax);
+  hearing("turn-1", [...opening, textDelta(0, text), blockStop(0)]);
+  sender.ended("turn-1");
+
+  let gaps = 0;
+  while (plane.flying() > 0) {
+    assert.ok(gaps < postsMax, "the backlog was never caught up");
+    await plane.answer();
+    assert.equal(plane.flying(), 0, "a post started inside the gap");
+    await clock.advance(sessionLiveBounds.postGapMsMin);
+    gaps += 1;
+  }
+
+  const sizes = plane.posts.map(({ events }) => events.length);
+  assert.equal(plane.posts.length, gaps);
+  assert.deepEqual(sizes.slice(0, 3), [
+    1,
+    sessionLiveEventsMax,
+    sessionLiveEventsMax,
+  ]);
+  assert.deepEqual(plane.posts.at(-1).events.at(-1), end);
 });
 
 test("a post the plane could not take is sent again after the retry wait, from what it acknowledged", async () => {
@@ -767,6 +800,7 @@ test("an ended turn's end is sent again after the retry wait where the plane cou
   hearing("turn-1", opening);
   await plane.answer();
   sender.ended("turn-1");
+  await clock.advance(sessionLiveBounds.postGapMsMin);
   assert.deepEqual(plane.posts[1].events, [end]);
   await plane.answer(503);
   await clock.advance(sessionLiveBounds.postRetryMs - 1);
