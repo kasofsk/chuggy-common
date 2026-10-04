@@ -9,10 +9,12 @@ import {
   runTurnSeriesMax,
 } from "@chuggy/worker-contract/workerPlane";
 
+import { drawnSecrets, drawnText, seeded } from "./credentialText.fixture.mjs";
 import {
   credentialScrub,
   credentialScrubbing,
   credentialScrubCharsMin,
+  credentialScrubHead,
   endedEvidence,
   runEvidenceRecorder,
   runTotals,
@@ -93,6 +95,135 @@ test("a credential minted after the scrub was handed out is scrubbed by it", () 
 
   assert.equal(scrub(`saw ${minted}`), "saw [redacted credential]");
   assert.equal(scrub(`saw ${secret}`), "saw [redacted credential]");
+});
+
+test("a text still being written is scrubbed only as far as no later text can change it", () => {
+  const head = credentialScrubHead([secret]);
+  const begun = secret.slice(0, 20);
+
+  assert.equal(head(`the token is ${begun}`), "the token is ");
+  assert.equal(
+    head(`the token is ${begun} and more`),
+    `the token is ${begun} and more`,
+    "a beginning that turned out not to be the credential stayed held back",
+  );
+  assert.equal(
+    head(`the token is ${secret} and more`),
+    "the token is [redacted credential] and more",
+  );
+  assert.equal(
+    head(`one ${secret} two ${secret.slice(0, 1)}`),
+    "one [redacted credential] two ",
+    "the credential's first character was sent before what follows it was known",
+  );
+});
+
+/**
+ * Where one credential holds another, the store replaces the longer whole and
+ * the shorter wherever it stands alone, and a text in pieces sends neither:
+ * the shorter is held back while it may still be the longer's middle.
+ */
+test("a credential inside another is never sent, whichever of them the text turns out to hold", () => {
+  const inner = "inner-0123456789abcdef";
+  const outer = `outer-${inner}-tail-0123`;
+  const [scrub, head] = [credentialScrub, credentialScrubHead].map((make) =>
+    make([inner, outer]),
+  );
+
+  assert.equal(scrub(`a ${outer} b`), "a [redacted credential] b");
+  assert.equal(scrub(`a ${inner} b`), "a [redacted credential] b");
+  for (const whole of [
+    `a ${outer} b`,
+    `a outer-${inner}-other b`,
+    `a ${inner}`,
+  ])
+    for (let cut = 0; cut <= whole.length; cut += 1) {
+      const sent = head(whole.slice(0, cut));
+      assert.ok(
+        scrub(whole).startsWith(sent),
+        `${whole} cut at ${String(cut)}`,
+      );
+      assert.ok(
+        !sent.includes(inner.slice(0, 8)),
+        `${sent} holds a credential`,
+      );
+    }
+});
+
+/**
+ * Where two credentials overlap in a text, the store replaces the one the
+ * scrub reaches first, the longer, and leaves what remains of the other. A
+ * text in pieces sends that remainder too and nothing else: never more than
+ * the store holds.
+ */
+test("credentials that overlap are sent as the store holds them, the longer replaced and the rest left", () => {
+  const first = "0123456789abcdefXYZ";
+  const second = "abcdefXYZ0123456789-q";
+  const overlapped = `${first}${second.slice("abcdefXYZ".length)}`;
+  const [scrub, head] = [credentialScrub, credentialScrubHead].map((make) =>
+    make([first, second]),
+  );
+
+  assert.equal(
+    scrub(`a ${overlapped} b`),
+    "a 0123456789[redacted credential] b",
+  );
+  for (let cut = 0; cut <= overlapped.length + 4; cut += 1)
+    assert.ok(
+      scrub(`a ${overlapped} b`).startsWith(
+        head(`a ${overlapped} b`.slice(0, cut)),
+      ),
+      `cut at ${String(cut)}`,
+    );
+});
+
+/**
+ * The property the live stream rests on, over drawn credentials and texts:
+ * whatever was scrubbed of a text's beginning is how the scrub of the whole
+ * text begins, it only grows as the text does, and nothing is held back once
+ * the text's last character is one no credential holds.
+ */
+test("whatever a text's beginning is scrubbed to is how the whole text's scrub begins", () => {
+  for (let seed = 1; seed <= 400; seed += 1) {
+    const random = seeded(seed);
+    const secrets = drawnSecrets(random);
+    const text = drawnText(random, secrets, 12);
+    const [scrub, head] = [credentialScrub, credentialScrubHead].map((make) =>
+      make(secrets),
+    );
+    const whole = scrub(text);
+    let before = "";
+    for (let cut = 0; cut <= text.length; cut += 1) {
+      const begun = text.slice(0, cut);
+      const sent = head(begun);
+      const named = `seed ${String(seed)} cut at ${String(cut)}`;
+      assert.ok(whole.startsWith(sent), `${named} sent what the store redacts`);
+      assert.ok(sent.startsWith(before), `${named} took back what was sent`);
+      if (!secrets.some((value) => value.includes(begun.slice(-1))))
+        assert.equal(sent, scrub(begun), `${named} held back settled text`);
+      before = sent;
+    }
+    assert.equal(scrub(text).startsWith(head(text)), true);
+  }
+});
+
+test("a credential minted after the head scrub was handed out is held back by it", () => {
+  const { scrubHead, keepSecret } = credentialScrubbing([
+    { kind: "agent", value: secret },
+  ]);
+  const minted = "ghs_0123456789abcdefghijklmnopqrstuvwxyz";
+
+  assert.equal(
+    scrubHead(`saw ${minted.slice(0, 20)}`),
+    `saw ${minted.slice(0, 20)}`,
+  );
+  keepSecret({ kind: "minted", value: minted });
+
+  assert.equal(scrubHead(`saw ${minted.slice(0, 20)}`), "saw ");
+  assert.equal(
+    scrubHead(`saw ${minted} then`),
+    "saw [redacted credential] then",
+  );
 });
 
 /**
