@@ -898,6 +898,34 @@ test("a plane that takes no post for the bound is left alone for the turn, and a
   );
 });
 
+/**
+ * A plane that answers a post with its turn's stop is answering, as one that
+ * took the post is, so what it could not take before that is not held
+ * against the turn after.
+ */
+test("a post answered as stopped clears the count of posts not taken, and the turn after is sent again after one", async () => {
+  const { plane, clock, hearing, told } = senderOf();
+
+  hearing("turn-1", opening);
+  for (let post = 1; post < sessionLiveBounds.postFailuresMax; post += 1) {
+    await plane.answer(503);
+    await clock.advance(sessionLiveBounds.postRetryMs);
+  }
+  await plane.answer(200, { turn: "turn-1" });
+  assert.deepEqual(told, ["turn-1"]);
+
+  hearing("turn-2", opening);
+  await clock.advance(sessionLiveBounds.postGapMsMin);
+  assert.equal(plane.posts.at(-1).turn, "turn-2");
+  await plane.answer(503);
+  await clock.advance(sessionLiveBounds.postRetryMs);
+  assert.equal(
+    plane.flying(),
+    1,
+    "a post answered as stopped did not clear the count",
+  );
+});
+
 test("an ended turn's end is sent again after the retry wait where the plane could not take it", async () => {
   const { plane, clock, sender, hearing } = senderOf();
 

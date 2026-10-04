@@ -297,10 +297,11 @@ async function liveSenderAnswer(sender, post) {
  * What one post's answer leaves. A plane that stopped the session closes the
  * stream for it. One that says the post's turn was stopped by its member, or
  * refused the post, or has taken none for the bound, finishes the stream of
- * that turn where it is still the turn held, and the first of those is told
- * to the sender's opener and is no post lost. One that could not take the post
- * is asked again after the retry wait, with whatever the acknowledged state
- * then makes the next post.
+ * that turn where it is still the turn held. The first of those is told to
+ * the sender's opener and is a post the plane answered: it is not one lost,
+ * and the count towards that bound begins again. One that could not take the
+ * post is asked again after the retry wait, with whatever the acknowledged
+ * state then makes the next post.
  */
 function liveSenderSettled(sender, post, answer) {
   if (answer === "Acknowledged") {
@@ -309,6 +310,7 @@ function liveSenderSettled(sender, post, answer) {
     return;
   }
   if (answer === "TurnStopped") {
+    sender.failures = 0;
     if (sender.state.turn === post.turn) sender.state.finished = true;
     sender.turnStopped(post.turn);
     return;
