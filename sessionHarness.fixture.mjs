@@ -100,15 +100,40 @@ export const mintedCredential = {
 };
 
 /**
+ * A question the plane holds for as long as its asker does, ended as `fetch`
+ * ends a request that was let go of.
+ */
+export function heldUntilLetGo(signal) {
+  return new Promise((_resolve, reject) => {
+    if (signal.aborted) reject(signal.reason);
+    else
+      signal.addEventListener("abort", () => reject(signal.reason), {
+        once: true,
+      });
+  });
+}
+
+/**
  * The plane a case drives. `minted` is what the session credential route
  * answers; without one the plane mints nothing, which is the deployment every
  * case that is about something else runs under. `refuse(path)` names a status
  * to answer a path with instead, which must be one its route answers.
+ * `stopped(turn, signal)` answers the watch on a turn, which without one is
+ * held for as long as the turn is watched, as a plane holds it for a turn
+ * nobody stopped. `live(post)` answers a post of live events, which without
+ * one is taken.
  */
-export function planeOf(turns, facts, refuse = () => undefined, minted) {
+export function planeOf(
+  turns,
+  facts,
+  refuse = () => undefined,
+  minted,
+  stopped = (_turn, signal) => heldUntilLetGo(signal),
+  live = () => ({ status: 204 }),
+) {
   const calls = [];
   let claims = 0;
-  const plane = planeFetch(planes.session, (route, { path, method, body }) => {
+  const answer = (route, { path, method, body }, signal) => {
     const refused = refuse(path.split("?")[0]);
     if (refused !== undefined) {
       calls.push({ path, method });
@@ -129,6 +154,10 @@ export function planeOf(turns, facts, refuse = () => undefined, minted) {
           ? { status: 204 }
           : { status: 200, body: turn };
       }
+      case "turnStopped":
+        return stopped(body.turn, signal);
+      case "turnLive":
+        return live(body);
       case "storeStreams":
         return { status: 200, body: { streams: [] } };
       case "storePage":
@@ -136,7 +165,8 @@ export function planeOf(turns, facts, refuse = () => undefined, minted) {
       default:
         return { status: 204 };
     }
-  });
+  };
+  const plane = planeFetch(planes.session, answer);
   return {
     calls,
     request: overPlane(sessionRequest, plane.fetch),

@@ -125,8 +125,8 @@ export function liveReader() {
 /**
  * A plane that takes live posts and answers each when the case says. `posts`
  * is every body asked, `asked` what each was asked under, and `answer` settles
- * the oldest one in flight with a status, or with a raise where it is given
- * an error.
+ * the oldest one in flight with a status and the body it carries, or with a
+ * raise where it is given an error.
  */
 export function livePlane() {
   const posts = [];
@@ -142,10 +142,10 @@ export function livePlane() {
         posts.push(JSON.parse(init.body));
         flying.push({ resolve, reject });
       }),
-    async answer(status = 204) {
+    async answer(status = 204, body = undefined) {
       const { resolve, reject } = flying.shift();
       if (status instanceof Error) reject(status);
-      else resolve({ status });
+      else resolve({ status, json: async () => body });
       await settled();
     },
   };

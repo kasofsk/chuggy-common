@@ -44,6 +44,20 @@
  * what bounds an inquiry — nothing enqueues a second turn on one — so this is
  * the weaker of the two walls, and it is here because the pod is what would
  * otherwise spend the account's attempt on a turn the member never asked for.
+ *
+ * A TURN ITS MEMBER STOPPED IS INTERRUPTED, AND ITS RESULT IS NOT DRAINED PAST.
+ * `./sessionStop.mjs` interrupts the runtime, whose query stays open, and the
+ * turn's result is read and settled as that result says: the plane has already
+ * ended the turn and keeps nothing of the settlement. The drain is what the
+ * member's next turn would wait out. What the interrupted turn wrote is
+ * mirrored before its result is handed on, so a batch of it the store refuses
+ * is reported ahead of that result and is still the stopped turn's
+ * `StoreRefused`. What the runtime writes on its own clock is mirrored behind
+ * the result, as the title it gives a session is where the first turn is
+ * stopped before the title is ready. A refusal of that is reported behind the
+ * result too, and with no drain it is charged to the turn after, which runs to
+ * its result, fails `StoreRefused` and ends the session, as a refusal later
+ * than the drain is charged after any turn.
  */
 
 import { mkdir, readFile } from "node:fs/promises";
@@ -88,6 +102,7 @@ import { credentialScrub, credentialScrubHead } from "./runEvidence.mjs";
 import { sessionCheckout } from "./sessionCheckout.mjs";
 import { sessionLiveSender } from "./sessionLive.mjs";
 import { sessionMailbox } from "./sessionMailbox.mjs";
+import { sessionStopWatch } from "./sessionStop.mjs";
 import { sessionStoreAdapter } from "./sessionStore.mjs";
 import {
   sessionRequest,
@@ -501,6 +516,15 @@ function sessionReportsLive(facts) {
 }
 
 /**
+ * Whether a member can stop a turn of this session, which the plane's door
+ * lets them of a thread and of no other kind: it is what a watch on each turn
+ * is opened for.
+ */
+function sessionTakesStops(facts) {
+  return facts.kind === "Thread";
+}
+
+/**
  * The options one session's query runs under, every bound the pod was launched
  * with.
  *
@@ -616,14 +640,16 @@ async function observe(context, message) {
   if (message.type === "stream_event") return observeStream(context, message);
   observeRateLimit(context.sightings, message);
   context.measure.saw(message);
-  if (message.type === "result")
+  if (message.type === "result") {
+    context.stops?.released();
     context.live?.ended(context.mailbox.claimed()?.turn);
+  }
   if (message.type !== "system") return;
   if (message.subtype === "init") await bindReference(context, message);
   if (message.subtype === "mirror_error") context.mirrored = true;
 }
 
-/** One turn's messages, read to its result and then drained past it. */
+/** One turn's messages, read to its result and then drained past it, unless its member stopped the turn. */
 export async function runSessionTurn(context) {
   context.store.startTurn();
   context.sightings = rateLimitSightings();
@@ -638,6 +664,8 @@ export async function runSessionTurn(context) {
       break;
     }
   }
+  if (context.stops?.stopped(context.mailbox.claimed()?.turn))
+    return { result, ended: false };
   const until = context.now() + context.task.bounds.resultDrainMs;
   for (;;) {
     const remaining = until - context.now();
@@ -916,7 +944,8 @@ function sessionToolServers(context, facts, environment, services, sdk) {
 /**
  * The mailbox and the buffer its claims reset, hung on the context as one thing
  * rather than two: the reset is bound to the claim, so a turn that fails leaves
- * nothing for the next one to inherit.
+ * nothing for the next one to inherit. A claim is also where the watch for a
+ * member's stop of the turn begins, in a session that holds one.
  */
 function sessionStagedMailbox(context, { request, wait: pause, now }) {
   const staging = leadDecisionStaging();
@@ -925,7 +954,10 @@ function sessionStagedMailbox(context, { request, wait: pause, now }) {
     request,
     wait: pause,
     now,
-    claim: (turn) => staging.reset(turn.input),
+    claim: (turn) => {
+      staging.reset(turn.input);
+      context.stops?.watching(turn.turn);
+    },
   });
 }
 
@@ -958,7 +990,9 @@ async function sessionRuntime(
 /**
  * The live sender a session that reports live holds, under the session's own
  * clock, pauses and scrub. It reaches the plane through the request that is
- * asked once, because `context.request` waits out a plane that is down.
+ * asked once, because `context.request` waits out a plane that is down. A
+ * turn the plane answers a post of as stopped is handed to the session's
+ * watch, where it holds one.
  */
 function sessionLive(context, facts, { services, pause, warn }) {
   if (!sessionReportsLive(facts)) return undefined;
@@ -969,7 +1003,26 @@ function sessionLive(context, facts, { services, pause, warn }) {
     scrub: context.scrub,
     scrubHead: context.scrubHead,
     warn,
+    turnStopped: (turn) => context.stops?.told(turn),
     bounds: services.liveBounds,
+  });
+}
+
+/**
+ * The watch a session whose turns a member can stop holds, under the session's
+ * own clock and pauses and through the request that is asked once. What it
+ * interrupts is the runtime the session then opens, which is why it is handed
+ * the context and not the runtime.
+ */
+function sessionStops(context, facts, { services, pause, warn }) {
+  if (!sessionTakesStops(facts)) return undefined;
+  return sessionStopWatch(context.task, context.bearer, {
+    request: services.requestOnce ?? sessionRequestOnce,
+    now: context.now,
+    pause,
+    interrupt: () => context.runtime.interrupt(),
+    warn: (text) => warn(context.scrub(text)),
+    bounds: services.stopBounds,
   });
 }
 
@@ -1003,12 +1056,14 @@ async function sessionRun(context, facts, opened) {
     );
   if (opened.checkout?.refused !== undefined)
     return await refuseSession(context, warn, opened.checkout.refused);
-  const stream = await sessionRuntime(context, { ...opened, facts });
-  context.reader = messageReader(stream, pause);
+  context.stops = sessionStops(context, facts, opened);
+  context.runtime = await sessionRuntime(context, { ...opened, facts });
+  context.reader = messageReader(context.runtime, pause);
   context.live = sessionLive(context, facts, opened);
   try {
     return await runSessionTurns(context);
   } finally {
+    context.stops?.released();
     context.live?.close();
   }
 }

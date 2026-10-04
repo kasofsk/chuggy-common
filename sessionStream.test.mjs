@@ -107,12 +107,17 @@ function scriptOf(messages, kept = () => true) {
 }
 
 const isLive = ({ path }) => path === livePath;
-const isPoll = ({ path }) => path === sessionPlaneRoutes.turn.path;
+const heldPaths = [
+  sessionPlaneRoutes.turn.path,
+  sessionPlaneRoutes.turnStopped.path,
+];
+const isHeld = ({ path }) => heldPaths.includes(path);
 
 /**
  * One session run over `script`, and what it asked the plane: its live posts,
- * and everything else but its polls of the mailbox, which an idle session
- * repeats as often as its clock allows. `services.query` replaces the runtime
+ * and everything else but the questions the plane holds for it, which are its
+ * polls of the mailbox, repeated as often as an idle session's clock allows,
+ * and its watch for a stop of the turn it is answering. `services.query` replaces the runtime
  * `script` drives. Its posts wait out no gap, so that what a script yields is
  * posted as it is read, unless `services.liveBounds` says they do.
  */
@@ -133,7 +138,7 @@ async function sessionOver(script, options = {}) {
     seen,
     asks: plane.calls.filter(isLive).length,
     posts: plane.calls.filter(isLive).map(({ body }) => body),
-    settled: plane.calls.filter((call) => !isLive(call) && !isPoll(call)),
+    settled: plane.calls.filter((call) => !isLive(call) && !isHeld(call)),
   };
 }
 

@@ -86,7 +86,11 @@ test("a successful turn is answered with its result text and the batches it wrot
       result("success", { result: "kestrel" }),
     ]);
 
-    const code = await run({ request: plane.request, query });
+    const code = await run({
+      request: plane.request,
+      requestOnce: plane.requestOnce,
+      query,
+    });
 
     assert.equal(code, 0, kind);
     const answer = plane.calls.find(
@@ -1147,6 +1151,7 @@ test("a thread originates through the API under its own session bearer, and answ
 
   await run({
     request: plane.request,
+    requestOnce: plane.requestOnce,
     query,
     chuggyRequest: async (_task, apiBearer, path, init) => {
       seenApi.push({ apiBearer, path, method: init?.method });

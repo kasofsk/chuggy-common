@@ -24,6 +24,7 @@ import {
   sessionTurnAnswerSchema,
   sessionTurnFailureSchema,
   sessionTurnLiveSchema,
+  sessionTurnStoppedSchema,
 } from "@chuggy/worker-contract/sessionPlane";
 import {
   contractVersionRefusalSchema,
@@ -67,6 +68,7 @@ export const planes = {
       turnAnswer: sessionTurnAnswerSchema,
       turnFailure: sessionTurnFailureSchema,
       turnLive: sessionTurnLiveSchema,
+      turnStopped: sessionTurnStoppedSchema,
       credential: sessionCredentialSchema,
       ended: sessionEndedSchema,
     },
@@ -175,8 +177,9 @@ function answered(plane, route, status, body) {
 }
 
 /**
- * A `fetch` for one wire. `answer(route, asked)` names the status and, for a
- * status whose body is not a refusal, the body.
+ * A `fetch` for one wire. `answer(route, asked, signal)` names the status and,
+ * for a status whose body is not a refusal, the body; `signal` is the
+ * request's own, for an answer that is held until its asker lets go.
  */
 export function planeFetch(plane, answer) {
   const asked = [];
@@ -192,7 +195,7 @@ export function planeFetch(plane, answer) {
       const body = offeredBody(plane, route, init);
       const request = { route, path: `${pathname}${search}`, method, body };
       asked.push(request);
-      const { status, body: sent } = await answer(route, request);
+      const { status, body: sent } = await answer(route, request, init.signal);
       return answered(plane, route, status, sent);
     },
   };

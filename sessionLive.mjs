@@ -8,6 +8,10 @@
  * nothing here. Text is sent only as far as `credentialScrubHead` has settled
  * it, because the store scrubs a block that is whole and this sends one in
  * pieces before it is.
+ *
+ * A post of a turn its member stopped is answered with that turn. The sender
+ * posts nothing more of it and tells its opener, which is how a session that
+ * is writing hears of a stop without waiting for its watch to be answered.
  */
 
 import {
@@ -53,6 +57,7 @@ export const sessionLiveBounds = Object.freeze({
 });
 
 const acknowledgedStatus = 204;
+const turnStoppedStatus = 200;
 const serverErrorStatusMin = 500;
 const highSurrogateMin = 0xd800;
 const highSurrogateMax = 0xdbff;
@@ -257,7 +262,11 @@ export function sessionLiveAcknowledged(state, post) {
   if (post.ending && state.turn === post.turn) state.finished = true;
 }
 
-/** What the plane made of one post, asked once and its body left unread. Every answer but the first is a post it did not take. */
+/**
+ * What the plane made of one post, asked once. Its body is read only where
+ * it names the turn its member stopped, and every answer but that one and
+ * the acknowledgement is a post the plane did not take.
+ */
 async function liveSenderAnswer(sender, post) {
   try {
     const response = await sender.request(
@@ -271,6 +280,10 @@ async function liveSenderAnswer(sender, post) {
       },
       { deadlineMs: sender.bounds.postDeadlineMs },
     );
+    if (response.status === turnStoppedStatus)
+      return (await response.json())?.turn === post.turn
+        ? "TurnStopped"
+        : "Refused";
     await response.body?.cancel();
     if (response.status === acknowledgedStatus) return "Acknowledged";
     if (sessionStopped(response)) return "Stopped";
@@ -282,15 +295,24 @@ async function liveSenderAnswer(sender, post) {
 
 /**
  * What one post's answer leaves. A plane that stopped the session closes the
- * stream for it. One that refused the post, or has taken none for the bound,
- * finishes the stream of the turn the post was of, where that is still the
- * turn held. One that could not take it is asked again after the retry wait,
- * with whatever the acknowledged state then makes the next post.
+ * stream for it. One that says the post's turn was stopped by its member, or
+ * refused the post, or has taken none for the bound, finishes the stream of
+ * that turn where it is still the turn held. The first of those is told to
+ * the sender's opener and is a post the plane answered: it is not one lost,
+ * and the count towards that bound begins again. One that could not take the
+ * post is asked again after the retry wait, with whatever the acknowledged
+ * state then makes the next post.
  */
 function liveSenderSettled(sender, post, answer) {
   if (answer === "Acknowledged") {
     sessionLiveAcknowledged(sender.state, post);
     sender.failures = 0;
+    return;
+  }
+  if (answer === "TurnStopped") {
+    sender.failures = 0;
+    if (sender.state.turn === post.turn) sender.state.finished = true;
+    sender.turnStopped(post.turn);
     return;
   }
   sender.lost += 1;
@@ -391,15 +413,17 @@ function liveSenderStep(sender) {
  * `close` ends it with the session and hears nothing after. It sends an ended
  * turn's last post, behind the one in flight where the plane takes that one,
  * leaves each to its own deadline, and says once what the plane had not taken.
+ * `turnStopped` is told each turn the plane answers a post of as stopped.
  */
 export function sessionLiveSender(task, bearer, services) {
-  const { request, now, pause, scrub, scrubHead, warn } = services;
+  const { request, now, pause, scrub, scrubHead, warn, turnStopped } = services;
   const sender = {
     task,
     bearer,
     request,
     now,
     pause,
+    turnStopped,
     held: { scrub, scrubHead },
     bounds: { ...sessionLiveBounds, ...services.bounds },
     state: sessionLiveState(undefined),
