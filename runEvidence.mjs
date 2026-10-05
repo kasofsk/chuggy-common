@@ -11,10 +11,11 @@
  * carries the turns it covers before the bytes, so the plane's contiguity rule
  * is met by construction and a re-delivered flush costs nothing.
  *
- * NOTHING THE AGENT WRITES WAITS ON THE PLANE. A line is buffered and never
- * awaited, and a batch that is full is closed and queued behind the ones a
- * plane that is away has not taken. What waits is counted against the run's
- * own cap on batches as it is queued, so it is never more than a transcript.
+ * A LINE THE AGENT WRITES IS RECORDED WITHOUT WAITING ON THE PLANE. It is
+ * buffered and never awaited, and a batch that is full is closed and queued
+ * behind the ones a plane that is away has not taken. What waits is counted
+ * against the run's own cap on batches as it is queued, so it is never more
+ * than a transcript.
  *
  * EVIDENCE NEVER FAILS A RUN. A refused evidence call stops the transcript and
  * is remembered as the reason an already-failing run ended; it does not itself

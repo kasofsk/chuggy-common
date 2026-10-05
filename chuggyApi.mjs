@@ -1,7 +1,7 @@
 /**
- * The pod's one way to reach this installation's own API: `sessionTransport`'s
- * bounded retry, against `task.api.url` instead of the worker plane, under the
- * same session bearer. THERE IS NO SECOND CREDENTIAL — the API resolves that
+ * The pod's one way to reach this installation's own API: a short retry of its
+ * own, against `task.api.url` instead of the worker plane, under the same
+ * session bearer. THERE IS NO SECOND CREDENTIAL — the API resolves that
  * bearer to the session's principal and authorizes every call through the
  * project membership exactly as it authorizes a console user's, so a tool call
  * is a command the session's own membership admits and nothing more.
