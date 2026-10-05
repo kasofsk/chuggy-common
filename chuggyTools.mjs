@@ -25,9 +25,18 @@
  * collection: the caller's page bound and cursor go through, the route's own
  * body comes back verbatim as JSON text, and the cursor is in the answer for
  * the model to ask again with. A tool that walked would spend the turn's whole
- * token budget on a project's history. A page too large to answer is refused
- * where the model can ask for a smaller one, never cut: a cut JSON document is
- * a page nothing can parse and nothing can resume from.
+ * token budget on a project's history. A page too large to answer is never
+ * cut: a cut JSON document is a page nothing can parse and nothing can resume
+ * from.
+ *
+ * A PAGE TOO LARGE IS ASKED FOR AGAIN, SMALLER. A `limit` is a ceiling, and
+ * the route's page carries the cursor that continues it, so a smaller page
+ * from the same place answers the question that was asked, where a refusal
+ * leaves the model to guess a limit with a second call. The handler halves the
+ * limit until a page fits or the page is one item, which is what bounds the
+ * requests one call makes. It is not a walk: the place never moves and one
+ * page is what is answered. The refusal is left for where nothing smaller can
+ * be asked for, which is a tool with no limit and an item too large alone.
  *
  * THE TRANSCRIPT READS ARE THE ONE EXCEPTION, and `./transcriptPage.mjs` states
  * why: their route pages by store batch, a batch is bounded by the store's own
@@ -137,7 +146,7 @@ export const chuggyToolAnswerBytesMax = Math.floor(
 /** The argument a paged tool's shape declares, and the only page bound a model can lower. */
 export const chuggyToolPageArgument = "limit";
 
-/** The smallest page there is, past which a refusal has nothing left to ask for. */
+/** The smallest page there is, past which nothing smaller is left to ask for. */
 export const chuggyToolPageItemsMin = 1;
 
 /** The cursors a tool's shape declares, in the order a refusal offers them. */
@@ -250,25 +259,23 @@ function answered(text, isError) {
   return { content: [{ type: "text", text }], ...(isError ? { isError } : {}) };
 }
 
-/**
- * What an answer too large to store is refused with. It ends in what this
- * caller can actually do, which is nothing for a tool with no page bound and
- * nothing again for one already asking for a single item: "ask for a smaller
- * page" is then a dead end dressed as an instruction, and a model reads it as
- * one and asks the same question again.
- */
-function answerTooLarge(name, fields, args) {
+/** What an answer too large to store is refused with, ending in why nothing smaller came. */
+function answerTooLarge(remedy) {
   return answered(
-    `this answer is larger than the ${String(chuggyToolAnswerBytesMax)} bytes one tool answer holds in the transcript; ${answerTooLargeRemedy(name, fields, args)}.`,
+    `this answer is larger than the ${String(chuggyToolAnswerBytesMax)} bytes one tool answer holds in the transcript; ${remedy}.`,
     true,
   );
 }
 
-function answerTooLargeRemedy(name, fields, args) {
+/**
+ * How the refusal ends once nothing smaller is left to ask for: the tool has no
+ * page bound, or its page of a single item is still too large. It says what
+ * the caller can do, which is move past that item where the tool takes a
+ * cursor and nothing where it takes none.
+ */
+function smallestPageRemedy(name, fields) {
   if (!(chuggyToolPageArgument in fields))
     return `${name} takes no ${chuggyToolPageArgument}, so this one cannot be answered`;
-  if (args?.[chuggyToolPageArgument] !== chuggyToolPageItemsMin)
-    return `ask again with a smaller ${chuggyToolPageArgument}`;
   const cursor = chuggyToolCursorArguments.find((one) => one in fields);
   return cursor === undefined
     ? `${name} is already asking for one, so this one cannot be answered`
@@ -278,8 +285,8 @@ function answerTooLargeRemedy(name, fields, args) {
 /**
  * One route's answer as the model reads it: its status, and its body verbatim.
  * A body larger than this draws is cut here and weighed by the handler, which
- * refuses it: the cut text is never answered, because a cut JSON document is a
- * page nothing can parse and nothing can resume from.
+ * asks for less or refuses: the cut text is never answered, because a cut JSON
+ * document is a page nothing can parse and nothing can resume from.
  */
 async function relay(context, path, init) {
   const response = await context.request(
@@ -383,41 +390,11 @@ const ordinal = (z) => z.number().int().min(1);
 const anyObject = (z) => z.looseObject({});
 
 /**
- * The tools whose route this installation's API does not serve yet, and what
- * serves each when it lands.
- *
- * RELAYING THE 404 WOULD BE A LIE THE MODEL CANNOT SEE THROUGH. Every one of
- * these paths answers the same `404` a missing project answers, so a lead told
- * only the status reads "this project has no refusals" where the truth is "this
- * installation cannot answer that yet" — and it decides on the first. A stated
- * refusal is the honest answer, and it names the tool to reach for instead.
- *
- * IT IS ONE TABLE SO IT IS ONE DELETION. Each entry goes in the change that
- * registers its route; an entry left behind is a tool that refuses a route that
- * works, which the first turn against a served installation shows. Nothing here
- * can check that for itself — the route table is built by chuggy's server,
- * which this repository does not carry — so the suites hold what they can:
- * every key is a tool the roster carries, every tool named here refuses before
- * it makes a request, and no tool outside it does.
- */
-export const chuggyToolsNotYetServed = {
-  read_decision_log:
-    "This project's decision log cannot be read by this installation yet.",
-  read_refusals:
-    "This project's standing refusals cannot be read by this installation yet. This turn's observation carries them.",
-  read_ticket_refusals:
-    "A ticket's refusal ledger cannot be read by this installation yet. This turn's observation carries the standing refusals.",
-  read_lead: "The lead session cannot be read by this installation yet.",
-  read_lead_transcript:
-    "The lead's own transcript cannot be read by this installation yet.",
-};
-
-/**
  * Every project tool: its name, the shape its input is checked against at the
  * boundary, and the one route it reaches. It is a value rather than a function
  * because it is a roster, and a roster read twice must read the same both
- * times; it is exported so a suite can drive the route one tool builds even
- * where `chuggyToolsNotYetServed` is what a session's handler answers.
+ * times; it is exported so a suite can drive every tool's route, whatever
+ * roster a session holds.
  */
 export const chuggyProjectTools = [
   {
@@ -490,7 +467,7 @@ export const chuggyProjectTools = [
   {
     name: "read_decision_log",
     description:
-      "One page of this project's past selector decisions, newest first: what each chose and under which settings.",
+      "One page of this project's past selector decisions, oldest first: what each chose and under which settings. Answers `nextAfter` for the next page; `after` resumes from it.",
     shape: (z) => ({
       after: count(z).optional(),
       limit: limit(z, selectorHistoryLimitMax),
@@ -515,7 +492,7 @@ export const chuggyProjectTools = [
   {
     name: "read_ticket_refusals",
     description:
-      "One ticket's whole refusal ledger: every refusal recorded on it and every lift.",
+      "One ticket's refusal ledger, oldest first: the refusals recorded on it and their lifts. `more` says the ledger holds further entries than one answer carries.",
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
       read(
@@ -768,30 +745,27 @@ export function chuggyToolDefinitions(context) {
   );
   const project = chuggyProjectTools.map((definition) => ({
     ...definition,
-    call: (args) => {
-      const unserved = chuggyToolsNotYetServed[definition.name];
-      return unserved === undefined
-        ? definition.call(context, args)
-        : answered(unserved, true);
-    },
+    call: (args) => definition.call(context, args),
   }));
   return [...project, ...context.staging.definitions].filter((definition) =>
     admitted.has(definition.name),
   );
 }
 
-/**
- * One answer, or the refusal that replaces it where the entry it becomes would
- * not fit one of the store's lines. Refusing here is what keeps the answer the
- * model reads and the line the store writes the same thing.
- */
-function storableAnswer(definition, fields, args, answer) {
+/** Whether the entry an answer becomes fits one of the store's lines. */
+function storable(answer) {
   const text = (answer.content ?? [])
     .map((block) => (typeof block?.text === "string" ? block.text : ""))
     .join("");
-  return chuggyToolAnswerBytes(text) <= chuggyToolAnswerBytesMax
-    ? answer
-    : answerTooLarge(definition.name, fields, args);
+  return chuggyToolAnswerBytes(text) <= chuggyToolAnswerBytesMax;
+}
+
+/** A raise as the text the model reads. */
+function raised(failure) {
+  return answered(
+    failure instanceof Error ? failure.message : String(failure),
+    true,
+  );
 }
 
 /**
@@ -813,38 +787,51 @@ function storableAnswer(definition, fields, args, answer) {
  *
  * AND IT IS WHERE AN ANSWER IS WEIGHED, because it is the one boundary every
  * tool's answer crosses and the one place the tool that produced it is known.
- * Both returns go through the weighing: a raise the model reads is an answer
- * like any other, and the header would otherwise claim a property the code does
- * not hold.
+ * Every answer goes through the weighing, a raise included: a raise the model
+ * reads is an answer like any other, and the header would otherwise claim a
+ * property the code does not hold. Refusing here is what keeps the answer the
+ * model reads and the line the store writes the same thing.
+ *
+ * SO IT IS WHERE A PAGE TOO LARGE IS ASKED FOR AGAIN, at half the limit each
+ * time, down to one item. A call that gave no limit starts from the largest
+ * its shape admits, the route's own default being the route's to know.
  */
 export function chuggyToolHandler(definition, z) {
-  // The shape the model is given is also what says whether this tool pages and
-  // what it is paged by: a roster stating that beside it would be a second
-  // answer to a question the shape answers, and the two would part.
+  // The shape the model is given is also what says whether this tool pages,
+  // what it is paged by and how large a page it admits: a roster stating that
+  // beside it would be a second answer to a question the shape answers, and
+  // the two would part.
   const fields = definition.shape(z);
   const shape = z.object(fields);
-  return async (args) => {
-    let given = args ?? {};
+  const pageItemsMax = fields[chuggyToolPageArgument]?.unwrap().maxValue;
+  const asked = async (given) => {
     try {
-      given = shape.parse(given);
       const answer = await definition.call(given);
-      return storableAnswer(
-        definition,
-        fields,
-        given,
-        typeof answer === "string" ? answered(answer) : answer,
-      );
+      return typeof answer === "string" ? answered(answer) : answer;
     } catch (failure) {
-      return storableAnswer(
-        definition,
-        fields,
-        given,
-        answered(
-          failure instanceof Error ? failure.message : String(failure),
-          true,
-        ),
-      );
+      return raised(failure);
     }
+  };
+  const { name } = definition;
+  return async (args) => {
+    let given;
+    try {
+      given = shape.parse(args ?? {});
+    } catch (failure) {
+      const refused = raised(failure);
+      return storable(refused)
+        ? refused
+        : answerTooLarge(`${name} refused its arguments and asked for nothing`);
+    }
+    let answer = await asked(given);
+    let page = given[chuggyToolPageArgument] ?? pageItemsMax;
+    while (!storable(answer) && page > chuggyToolPageItemsMin) {
+      page = Math.floor(page / 2);
+      answer = await asked({ ...given, [chuggyToolPageArgument]: page });
+    }
+    return storable(answer)
+      ? answer
+      : answerTooLarge(smallestPageRemedy(name, fields));
   };
 }
 

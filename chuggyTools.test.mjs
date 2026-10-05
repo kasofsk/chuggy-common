@@ -19,6 +19,10 @@ import {
 import { z } from "zod";
 
 import {
+  chuggyRequestAttemptsMax,
+  chuggyRequestRetryMs,
+} from "./chuggyApi.mjs";
+import {
   chuggyOperationIdentity,
   chuggyToolAnswerBytes,
   chuggyToolAnswerBytesMax,
@@ -29,7 +33,6 @@ import {
   chuggyToolDefinitions,
   chuggyToolHandler,
   chuggyToolServer,
-  chuggyToolsNotYetServed,
   sessionAllowedTools,
   sessionBuiltInTools,
   sessionCapabilityTools,
@@ -163,16 +166,17 @@ test("every tool that takes a brief names the line bound an intent is held to", 
 });
 
 /** Which bound each read's page is held to is written here; the bound itself is the contract's. */
+const pageBounds = {
+  list_tickets: nativeHttpPageItemsMax,
+  list_drafts: nativeHttpPageItemsMax,
+  list_configurations: nativeHttpPageItemsMax,
+  read_decision_log: selectorHistoryLimitMax,
+  read_refusals: agenticRefusalsAnsweredMax,
+  list_executions: nativeHttpPageItemsMax,
+  read_thread: threadTurnsAnsweredMax,
+};
+
 test("every read that takes a limit admits its route's bound and no more", () => {
-  const bounds = {
-    list_tickets: nativeHttpPageItemsMax,
-    list_drafts: nativeHttpPageItemsMax,
-    list_configurations: nativeHttpPageItemsMax,
-    read_decision_log: selectorHistoryLimitMax,
-    read_refusals: agenticRefusalsAnsweredMax,
-    list_executions: nativeHttpPageItemsMax,
-    read_thread: threadTurnsAnsweredMax,
-  };
   const limited = chuggyToolDefinitions(
     chuggyToolContext(task, bearer, {
       capabilities: everyCapability,
@@ -182,12 +186,18 @@ test("every read that takes a limit admits its route's bound and no more", () =>
 
   assert.deepEqual(
     limited.map(({ name }) => name).sort(),
-    Object.keys(bounds).sort(),
+    Object.keys(pageBounds).sort(),
   );
   for (const { name, shape } of limited) {
     const { limit } = shape(z);
-    assert.ok(limit.safeParse(bounds[name]).success, `${name} at its bound`);
-    assert.ok(!limit.safeParse(bounds[name] + 1).success, `${name} past it`);
+    assert.ok(
+      limit.safeParse(pageBounds[name]).success,
+      `${name} at its bound`,
+    );
+    assert.ok(
+      !limit.safeParse(pageBounds[name] + 1).success,
+      `${name} past it`,
+    );
   }
 });
 
@@ -291,7 +301,21 @@ test("a page larger than the pod draws is refused rather than answered cut", asy
 test("the refusal names what this caller can lower, and says so where there is nothing", async () => {
   const body = "x".repeat(70_000);
   for (const [name, args, remedy] of [
-    ["list_executions", { limit: 100 }, /ask again with a smaller limit\.$/],
+    [
+      "list_executions",
+      { limit: 100 },
+      /list_executions is already asking for one; move past it with cursor\.$/,
+    ],
+    [
+      "read_refusals",
+      {},
+      /read_refusals is already asking for one, so this one cannot be answered\.$/,
+    ],
+    [
+      "list_tickets",
+      { phase: Array.from({ length: 4_096 }, () => "") },
+      /list_tickets refused its arguments and asked for nothing\.$/,
+    ],
     [
       "read_thread",
       { session: "t-1", limit: 1 },
@@ -409,6 +433,55 @@ test("a thread transcript of one full batch is read whole, page by page, under t
   );
 });
 
+/**
+ * The lead's transcript at the weight its route answered on a live project: a
+ * page under the bound as the route sends it and over it as an answer escapes
+ * it. It is answered in part, and the read after resumes inside the same batch.
+ */
+test("a lead transcript page a little over the bound is answered across two reads", async () => {
+  const entries = Array.from({ length: 30 }, (_, index) => ({
+    uuid: `u-${String(index)}`,
+    type: "assistant",
+    message: { role: "assistant", content: "x".repeat(936) },
+  }));
+  const body = JSON.stringify({
+    stream: "lead-1",
+    entries,
+    elided: 0,
+    truncated: false,
+    nextAfter: 1,
+  });
+  assert.ok(
+    Buffer.byteLength(body) <= chuggyToolAnswerBytesMax &&
+      chuggyToolAnswerBytes(body) > chuggyToolAnswerBytesMax,
+    "the page under test is not one the bound falls inside",
+  );
+  const { api, call } = toolsOf({}, () => ({ status: 200, body }));
+
+  const answers = [await call("read_lead_transcript", {})];
+  const first = JSON.parse(textOf(answers[0]));
+  answers.push(await call("read_lead_transcript", first.next));
+  const second = JSON.parse(textOf(answers[1]));
+
+  for (const answer of answers) {
+    assert.ok(answer.isError === undefined);
+    assert.ok(
+      chuggyToolAnswerBytes(textOf(answer)) <= chuggyToolAnswerBytesMax,
+    );
+  }
+  assert.deepEqual(first.next, { after: 0, entry: first.entries.length });
+  assert.ok(first.entries.length > 0 && second.entries.length > 0);
+  assert.deepEqual([...first.entries, ...second.entries], entries);
+  assert.deepEqual(second.next, { after: 1, entry: 0 });
+  assert.deepEqual(
+    api.calls.map(({ path }) => path),
+    [
+      "/api/v1/tenants/vteng/projects/chuggy/lead/transcript?limit=1",
+      "/api/v1/tenants/vteng/projects/chuggy/lead/transcript?after=0&limit=1",
+    ],
+  );
+});
+
 test("a raise too large to store is refused like any other answer", async () => {
   const huge = "x".repeat(chuggyToolAnswerBytesMax);
   const api = {
@@ -494,7 +567,7 @@ test("a maximal answer inside the captured entry is one batch the store can post
   );
 });
 
-/** One tool's route, driven past the unserved table so every path is covered. */
+/** One tool's own definition behind its handler, with no session's roster between. */
 function routeOf(name, args, api) {
   const definition = chuggyProjectTools.find((held) => held.name === name);
   return chuggyToolHandler(
@@ -611,12 +684,6 @@ test("an identity carrying a separator stays inside the route its tool names", a
   }
 });
 
-/**
- * The thread reads' own bounds, driven past the unserved table. Their entries
- * there answer `isError` for any argument at all, so a bound checked through a
- * session's handler would pass with the bound deleted; `routeOf` is what makes
- * the refusal the shape's rather than the table's.
- */
 test("a thread read past its bound is refused before it asks, and within it asks", async () => {
   for (const [name, args] of [
     ["read_thread", { session: "" }],
@@ -927,6 +994,44 @@ test("an origination without the fence the route requires never reaches it", asy
   assert.equal(api.calls.length, 0);
 });
 
+/** What every project tool is driven with where a suite drives them all. */
+const projectToolArguments = {
+  list_tickets: {},
+  read_ticket: { ticket: 7 },
+  read_draft: { ticket: 7 },
+  list_drafts: {},
+  list_configurations: {},
+  read_configuration: { revision: "r1" },
+  read_decision_log: {},
+  read_refusals: {},
+  read_ticket_refusals: { ticket: 7 },
+  read_lead: {},
+  read_lead_transcript: {},
+  list_executions: {},
+  read_execution: { execution: "e-1" },
+  read_run_transcript: { execution: "e-1", attempt: "a-1" },
+  read_operation: { operation: "o-1" },
+  list_threads: {},
+  read_thread: { session: "t-1" },
+  read_thread_transcript: { session: "t-1" },
+  initialize_draft: { revision: "r1" },
+  file_dependent: dependent,
+  revise_draft: {
+    ticket: 4,
+    expectedVersion: 2,
+    configurationRevision: "r1",
+    authoring: { dependencies: [] },
+    brief: { title: "t" },
+  },
+  delete_draft: { ticket: 4, expectedVersion: 2 },
+  release_draft: {
+    ticket: 4,
+    authoringVersion: 2,
+    configurationRevision: "r1",
+  },
+  create_draft: origination,
+};
+
 /**
  * Catches a tool built on a route outside its session's own project, which the
  * API refuses a session bearer however the membership reads: an inventory of
@@ -934,45 +1039,9 @@ test("an origination without the fence the route requires never reaches it", asy
  */
 test("every project tool reaches its own session's project and nothing outside it", async () => {
   const partition = "/api/v1/tenants/vteng/projects/chuggy";
-  const arguments_ = {
-    list_tickets: {},
-    read_ticket: { ticket: 7 },
-    read_draft: { ticket: 7 },
-    list_drafts: {},
-    list_configurations: {},
-    read_configuration: { revision: "r1" },
-    read_decision_log: {},
-    read_refusals: {},
-    read_ticket_refusals: { ticket: 7 },
-    read_lead: {},
-    read_lead_transcript: {},
-    list_executions: {},
-    read_execution: { execution: "e-1" },
-    read_run_transcript: { execution: "e-1", attempt: "a-1" },
-    read_operation: { operation: "o-1" },
-    list_threads: {},
-    read_thread: { session: "t-1" },
-    read_thread_transcript: { session: "t-1" },
-    initialize_draft: { revision: "r1" },
-    file_dependent: dependent,
-    revise_draft: {
-      ticket: 4,
-      expectedVersion: 2,
-      configurationRevision: "r1",
-      authoring: { dependencies: [] },
-      brief: { title: "t" },
-    },
-    delete_draft: { ticket: 4, expectedVersion: 2 },
-    release_draft: {
-      ticket: 4,
-      authoringVersion: 2,
-      configurationRevision: "r1",
-    },
-    create_draft: origination,
-  };
   assert.deepEqual(
     chuggyProjectTools.map(({ name }) => name).sort(),
-    Object.keys(arguments_).sort(),
+    Object.keys(projectToolArguments).sort(),
   );
   for (const definition of chuggyProjectTools) {
     const api = apiOf();
@@ -982,7 +1051,7 @@ test("every project tool reaches its own session's project and nothing outside i
         request: api.request,
         turn: () => "turn-1",
       }),
-      arguments_[definition.name],
+      projectToolArguments[definition.name],
     );
 
     assert.equal(api.calls.length, 1, definition.name);
@@ -1012,63 +1081,115 @@ test("origination is registered for a thread's roster and for no lead's", () => 
 });
 
 /**
- * The reads whose route chuggy's `src/adapters/http/server.ts` does not
- * register.
- * Written here rather than read off the table under test, so a table that lost
- * an entry is a failure rather than a change of expectation.
+ * Every project tool through the handler a session is given, which is where a
+ * tool that answered without asking stood: a suite that drives the definition
+ * passes whatever is between it and the session.
  */
-const unservedOnThisInstallation = [
-  "read_decision_log",
-  "read_refusals",
-  "read_ticket_refusals",
-  "read_lead",
-  "read_lead_transcript",
-];
-
-test("the table names exactly the reads this installation does not serve", () => {
-  assert.deepEqual(
-    Object.keys(chuggyToolsNotYetServed).sort(),
-    [...unservedOnThisInstallation].sort(),
-  );
-});
-
-test("every tool whose route is unserved refuses before it asks, and no other does", async () => {
-  const arguments_ = {
-    list_drafts: {},
-    read_decision_log: {},
-    read_refusals: {},
-    read_ticket_refusals: { ticket: 4 },
-    read_lead: {},
-    read_lead_transcript: {},
-    list_threads: {},
-    read_thread: { session: "t-1" },
-    read_thread_transcript: { session: "t-1" },
-    read_ticket: { ticket: 4 },
-    list_tickets: {},
-    read_operation: { operation: "o-1" },
-    create_draft: origination,
-  };
-  for (const [name, args] of Object.entries(arguments_)) {
-    const unserved = unservedOnThisInstallation.includes(name);
+test("every project tool a session holds asks its route, and answers what the route did", async () => {
+  for (const { name } of chuggyProjectTools) {
     const { api, call } = toolsOf();
 
-    const answer = await call(name, args);
+    const answer = await call(name, projectToolArguments[name]);
 
-    assert.equal(answer.isError, unserved ? true : undefined, name);
-    assert.equal(api.calls.length, unserved ? 0 : 1, name);
-    if (unserved) {
-      assert.ok(textOf(answer).length > 0, name);
-      assert.equal(textOf(answer), chuggyToolsNotYetServed[name], name);
-    }
+    assert.equal(api.calls.length, 1, name);
+    assert.ok(answer.isError === undefined, name);
   }
 });
 
-test("every tool the unserved table names is one the roster carries", () => {
-  for (const name of unservedOnThisInstallation) {
-    assert.ok(allChuggyTools.includes(name), name);
+/** The `limit` one request asked with, or nothing where it asked with none. */
+function limitAsked({ path }) {
+  const asked = new URL(path, task.api.url).searchParams.get("limit");
+  return asked === null ? undefined : Number(asked);
+}
+
+/**
+ * The executions read at the weight an item ran on a live project, where a
+ * page of fifty was refused and the model was left to guess a limit. The
+ * route answers as many items as it is asked for and the cursor past them.
+ */
+test("a page too large is asked for again at half its limit until one fits, and that page is answered", async () => {
+  const { api, call } = toolsOf({}, (path) => {
+    const items = Array.from({ length: limitAsked({ path }) }, (_, at) => ({
+      at,
+      held: "x".repeat(1_400),
+    }));
+    return {
+      status: 200,
+      body: JSON.stringify({ items, nextCursor: `c-${String(items.length)}` }),
+    };
+  });
+
+  const answer = await call("list_executions", {
+    ticket: 3,
+    state: ["Running"],
+    cursor: "c-0",
+    limit: 50,
+  });
+
+  const asked =
+    "/api/v1/tenants/vteng/projects/chuggy/executions?ticket=3&state=Running&cursor=c-0&limit=";
+  assert.deepEqual(
+    api.calls.map(({ path }) => path),
+    [`${asked}50`, `${asked}25`, `${asked}12`],
+  );
+  assert.ok(answer.isError === undefined);
+  const page = JSON.parse(textOf(answer).slice("HTTP 200\n".length));
+  assert.equal(page.items.length, 12);
+  assert.equal(page.nextCursor, "c-12");
+});
+
+test("a call that gave no limit asks again from half the largest its shape admits", async () => {
+  for (const [name, max] of Object.entries(pageBounds)) {
+    const { api, call } = toolsOf({}, (path) => ({
+      status: 200,
+      body:
+        limitAsked({ path }) === undefined
+          ? "x".repeat(chuggyToolAnswerBytesMax)
+          : "{}",
+    }));
+
+    const answer = await call(name, projectToolArguments[name]);
+
+    assert.ok(answer.isError === undefined, name);
+    assert.equal(textOf(answer), "HTTP 200\n{}", name);
+    assert.deepEqual(
+      api.calls.map(limitAsked),
+      [undefined, Math.floor(max / 2)],
+      name,
+    );
+  }
+});
+
+/**
+ * Every paged read against an item too large alone, from the largest page it
+ * admits, which is the most one call can ask. Each ask is a read the client may
+ * repeat with a wait between, so the waits of every ask are added up here and
+ * held under the tool's own timeout: past it, a refusal would reach the model
+ * as a timeout that says nothing.
+ */
+test("an item too large alone is refused once one is asked for, inside what a tool call may wait", async () => {
+  for (const [name, max] of Object.entries(pageBounds)) {
+    const { api, call } = toolsOf({}, () => ({
+      status: 200,
+      body: "x".repeat(chuggyToolAnswerBytesMax),
+    }));
+
+    const answer = await call(name, {
+      ...projectToolArguments[name],
+      limit: max,
+    });
+
+    assert.equal(answer.isError, true, name);
+    assert.match(textOf(answer), /is already asking for one/, name);
+    const limits = api.calls.map(limitAsked);
+    assert.equal(limits[0], max, name);
+    assert.equal(limits.at(-1), 1, name);
+    for (const [at, limit] of limits.slice(1).entries())
+      assert.equal(limit, Math.floor(limits[at] / 2), name);
     assert.ok(
-      (chuggyToolsNotYetServed[name] ?? "").length > 0,
-      `${name} refuses with nothing`,
+      limits.length * (chuggyRequestAttemptsMax - 1) * chuggyRequestRetryMs <
+        chuggyToolTimeoutMs,
+      `${name} can wait out its own timeout`,
     );
   }
 });
