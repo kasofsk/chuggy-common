@@ -108,19 +108,6 @@
  * rather than dropped — a duplicate the `parentUuid` chain walks past, where a
  * dropped entry is a hole nothing can walk past.
  *
- * TEXT THE RUNTIME WROTE IN AN ASSISTANT'S PLACE IS NOT STORED. Resuming over a
- * transcript that ends on a user's line, the runtime puts an assistant line of
- * its own after it and names the model on it `<synthetic>`. No model said it,
- * and whatever reads the store draws every assistant line as something one
- * said. So the line is passed over, and the entry that names it as its parent is
- * stored naming that line's own parent instead: the chain the runtime writes
- * itself where the same message arrives with no resume between. The mark is the
- * model and never the sentence, which a model may write too. Two lines carrying
- * the mark are stored all the same. One reports a request the API refused, and
- * is the turn's own account of why it has no answer. The other carries a tool
- * call, and the result stored after it answers that call by id.
- * `resumedEntries.fixture.json` is a captured resume.
- *
  * AN INQUIRY'S OWN TRANSCRIPT IS NEVER WRITTEN. A fork is answered aside and
  * thrown away, so its adapter is opened with `retain: false`: `append` resolves
  * having sent nothing, and the turn therefore names no batch range, because
@@ -192,7 +179,6 @@ function streamState(streams, stream) {
       confirmed: new Set(),
       remembered: [],
       pending: undefined,
-      passed: new Map(),
     };
     streams.set(stream, held);
   }
@@ -538,43 +524,6 @@ function scrubbedLine(entry, scrub) {
   return { line, signed };
 }
 
-/** The model the runtime names on an assistant line it wrote itself. */
-const runtimeMadeModel = "<synthetic>";
-
-/** Whether an entry is text the runtime wrote in an assistant's place. */
-function runtimeMadeText(entry) {
-  if (entry?.type !== "assistant" || entry.isApiErrorMessage === true)
-    return false;
-  const { model, content } = entry.message ?? {};
-  return (
-    model === runtimeMadeModel &&
-    Array.isArray(content) &&
-    content.every((block) => block?.type === "text")
-  );
-}
-
-/**
- * The entries a call stores: every one but the runtime's own text, each naming
- * the parent a walk reaches with those gone. What was passed over is kept for
- * the life of the stream, because the entry that names it may come in a later
- * call and a parent nothing stored is a hole.
- */
-function storedEntries(state, entries) {
-  const stored = [];
-  for (const entry of entries) {
-    const parent = state.passed.get(entry?.parentUuid);
-    const linked =
-      parent === undefined ? entry : { ...entry, parentUuid: parent };
-    if (runtimeMadeText(entry)) {
-      const uuid = entryUuid(entry);
-      if (uuid !== undefined) state.passed.set(uuid, linked.parentUuid ?? null);
-      continue;
-    }
-    stored.push(linked);
-  }
-  return stored;
-}
-
 /**
  * The lines this call still owes the store, in order, with the settled ones
  * dropped. A line whose signed block the scrub changed is said so in the pod's
@@ -671,7 +620,7 @@ async function appendOnce(held, stream, entries) {
   // Owed before the resend, because what the pending batch already carries is
   // read off it; planned after, because planning may raise on an entry nothing
   // can post and the unacknowledged batch is still owed either way.
-  const owed = owedLines(state, storedEntries(state, entries), held, stream);
+  const owed = owedLines(state, entries, held, stream);
   if (resent !== undefined) {
     await sendBatch(held, stream, resent);
     confirm(held, state, stream, resent);

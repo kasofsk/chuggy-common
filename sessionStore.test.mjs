@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import { URL } from "node:url";
 
 import {
   isSessionStoreStream,
@@ -1575,112 +1573,6 @@ test("a confirmed entry is dropped on re-delivery and an entry with no uuid neve
       .map((line) => JSON.parse(line)),
     [bookkeeping],
   );
-});
-
-/**
- * A resume, captured off the pinned runtime rather than composed here: the note
- * a stopped turn ended on, the assistant line the runtime put after it, and the
- * member's next message, which names that line as its parent.
- */
-const [stoppedNote, runtimeLine, nextMessage] = JSON.parse(
-  readFileSync(new URL("./resumedEntries.fixture.json", import.meta.url)),
-);
-
-test("an assistant line the runtime wrote itself is not stored, and what named it names what it followed", async () => {
-  const { calls, store } = storeOf();
-  assert.equal(runtimeLine.message.model, "<synthetic>");
-  assert.equal(runtimeLine.parentUuid, stoppedNote.uuid);
-  assert.equal(nextMessage.parentUuid, runtimeLine.uuid);
-
-  await store.append({ sessionId: "s" }, [
-    stoppedNote,
-    runtimeLine,
-    nextMessage,
-  ]);
-
-  assert.deepEqual(postedEntries(calls), [
-    stoppedNote,
-    { ...nextMessage, parentUuid: stoppedNote.uuid },
-  ]);
-});
-
-test("an entry naming a line an earlier call passed over is stored naming what that line followed", async () => {
-  const { calls, store } = storeOf();
-
-  await store.append({ sessionId: "s" }, [stoppedNote, runtimeLine]);
-  await store.append({ sessionId: "s" }, [nextMessage]);
-
-  assert.deepEqual(postedEntries(calls), [
-    stoppedNote,
-    { ...nextMessage, parentUuid: stoppedNote.uuid },
-  ]);
-});
-
-test("lines passed over one after another are all walked past, and one that began a transcript leaves its follower beginning it", async () => {
-  const second = {
-    ...runtimeLine,
-    uuid: "6d0c7a52-1f3e-4b8a-9c2d-5e4f3a2b1c0d",
-    parentUuid: runtimeLine.uuid,
-  };
-  const { calls, store } = storeOf();
-  await store.append({ sessionId: "s" }, [
-    stoppedNote,
-    runtimeLine,
-    second,
-    { ...nextMessage, parentUuid: second.uuid },
-  ]);
-  assert.deepEqual(postedEntries(calls), [
-    stoppedNote,
-    { ...nextMessage, parentUuid: stoppedNote.uuid },
-  ]);
-
-  const first = storeOf();
-  await first.store.append({ sessionId: "s" }, [
-    { ...runtimeLine, parentUuid: null },
-    nextMessage,
-  ]);
-  assert.deepEqual(postedEntries(first.calls), [
-    { ...nextMessage, parentUuid: null },
-  ]);
-});
-
-/**
- * Every line here is the runtime's own with one thing changed, so each is kept
- * for that one thing: the sentence under a model's name, the sentence under no
- * name, the mark on a refused request's report, the mark on a tool call, and
- * the mark on a line that is not an assistant's.
- */
-test("the mark is the model the runtime names, so nothing a model wrote is passed over", async () => {
-  const line = (uuid, fields, message) => ({
-    ...runtimeLine,
-    uuid,
-    ...fields,
-    message: { ...runtimeLine.message, ...message },
-  });
-  const unnamed = Object.fromEntries(
-    Object.entries(runtimeLine.message).filter(([field]) => field !== "model"),
-  );
-  const kept = [
-    line("a", {}, { model: "claude-opus-4-6" }),
-    { ...runtimeLine, uuid: "b", message: unnamed },
-    line("c", { isApiErrorMessage: true, error: "model_not_found" }, {}),
-    line(
-      "d",
-      {},
-      {
-        content: [
-          ...runtimeLine.message.content,
-          { type: "tool_use", id: "toolu_01Reported", name: "Bash", input: {} },
-        ],
-      },
-    ),
-    line("e", { type: "user" }, { role: "user" }),
-  ];
-  const { calls, store } = storeOf();
-
-  await store.append({ sessionId: "s" }, kept);
-
-  assert.deepEqual(postedEntries(calls), kept);
 });
 
 test("load pages until the plane names no next batch, and seeds what it confirmed", async () => {
