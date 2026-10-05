@@ -1,0 +1,97 @@
+[
+  {
+    "parentUuid": "1e39d9c4-96b3-4f28-b475-01a15f891605",
+    "isSidechain": false,
+    "promptId": "80076d73-1790-46f5-a3c2-3b0450b4e314",
+    "type": "user",
+    "message": {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "[Request interrupted by user for tool use]"
+        }
+      ]
+    },
+    "uuid": "b5d194db-ce23-49b4-bbc7-b1a43a87a552",
+    "timestamp": "2026-10-05T02:25:25.524Z",
+    "userType": "external",
+    "entrypoint": "sdk-ts",
+    "cwd": "/home/geoff/claude/chuggy-effort/token-streaming/runner-tools/work-resume",
+    "sessionId": "f37cf28c-852e-49fd-b86f-517fc66d6f14",
+    "version": "2.1.282",
+    "gitBranch": "HEAD"
+  },
+  {
+    "parentUuid": "b5d194db-ce23-49b4-bbc7-b1a43a87a552",
+    "isSidechain": false,
+    "type": "assistant",
+    "uuid": "912bceb9-92c3-4a35-81f8-73fec379d25c",
+    "timestamp": "2026-10-05T02:25:27.895Z",
+    "message": {
+      "diagnostics": null,
+      "id": "be636f96-259f-4c20-baab-435e7ea1f24c",
+      "container": null,
+      "model": "<synthetic>",
+      "role": "assistant",
+      "stop_details": null,
+      "stop_reason": "stop_sequence",
+      "stop_sequence": "",
+      "type": "message",
+      "usage": {
+        "output_tokens_details": null,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": null,
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 0,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": null,
+        "iterations": null,
+        "speed": null
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "No response requested."
+        }
+      ],
+      "context_management": null
+    },
+    "isApiErrorMessage": false,
+    "userType": "external",
+    "entrypoint": "sdk-ts",
+    "cwd": "/home/geoff/claude/chuggy-effort/token-streaming/runner-tools/work-resume",
+    "sessionId": "f37cf28c-852e-49fd-b86f-517fc66d6f14",
+    "version": "2.1.282",
+    "gitBranch": "HEAD"
+  },
+  {
+    "parentUuid": "912bceb9-92c3-4a35-81f8-73fec379d25c",
+    "isSidechain": false,
+    "promptId": "201f0b51-11a1-4db8-8025-de5ddc80d9de",
+    "type": "user",
+    "message": {
+      "role": "user",
+      "content": "Reply with exactly the one word: ready"
+    },
+    "uuid": "398827b4-66d0-4d12-9dbb-7406099a09be",
+    "timestamp": "2026-10-05T02:25:27.926Z",
+    "permissionMode": "bypassPermissions",
+    "promptSource": "sdk",
+    "turnOrigin": "sdk",
+    "userType": "external",
+    "entrypoint": "sdk-ts",
+    "cwd": "/home/geoff/claude/chuggy-effort/token-streaming/runner-tools/work-resume",
+    "sessionId": "f37cf28c-852e-49fd-b86f-517fc66d6f14",
+    "version": "2.1.282",
+    "gitBranch": "HEAD"
+  }
+]
