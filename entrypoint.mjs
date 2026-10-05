@@ -272,7 +272,7 @@ async function readAgentStream(context, child, argv) {
     if (context.agent.resultEvent(event)) resultEvent = event;
     const observed = context.agent.observed(event);
     if (observed !== undefined) context.evidence.observed(observed);
-    await context.evidence.record(line, event);
+    context.evidence.record(line, event);
   }
   return resultEvent;
 }

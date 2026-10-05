@@ -22,6 +22,7 @@ import { workTaskAnswerSchema } from "@chuggy/worker-contract/workerTask";
 import { git, inCheckout, remoteRefs } from "./checkout.fixture.mjs";
 import { workerCheckCommands } from "./checks.mjs";
 import { claudeAgent } from "./claude.mjs";
+import { pausedClock } from "./clock.fixture.mjs";
 import {
   envelopeLaunch,
   envelopeTask,
@@ -41,11 +42,13 @@ import {
   fetchedAnswer,
   poolHeldSessionAnswer,
 } from "./envelope.fixture.mjs";
+import { keepWorkerLease } from "./lease.mjs";
 import { planeFetch, planes } from "./plane.fixture.mjs";
 import { workerCredentialPath } from "./planeCredential.mjs";
 import { credentialScrub, runEvidenceRecorder } from "./runEvidence.mjs";
 import { facts } from "./sessionHarness.fixture.mjs";
 import { commitAndPushSource, ticketBranch } from "./source.mjs";
+import { workerPlaneAwayMillisecondsMax, workerRequest } from "./transport.mjs";
 
 const task = { workerPlane: { url: "http://worker-plane.test:3001" } };
 const secret = "sk-ant-oat01-0123456789abcdefghijklmnop";
@@ -809,6 +812,131 @@ test("the run's totals reach the plane before the report that settles the task",
   assert.ok(
     paths.indexOf("/v1/run/totals") < paths.indexOf("/v1/report"),
     `totals must precede the report, got ${paths.join(" ")}`,
+  );
+});
+
+/**
+ * One evaluation's run over the job plane's own tables, on a clock its
+ * transport's pauses move, with the plane unreachable from `leave()` for
+ * `awayMilliseconds`. `beat` and `flush` are the lease's and the recorder's
+ * intervals, each a tick the case takes itself.
+ */
+function runOverAbsentPlane(awayMilliseconds) {
+  const clock = pausedClock();
+  const ticks = {};
+  const warned = [];
+  let left = Infinity;
+  const plane = planeFetch(planes.job, (route) =>
+    route === "runTurns"
+      ? { status: 200, body: { turnsRecorded: 0 } }
+      : { status: route === "report" ? 202 : 204 },
+  );
+  const request = (asked, bearer, path, init) =>
+    workerRequest(asked, bearer, path, init, {
+      fetch: async (url, sent) => {
+        if (clock.now() >= left && clock.now() < left + awayMilliseconds)
+          throw new TypeError("fetch failed");
+        return plane.fetch(url, sent);
+      },
+      wait: clock.wait,
+      now: clock.now,
+    });
+  const interval = (name) => (tick) => {
+    ticks[name] = tick;
+    return { unref: () => undefined };
+  };
+  const context = {
+    task: { ...task, taskKind: "Evaluation" },
+    bearer: "bearer",
+    scrub: (text) => text,
+    request,
+    stopLease: keepWorkerLease(task, "bearer", {
+      request,
+      setInterval: interval("beat"),
+      clearInterval: () => undefined,
+    }),
+    evidence: runEvidenceRecorder(task, "bearer", (text) => text, {
+      request,
+      setInterval: interval("flush"),
+      clearInterval: () => undefined,
+      warn: (text) => warned.push(text),
+    }),
+  };
+  return {
+    context,
+    plane,
+    warned,
+    beat: () => ticks.beat(),
+    flush: () => ticks.flush(),
+    leave: () => {
+      left = clock.now();
+    },
+    returned: () => clock.now() >= left + awayMilliseconds,
+  };
+}
+
+/**
+ * A plane away for less than a lease, across a heartbeat and a transcript
+ * flush both asked while it was away. Catches a transport that gives up on
+ * either while the lease still runs, which costs the run its report or the
+ * rest of its transcript, and a recorder that drops what the agent wrote
+ * while a flush waited.
+ */
+test("a run outlasts a plane away for less than a lease, and its report and whole transcript arrive", async () => {
+  const awayMilliseconds = 120_000;
+  assert.ok(awayMilliseconds < workerPlaneAwayMillisecondsMax);
+  const run = runOverAbsentPlane(awayMilliseconds);
+  const lines = Array.from({ length: 6 }, (_, turn) =>
+    JSON.stringify({
+      type: "assistant",
+      message: { model: "claude-test", usage: { input_tokens: turn + 1 } },
+    }),
+  );
+  const write = (written) =>
+    run.context.evidence.record(written, JSON.parse(written));
+
+  lines.slice(0, 2).forEach(write);
+  await run.flush();
+  run.leave();
+  lines.slice(2, 4).forEach(write);
+  run.beat();
+  const flushed = run.flush();
+  lines.slice(4).forEach(write);
+  await flushed;
+  assert.ok(run.returned(), "the flush ended before the plane was back");
+  await publishWorkerResult(
+    run.context,
+    {},
+    {
+      output: { checks: [] },
+      result: { verdict: "Pass", summary: "the checks passed" },
+      diagnosticPath: ".chuggy/check-output.json",
+    },
+  );
+
+  const asked = (route) =>
+    run.plane.asked.filter((request) => request.route === route);
+  assert.deepEqual(run.warned, []);
+  assert.equal(asked("heartbeat").length, 1);
+  assert.equal(asked("report").length, 1);
+  assert.equal(asked("report")[0].body.verdict, "Pass");
+  assert.deepEqual(
+    asked("runTranscript").map(({ path }) => path),
+    asked("runTranscript").map(
+      (_, sent) => `/v1/run/transcript/${String(sent + 1)}`,
+    ),
+  );
+  assert.equal(
+    asked("runTranscript")
+      .map(({ body }) => Buffer.from(body).toString("utf8"))
+      .join(""),
+    lines.map((line) => `${line}\n`).join(""),
+  );
+  assert.deepEqual(
+    asked("runTurns").flatMap(({ body }) =>
+      body.turns.map(({ ordinal }) => ordinal),
+    ),
+    lines.map((_, turn) => turn + 1),
   );
 });
 

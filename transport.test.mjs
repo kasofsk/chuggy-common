@@ -6,7 +6,12 @@ import {
   workerContractRelease,
 } from "@chuggy/worker-contract/workerContract";
 
-import { workerRequest } from "./transport.mjs";
+import { pausedClock } from "./clock.fixture.mjs";
+import {
+  workerPlaneAwayMillisecondsMax,
+  WorkerPlaneRefusal,
+  workerRequest,
+} from "./transport.mjs";
 
 const task = { workerPlane: { url: "http://worker-plane.test:3001" } };
 
@@ -31,7 +36,7 @@ test("a refused connection is retried in the same worker", async () => {
 
   assert.equal(received, response);
   assert.equal(requests.length, 3);
-  assert.deepEqual(waits, [2_000, 2_000]);
+  assert.deepEqual(waits, [2_000, 4_000]);
   assert.equal(requests[0].url, "http://worker-plane.test:3001/v1/input");
   assert.equal(requests[0].init.headers.authorization, "Bearer secret");
 });
@@ -97,7 +102,7 @@ test("a status the caller settles for is handed back, and every other is a fault
       {},
       {
         fetch: async () => ({ ok: false, status: 500 }),
-        wait: async () => undefined,
+        ...pausedClock(),
         settled: [404],
       },
     ),
@@ -105,36 +110,48 @@ test("a status the caller settles for is handed back, and every other is a fault
   );
 });
 
-test("a refusal raises at the first answer, and a server error is asked again", async () => {
+/**
+ * A refusal is told from a plane that never answered by what is raised, which
+ * is what lets a lease end on the one and ask again after the other.
+ */
+test("a refusal raises at the first answer, and a server error is asked again until the plane has been away a lease", async () => {
   for (const status of [400, 401, 404, 409, 413, 415, 503]) {
     let requests = 0;
-    let waits = 0;
-    await assert.rejects(
-      workerRequest(
-        task,
-        "secret",
-        "/v1/heartbeat",
-        { method: "POST" },
-        {
-          fetch: async () => {
-            requests += 1;
-            return { ok: false, status };
-          },
-          wait: async () => {
-            waits += 1;
-          },
+    const clock = pausedClock();
+    const raised = await workerRequest(
+      task,
+      "secret",
+      "/v1/heartbeat",
+      { method: "POST" },
+      {
+        fetch: async () => {
+          requests += 1;
+          return { ok: false, status };
         },
-      ),
-      new RegExp(`answered ${String(status)}`, "u"),
-    );
-    assert.equal(requests, status === 503 ? 15 : 1, String(status));
-    assert.equal(waits, requests - 1, String(status));
+        ...clock,
+      },
+    ).catch((failure) => failure);
+
+    assert.match(raised.message, new RegExp(`answered ${String(status)}`, "u"));
+    assert.equal(raised instanceof WorkerPlaneRefusal, status !== 503);
+    assert.equal(clock.pauses.length, requests - 1, String(status));
+    if (status === 503)
+      assert.ok(
+        clock.now() >= workerPlaneAwayMillisecondsMax,
+        String(clock.now()),
+      );
+    else assert.equal(requests, 1, String(status));
   }
 });
 
-test("worker-plane retries are bounded", async () => {
+/**
+ * The bound is the time the plane has been away, met from both sides: the last
+ * pause began inside it and ended at or past it. The pauses double to a
+ * ceiling and stay there.
+ */
+test("worker-plane retries are bounded by how long the plane has been away", async () => {
   let requests = 0;
-  let waits = 0;
+  const clock = pausedClock();
   await assert.rejects(
     workerRequest(
       task,
@@ -146,13 +163,40 @@ test("worker-plane retries are bounded", async () => {
           requests += 1;
           throw new TypeError("fetch failed");
         },
-        wait: async () => {
-          waits += 1;
-        },
+        ...clock,
       },
     ),
     /fetch failed/,
   );
-  assert.equal(requests, 15);
-  assert.equal(waits, 14);
+
+  assert.equal(clock.pauses.length, requests - 1);
+  assert.ok(clock.now() >= workerPlaneAwayMillisecondsMax, String(clock.now()));
+  assert.ok(clock.now() - clock.pauses.at(-1) < workerPlaneAwayMillisecondsMax);
+  assert.deepEqual(clock.pauses.slice(0, 4), [2_000, 4_000, 8_000, 16_000]);
+  assert.deepEqual([...new Set(clock.pauses.slice(3))], [16_000]);
+});
+
+/** Catches a transport that gives up on a plane whose lease on the attempt is still running. */
+test("a plane away for less than a lease is waited out", async () => {
+  const awayMilliseconds = 120_000;
+  assert.ok(awayMilliseconds < workerPlaneAwayMillisecondsMax);
+  const clock = pausedClock();
+  const response = { ok: true, status: 204 };
+
+  const received = await workerRequest(
+    task,
+    "secret",
+    "/v1/report",
+    { method: "POST" },
+    {
+      fetch: async () => {
+        if (clock.now() < awayMilliseconds) throw new TypeError("fetch failed");
+        return response;
+      },
+      ...clock,
+    },
+  );
+
+  assert.equal(received, response);
+  assert.ok(clock.now() >= awayMilliseconds);
 });
