@@ -44,6 +44,8 @@ import {
 } from "@chuggy/worker-contract/workerPlane";
 import { z } from "zod";
 
+import { pausedClock } from "./clock.fixture.mjs";
+
 /**
  * Each wire: its routes, what each answers, the schema a route's JSON body is
  * read under, and the routes whose body is bytes.
@@ -201,12 +203,13 @@ export function planeFetch(plane, answer) {
   };
 }
 
-/** One transport over a plane's `fetch`, its pauses taken at once. */
+/**
+ * One transport over a plane's `fetch`, its pauses taken at once on a clock
+ * nothing else moves, so a plane that never answers is given up on without
+ * the suite waiting for it.
+ */
 export function overPlane(transport, fetch) {
+  const { wait, now } = pausedClock();
   return (task, bearer, path, init, options = {}) =>
-    transport(task, bearer, path, init, {
-      ...options,
-      fetch,
-      wait: async () => undefined,
-    });
+    transport(task, bearer, path, init, { ...options, fetch, wait, now });
 }

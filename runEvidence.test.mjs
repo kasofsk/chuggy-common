@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import test from "node:test";
+import { setImmediate } from "node:timers";
 
 import {
   runModelCharsMax,
@@ -42,7 +43,7 @@ function harness(options = {}) {
     {
       request: async (_task, _bearer, path, init) => {
         calls.push({ path, init });
-        options.behaviour?.(path);
+        await options.behaviour?.(path);
         if (path !== "/v1/run/turns") return { ok: true, status: 204 };
         return {
           ok: true,
@@ -63,6 +64,20 @@ function harness(options = {}) {
 
 function assistantEvent(model, usage) {
   return { type: "assistant", message: { model, usage } };
+}
+
+/** A plane that answers nothing until `back()`, as one that is away and then returns does. */
+function awayPlane() {
+  let back;
+  const away = new Promise((returned) => {
+    back = returned;
+  });
+  return { behaviour: () => away, back };
+}
+
+/** The transcript batches a plane was sent, in the order it was sent them. */
+function transcriptBatches(calls) {
+  return calls.filter(({ path }) => path.startsWith("/v1/run/tran"));
 }
 
 test("a credential the worker was handed is redacted wherever it appears", () => {
@@ -559,6 +574,193 @@ test("a refused evidence call stops the transcript and never fails the run", asy
     ["/v1/run/turns", "/v1/run/transcript/1"],
   );
   assert.equal(calls.length, refusedAt);
+});
+
+/** Catches a refusal that leaves the batches queued behind it to be offered again. */
+test("a refusal stops the batches waiting behind the one refused", async () => {
+  const { recorder, calls, tick } = harness({
+    behaviour: (path) => {
+      if (path.startsWith("/v1/run/tran")) throw new Error("plane refused");
+    },
+  });
+  const line = JSON.stringify({ type: "system", text: "x".repeat(1_000) });
+  for (let written = 0; written < 200; written += 1)
+    recorder.record(line, { type: "system" });
+  await tick();
+  await tick();
+  await recorder.finish();
+
+  assert.deepEqual(
+    transcriptBatches(calls).map(({ path }) => path),
+    ["/v1/run/transcript/1"],
+  );
+});
+
+/** Catches a flush queued behind another on every interval a slow plane outlasts. */
+test("a tick that finds a flush in flight starts no other", async () => {
+  const plane = awayPlane();
+  const { recorder, calls, tick } = harness(plane);
+  recorder.record(JSON.stringify({ type: "system" }), { type: "system" });
+  const inFlight = tick();
+
+  assert.equal(tick(), inFlight);
+  assert.equal(tick(), inFlight);
+  plane.back();
+  await inFlight;
+
+  assert.deepEqual(
+    calls.map(({ path }) => path),
+    ["/v1/run/transcript/1"],
+  );
+});
+
+/** Catches a run whose end took the flush in flight for the last one, and posted its totals over a line still buffered. */
+test("a run that ends with a flush in flight ships what that flush left behind", async () => {
+  const plane = awayPlane();
+  const { recorder, calls, tick } = harness(plane);
+  const lines = ["first", "second"].map((text) =>
+    JSON.stringify({ type: "system", text }),
+  );
+  recorder.record(lines[0], { type: "system" });
+  tick();
+  await new Promise((turned) => setImmediate(turned));
+  recorder.record(lines[1], { type: "system" });
+  const finished = recorder.finish();
+  plane.back();
+  await finished;
+
+  assert.deepEqual(
+    calls.map(({ path, init }) => [path, init.body.toString("utf8")]),
+    [
+      ["/v1/run/transcript/1", `${lines[0]}\n`],
+      ["/v1/run/transcript/2", `${lines[1]}\n`],
+      ["/v1/run/totals", calls.at(-1).init.body],
+    ],
+  );
+});
+
+/**
+ * An agent writing more than a batch while the plane is away. Catches a writer
+ * held until the plane answers, a line dropped or reordered while it waited,
+ * and a batch closed over the size one body carries.
+ */
+test("a line written while the plane is away waits for nothing, and none is lost", async () => {
+  const plane = awayPlane();
+  const { recorder, calls, tick } = harness(plane);
+  const lines = Array.from({ length: 200 }, (_, written) =>
+    JSON.stringify({ type: "system", text: String(written).padEnd(1_000) }),
+  );
+  recorder.record(lines[0], { type: "system" });
+  const inFlight = tick();
+  const written = (async () => {
+    for (const line of lines.slice(1))
+      await recorder.record(line, { type: "system" });
+  })();
+
+  const waited = await Promise.race([
+    written.then(() => false),
+    new Promise((turned) => setImmediate(() => turned(true))),
+  ]);
+  assert.equal(waited, false, "the writer waited on a plane that was away");
+  plane.back();
+  await inFlight;
+  await recorder.finish();
+
+  const batches = transcriptBatches(calls);
+  assert.ok(batches.length > 2, String(batches.length));
+  assert.deepEqual(
+    batches.map(({ path }) => path),
+    batches.map((_, sent) => `/v1/run/transcript/${String(sent + 1)}`),
+  );
+  for (const batch of batches)
+    assert.ok(batch.init.body.byteLength <= runTranscriptBatchBytesMax);
+  assert.equal(
+    batches.map(({ init }) => init.body.toString("utf8")).join(""),
+    lines.map((line) => `${line}\n`).join(""),
+  );
+});
+
+/**
+ * An agent taking turns while a batch waits on the plane, enough of them to
+ * close another. Catches that batch sent ahead of the turns it covers, which
+ * were folded after the flush sent its own.
+ */
+test("a batch closed while another waited is sent after the turns it covers", async () => {
+  const plane = awayPlane();
+  const { recorder, calls, tick } = harness({
+    behaviour: (path) =>
+      path === "/v1/run/transcript/1" ? plane.behaviour() : undefined,
+  });
+  const turn = (ordinal) => {
+    const event = {
+      ...assistantEvent("claude-test", { input_tokens: ordinal }),
+      padding: "x".repeat(runTranscriptEventBytesMax / 2),
+    };
+    recorder.record(JSON.stringify(event), event);
+  };
+  turn(1);
+  const inFlight = tick();
+  await new Promise((turned) => setImmediate(turned));
+  const turns = (4 * runTranscriptBatchBytesMax) / runTranscriptEventBytesMax;
+  for (let ordinal = 2; ordinal <= turns; ordinal += 1) turn(ordinal);
+  plane.back();
+  await inFlight;
+  await recorder.finish();
+
+  let posted = 0;
+  let covered = 0;
+  for (const { path, init } of calls) {
+    if (path === "/v1/run/turns")
+      posted = JSON.parse(init.body).turns.at(-1).ordinal;
+    if (!path.startsWith("/v1/run/tran")) continue;
+    covered += init.body.toString("utf8").split("\n").length - 1;
+    assert.ok(covered <= posted, `${path} went before turn ${covered}`);
+  }
+  assert.equal(covered, turns);
+  assert.ok(transcriptBatches(calls).length > 2);
+});
+
+/**
+ * What waits on a plane that is away is counted against the run's cap with
+ * what was sent, so the queue ends where the transcript does. Catches a cap
+ * read off the batches sent alone, which a plane that is away never moves.
+ */
+test("the batches waiting on a plane that is away stop at the run cap", async () => {
+  let away;
+  let back;
+  const { recorder, calls, tick } = harness({ behaviour: () => away });
+  const line = JSON.stringify({ type: "system" });
+  const waiting = 3;
+  for (let batch = 0; batch < runTranscriptBatchesMax - waiting; batch += 1) {
+    recorder.record(line, { type: "system" });
+    await tick();
+  }
+  away = new Promise((returned) => {
+    back = returned;
+  });
+  recorder.record(line, { type: "system" });
+  const inFlight = tick();
+  const full = JSON.stringify({
+    type: "system",
+    text: "x".repeat(runTranscriptEventBytesMax / 2),
+  });
+  const fullBatches = 2 * waiting;
+  for (
+    let bytes = 0;
+    bytes < fullBatches * runTranscriptBatchBytesMax;
+    bytes += Buffer.byteLength(full)
+  )
+    recorder.record(full, { type: "system" });
+  back();
+  await inFlight;
+  await recorder.finish();
+
+  const batches = transcriptBatches(calls);
+  assert.equal(batches.length, runTranscriptBatchesMax);
+  assert.deepEqual(JSON.parse(batches.at(-1).init.body.toString("utf8")), {
+    type: "chuggy_transcript_truncated",
+    batches: runTranscriptBatchesMax,
+  });
 });
 
 test("a run that outlived its evidence still names the plane as the reason", () => {

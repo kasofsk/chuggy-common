@@ -109,6 +109,7 @@ import {
   sessionRequestOnce,
   sessionStopped,
 } from "./sessionTransport.mjs";
+import { WorkerPlaneRefusal } from "./transport.mjs";
 import { rosterLabel } from "./wire.mjs";
 
 /** The failures this pod names for a turn, each one the plane's roster carries. */
@@ -903,7 +904,7 @@ async function sessionHeld(context, environment, read, write, facts) {
 /**
  * The session's heartbeat, which is the work attempt's with the session's own
  * path: a stop answer is a refusal like any other, remembered until the lease
- * is stopped.
+ * is stopped, and a beat `request` raised for was never answered.
  */
 export function sessionLease(task, bearer, request) {
   return keepWorkerLease(task, bearer, {
@@ -911,7 +912,7 @@ export function sessionLease(task, bearer, request) {
     request: async (leaseTask, leaseBearer, path, init) => {
       const response = await request(leaseTask, leaseBearer, path, init);
       if (response.status !== acceptedStatus)
-        throw new Error(
+        throw new WorkerPlaneRefusal(
           `the session heartbeat answered ${String(response.status)}`,
         );
       return response;

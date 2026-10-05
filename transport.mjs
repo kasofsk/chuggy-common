@@ -6,9 +6,33 @@ import {
   workerContractRelease,
 } from "@chuggy/worker-contract/workerContract";
 
-const attemptsMax = 15;
+/**
+ * How long a plane may go without answering one request before the request
+ * gives up: the lease chuggy's worker plane grants at each heartbeat where its
+ * deployment names no other. Nothing a pod is handed names its own. A plane
+ * silent that long has let such a lease lapse and the attempt go, so nothing
+ * sent after would count.
+ */
+export const workerPlaneAwayMillisecondsMax = 300_000;
+
 const retryMilliseconds = 2_000;
+const retryMillisecondsMax = 16_000;
 const serverErrorStatusMin = 500;
+
+/**
+ * The pause after `tries` tries went unanswered: the first doubled each time,
+ * up to a ceiling, so a plane coming back is not asked by every pod at the
+ * first pause's pace.
+ */
+export function workerPlaneRetryPause(tries) {
+  return Math.min(retryMilliseconds * 2 ** (tries - 1), retryMillisecondsMax);
+}
+
+/**
+ * A failing status the plane answered and nothing asks again: its decision,
+ * which a caller tells by this from a plane that never answered.
+ */
+export class WorkerPlaneRefusal extends Error {}
 
 /** The headers every worker-plane request carries: the caller's own, its bearer, and the contract release this image was built with. */
 export function workerPlaneHeaders(bearer, headers = {}) {
@@ -20,7 +44,8 @@ export function workerPlaneHeaders(bearer, headers = {}) {
 }
 
 /**
- * One request to the worker plane, retried while it fails.
+ * One request to the worker plane, asked again while the plane does not answer
+ * it and until it has been away `workerPlaneAwayMillisecondsMax`.
  *
  * A RETRY IS FOR A CONDITION, NEVER FOR A DECISION. A thrown fetch and a server
  * error are retried; any other failing status is the plane's answer, and asking
@@ -38,11 +63,13 @@ export async function workerRequest(
   const {
     fetch: send = globalThis.fetch,
     wait: pause = wait,
+    now = Date.now,
     settled = [],
   } = transport;
-  let failure;
-  for (let attempt = 1; attempt <= attemptsMax; attempt += 1) {
+  const began = now();
+  for (let tries = 1; ; tries += 1) {
     let response;
+    let failure;
     try {
       response = await send(new URL(path, task.workerPlane.url), {
         ...init,
@@ -53,13 +80,12 @@ export async function workerRequest(
     }
     if (response !== undefined) {
       if (response.ok || settled.includes(response.status)) return response;
-      failure = new Error(
-        `worker plane ${path} answered ${String(response.status)}`,
-      );
-      if (response.status < serverErrorStatusMin) throw failure;
+      const answered = `worker plane ${path} answered ${String(response.status)}`;
+      if (response.status < serverErrorStatusMin)
+        throw new WorkerPlaneRefusal(answered);
+      failure = new Error(answered);
     }
-    if (attempt === attemptsMax) throw failure;
-    await pause(retryMilliseconds);
+    if (now() - began >= workerPlaneAwayMillisecondsMax) throw failure;
+    await pause(workerPlaneRetryPause(tries));
   }
-  throw new Error("worker plane retry bound was exhausted");
 }

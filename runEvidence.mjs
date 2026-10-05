@@ -11,6 +11,11 @@
  * carries the turns it covers before the bytes, so the plane's contiguity rule
  * is met by construction and a re-delivered flush costs nothing.
  *
+ * NOTHING THE AGENT WRITES WAITS ON THE PLANE. A line is buffered and never
+ * awaited, and a batch that is full is closed and queued behind the ones a
+ * plane that is away has not taken. What waits is counted against the run's
+ * own cap on batches as it is queued, so it is never more than a transcript.
+ *
  * EVIDENCE NEVER FAILS A RUN. A refused evidence call stops the transcript and
  * is remembered as the reason an already-failing run ended; it does not itself
  * end one, because the ticket's work is not what this module is for.
@@ -380,6 +385,7 @@ function evidenceState(scrub) {
     scrub,
     lines: [],
     bufferedBytes: 0,
+    sealed: [],
     nextBatch: 1,
     stopped: false,
     transcriptRefused: false,
@@ -391,7 +397,7 @@ function evidenceState(scrub) {
     result: undefined,
     sightings: rateLimitSightings(),
     totalsPosted: false,
-    flushing: Promise.resolve(),
+    flushing: undefined,
   };
 }
 
@@ -453,24 +459,49 @@ async function deliverTurns(state, call) {
   }
 }
 
-async function deliverBatch(state, call) {
+/**
+ * The buffered lines closed as the batch after every one sent or queued. The
+ * run's last is the line saying the transcript stops there, and nothing is
+ * buffered after it.
+ */
+function sealBatch(state) {
   if (state.lines.length === 0) return;
-  const final = state.nextBatch >= runTranscriptBatchesMax;
-  const body = final
-    ? `${transcriptTruncationLine(state.nextBatch)}\n`
-    : `${state.lines.join("\n")}\n`;
-  await call(
-    routePath(workerPlaneRoutes.runTranscript, String(state.nextBatch)),
-    {
-      method: "PUT",
-      headers: { "content-type": workerPlaneBytesMediaType },
-      body: Buffer.from(body),
-    },
+  const batch = state.nextBatch + state.sealed.length;
+  const final = batch >= runTranscriptBatchesMax;
+  state.sealed.push(
+    final
+      ? `${transcriptTruncationLine(batch)}\n`
+      : `${state.lines.join("\n")}\n`,
   );
-  state.nextBatch += 1;
   state.lines = [];
   state.bufferedBytes = 0;
   if (final) state.stopped = true;
+}
+
+/**
+ * Every batch closed so far, oldest first, each behind the turns folded before
+ * it was closed: one closed while this waited on the plane covers turns the
+ * flush had not yet sent.
+ */
+async function deliverBatches(state, call) {
+  sealBatch(state);
+  for (
+    let sent = 0;
+    sent < runTranscriptBatchesMax && state.sealed.length > 0;
+    sent += 1
+  ) {
+    await deliverTurns(state, call);
+    await call(
+      routePath(workerPlaneRoutes.runTranscript, String(state.nextBatch)),
+      {
+        method: "PUT",
+        headers: { "content-type": workerPlaneBytesMediaType },
+        body: Buffer.from(state.sealed[0]),
+      },
+    );
+    state.sealed.shift();
+    state.nextBatch += 1;
+  }
 }
 
 function failureText(failure) {
@@ -485,17 +516,18 @@ function refuse(state, warn, what, failure) {
 async function flushOnce(state, call, warn) {
   try {
     await deliverTurns(state, call);
-    await deliverBatch(state, call);
+    await deliverBatches(state, call);
   } catch (failure) {
     state.transcriptRefused = true;
     state.lines = [];
     state.bufferedBytes = 0;
+    state.sealed = [];
     state.pending = [];
     refuse(state, warn, "run evidence", failure);
   }
 }
 
-function evidenceUploads(state, call, warn, flush, done) {
+function evidenceUploads(state, call, warn, drain, done) {
   return {
     async configuration(content) {
       try {
@@ -512,7 +544,7 @@ function evidenceUploads(state, call, warn, flush, done) {
       if (state.totalsPosted) return;
       state.totalsPosted = true;
       done();
-      await flush();
+      await drain();
       try {
         await call(workerPlaneRoutes.runTotals.path, {
           method: "POST",
@@ -555,24 +587,32 @@ export function runEvidenceRecorder(task, bearer, scrub, services = {}) {
   } = services;
   const state = evidenceState(scrub);
   const call = (path, init) => request(task, bearer, path, init);
+  // One flush at a time: a tick that finds one in flight starts no other, and
+  // what it would have shipped goes with the next.
   const flush = () => {
-    state.flushing = state.flushing.then(() => flushOnce(state, call, warn));
+    state.flushing ??= flushOnce(state, call, warn).finally(() => {
+      state.flushing = undefined;
+    });
     return state.flushing;
   };
-  const append = async (text) => {
+  const drain = async () => {
+    await state.flushing;
+    await flush();
+  };
+  const append = (text) => {
     if (state.stopped || state.transcriptRefused) return;
-    if (wouldExceedBatch(state, text)) await flush();
-    if (!state.stopped && !state.transcriptRefused) appendLine(state, text);
+    if (wouldExceedBatch(state, text)) sealBatch(state);
+    if (!state.stopped) appendLine(state, text);
   };
   const timer = schedule(flush, runTranscriptFlushMs);
   timer?.unref?.();
   return {
-    ...evidenceUploads(state, call, warn, flush, () => unschedule(timer)),
-    async record(line, event) {
+    ...evidenceUploads(state, call, warn, drain, () => unschedule(timer)),
+    record(line, event) {
       observeRateLimit(state.sightings, event);
-      await append(state.scrub(truncatedEvent(line)));
+      append(state.scrub(truncatedEvent(line)));
       const marker = foldTurn(state, event);
-      if (marker !== undefined) await append(marker);
+      if (marker !== undefined) append(marker);
     },
     observed(result) {
       state.result = result;

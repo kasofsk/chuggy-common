@@ -1,6 +1,6 @@
 import { workerPlaneRoutes } from "@chuggy/worker-contract/workerPlane";
 
-import { workerRequest } from "./transport.mjs";
+import { WorkerPlaneRefusal, workerRequest } from "./transport.mjs";
 
 export const heartbeatIntervalMilliseconds = 60_000;
 
@@ -8,6 +8,11 @@ export const heartbeatIntervalMilliseconds = 60_000;
  * The lease a pod keeps while it holds an attempt. The path is a parameter
  * because a work attempt and a session attempt are leased on different routes
  * and by nothing else different.
+ *
+ * ONLY A BEAT THE PLANE REFUSED ENDS THE ATTEMPT. `request` raises a
+ * `WorkerPlaneRefusal` for one, which is remembered and raised when the lease
+ * is stopped. A beat that was never answered says nothing of the lease, so it
+ * is forgotten and the next one asks again.
  */
 export function keepWorkerLease(task, bearer, services = {}) {
   const {
@@ -17,12 +22,12 @@ export function keepWorkerLease(task, bearer, services = {}) {
     path = workerPlaneRoutes.heartbeat.path,
   } = services;
   let pending;
-  let failure;
+  let refusal;
   const heartbeat = () => {
     if (pending !== undefined) return;
     pending = request(task, bearer, path, { method: "POST" })
-      .catch((error) => {
-        failure ??= error;
+      .catch((failure) => {
+        if (failure instanceof WorkerPlaneRefusal) refusal ??= failure;
       })
       .finally(() => {
         pending = undefined;
@@ -35,6 +40,6 @@ export function keepWorkerLease(task, bearer, services = {}) {
     stopped = true;
     unschedule(timer);
     await pending;
-    if (failure !== undefined) throw failure;
+    if (refusal !== undefined) throw refusal;
   };
 }
