@@ -38,7 +38,7 @@ import {
   sessionCapabilityTools,
 } from "./chuggyTools.mjs";
 import { leadDecisionStaging } from "./leadDecision.mjs";
-import { leadRoster } from "./sessionHarness.fixture.mjs";
+import { leadRoster, threadRoster } from "./sessionHarness.fixture.mjs";
 import { sessionStoreAdapter } from "./sessionStore.mjs";
 
 const task = {
@@ -854,6 +854,96 @@ test("releasing a draft submits one operation and answers its id, not an outcome
   assert.equal(textOf(answer), `HTTP 202\n${accepted}`);
 });
 
+test("revoking a ticket submits one operation naming that ticket and nothing else, and answers its id", async () => {
+  const accepted = JSON.stringify({ operation: "o", state: "Pending" });
+  const { api, call } = toolsOf({}, () => ({ status: 202, body: accepted }));
+
+  const answer = await call("revoke_ticket", { ticket: 26 });
+
+  assert.equal(api.calls.length, 1);
+  assert.equal(api.calls[0].method, "POST");
+  assert.equal(
+    api.calls[0].path,
+    "/api/v1/tenants/vteng/projects/chuggy/operations",
+  );
+  assert.equal(
+    api.calls[0].init.headers["content-type"],
+    "application/vnd.chuggy.v1+json",
+  );
+  const body = JSON.parse(api.calls[0].init.body);
+  assert.deepEqual(Object.keys(body).sort(), ["mutation", "operation"]);
+  assert.deepEqual(body.mutation, { mutation: "RevokeTicket", ticket: 26 });
+  assert.equal(
+    body.operation,
+    chuggyOperationIdentity("turn-1", body.mutation),
+  );
+  assert.equal(api.calls[0].init.headers["idempotency-key"], body.operation);
+  assert.equal(textOf(answer), `HTTP 202\n${accepted}`);
+  assert.ok(answer.isError === undefined);
+});
+
+test("one call revokes one ticket: a list, a ticket that is no number and no ticket at all reach nothing", async () => {
+  const { api, call } = toolsOf();
+
+  for (const args of [
+    { ticket: [26, 27] },
+    { ticket: 0 },
+    { ticket: "26" },
+    {},
+  ])
+    assert.equal((await call("revoke_ticket", args)).isError, true);
+  assert.equal(api.calls.length, 0);
+});
+
+test("a revocation the machine refuses is relayed unaltered and never asked again", async () => {
+  const body = JSON.stringify({ error: { code: "MutationNotAdmitted" } });
+  const { api, call } = toolsOf({}, () => ({ status: 409, body }));
+
+  const answer = await call("revoke_ticket", { ticket: 25 });
+
+  assert.equal(textOf(answer), `HTTP 409\n${body}`);
+  assert.equal(answer.isError, true);
+  assert.equal(api.calls.length, 1);
+});
+
+/**
+ * A session learns what revoking does from the description alone, and the two
+ * things it cannot learn anywhere else are that a revocation is final and that
+ * it settles one ticket: the dependents of a revoked ticket wait for ever
+ * unless they are revoked too.
+ */
+test("the revocation tool says it is final, whose word it takes and what is left behind it", () => {
+  const { description } = chuggyProjectTools.find(
+    ({ name }) => name === "revoke_ticket",
+  );
+
+  for (const said of [
+    /on your owner's word only/,
+    /ends the ticket for good/,
+    /undoes nothing that already landed/,
+    /revokes no other ticket/,
+    /`revokedDependencies`/,
+    /its only exit is to be revoked too/,
+    /read_operation/,
+  ])
+    assert.match(description, said);
+});
+
+/**
+ * A ticket runs on the agent of the configuration it is released against, and
+ * the listing answers no agent, so the read is where a session finds one and
+ * its description is what says where.
+ */
+test("the configuration read says where the agent that does the work is named", () => {
+  const described = (tool) =>
+    chuggyProjectTools.find(({ name }) => name === tool).description;
+
+  assert.match(described("read_configuration"), /`worker\.mode`/);
+  assert.match(described("read_configuration"), /the agent/);
+  assert.match(described("read_configuration"), /a model/);
+  assert.match(described("list_configurations"), /read_configuration/);
+});
+
 test("two releases in one turn are two operations, and one repeated is one", async () => {
   const { api, call } = toolsOf({}, () => ({ status: 202, body: "{}" }));
   const release = (ticket) =>
@@ -1030,6 +1120,7 @@ const projectToolArguments = {
     configurationRevision: "r1",
   },
   create_draft: origination,
+  revoke_ticket: { ticket: 26 },
 };
 
 /**
@@ -1063,7 +1154,7 @@ test("every project tool reaches its own session's project and nothing outside i
   }
 });
 
-test("origination is registered for a thread's roster and for no lead's", () => {
+test("origination and revocation are registered for a thread's roster and for no lead's", () => {
   const registered = (capabilities) =>
     chuggyToolDefinitions(
       chuggyToolContext(task, bearer, {
@@ -1072,12 +1163,17 @@ test("origination is registered for a thread's roster and for no lead's", () => 
       }),
     ).map(({ name }) => name);
 
-  assert.ok(registered(["DraftOriginate"]).includes("create_draft"));
-  assert.deepEqual(registered(["DraftOriginate"]), ["create_draft"]);
-  assert.ok(
-    !registered([...leadRoster]).includes("create_draft"),
-    "a lead's roster registered the tool that files from nothing",
-  );
+  assert.deepEqual(registered(["DraftOriginate"]), [
+    "create_draft",
+    "revoke_ticket",
+  ]);
+  for (const tool of ["create_draft", "revoke_ticket"]) {
+    assert.ok(registered([...threadRoster]).includes(tool), tool);
+    assert.ok(
+      !registered([...leadRoster]).includes(tool),
+      `a lead's roster registered ${tool}`,
+    );
+  }
 });
 
 /**

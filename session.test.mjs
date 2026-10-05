@@ -1056,7 +1056,7 @@ const threadMessageTurn = {
   input: "file me a draft for the footer",
 };
 
-test("a thread is served origination and the thread reads, and no decision tool", async () => {
+test("a thread is served origination, revocation and the thread reads, and no decision tool", async () => {
   const plane = planeOf([], threadFacts);
   const { seen, query } = queryOf(() => []);
 
@@ -1067,6 +1067,7 @@ test("a thread is served origination and the thread reads, and no decision tool"
   );
   for (const tool of [
     "create_draft",
+    "revoke_ticket",
     "list_threads",
     "read_thread",
     "read_thread_transcript",
@@ -1098,7 +1099,7 @@ test("a thread is served origination and the thread reads, and no decision tool"
   );
 });
 
-test("a lead is served no origination, and it is disallowed by name", async () => {
+test("a lead is served neither origination nor revocation, and each is disallowed by name", async () => {
   const plane = planeOf([], leadFacts);
   const { seen, query } = queryOf(() => []);
 
@@ -1107,14 +1108,13 @@ test("a lead is served no origination, and it is disallowed by name", async () =
   const registered = seen.options.mcpServers.chuggy.tools.map(
     ({ name }) => name,
   );
-  assert.ok(
-    !registered.includes("create_draft"),
-    "a lead was served the tool that files from nothing",
-  );
-  assert.ok(
-    seen.options.disallowedTools.includes(`${chuggyToolPrefix}create_draft`),
-    "a lead was left ungoverned for origination",
-  );
+  for (const tool of ["create_draft", "revoke_ticket"]) {
+    assert.ok(!registered.includes(tool), `a lead was served ${tool}`);
+    assert.ok(
+      seen.options.disallowedTools.includes(`${chuggyToolPrefix}${tool}`),
+      `a lead was left ungoverned for ${tool}`,
+    );
+  }
 });
 
 test("a thread's own objectives ride on the preset prompt, recorded for the conversation", async () => {
