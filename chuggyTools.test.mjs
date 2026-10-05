@@ -19,6 +19,10 @@ import {
 import { z } from "zod";
 
 import {
+  chuggyRequestAttemptsMax,
+  chuggyRequestRetryMs,
+} from "./chuggyApi.mjs";
+import {
   chuggyOperationIdentity,
   chuggyToolAnswerBytes,
   chuggyToolAnswerBytesMax,
@@ -162,16 +166,17 @@ test("every tool that takes a brief names the line bound an intent is held to", 
 });
 
 /** Which bound each read's page is held to is written here; the bound itself is the contract's. */
+const pageBounds = {
+  list_tickets: nativeHttpPageItemsMax,
+  list_drafts: nativeHttpPageItemsMax,
+  list_configurations: nativeHttpPageItemsMax,
+  read_decision_log: selectorHistoryLimitMax,
+  read_refusals: agenticRefusalsAnsweredMax,
+  list_executions: nativeHttpPageItemsMax,
+  read_thread: threadTurnsAnsweredMax,
+};
+
 test("every read that takes a limit admits its route's bound and no more", () => {
-  const bounds = {
-    list_tickets: nativeHttpPageItemsMax,
-    list_drafts: nativeHttpPageItemsMax,
-    list_configurations: nativeHttpPageItemsMax,
-    read_decision_log: selectorHistoryLimitMax,
-    read_refusals: agenticRefusalsAnsweredMax,
-    list_executions: nativeHttpPageItemsMax,
-    read_thread: threadTurnsAnsweredMax,
-  };
   const limited = chuggyToolDefinitions(
     chuggyToolContext(task, bearer, {
       capabilities: everyCapability,
@@ -181,12 +186,18 @@ test("every read that takes a limit admits its route's bound and no more", () =>
 
   assert.deepEqual(
     limited.map(({ name }) => name).sort(),
-    Object.keys(bounds).sort(),
+    Object.keys(pageBounds).sort(),
   );
   for (const { name, shape } of limited) {
     const { limit } = shape(z);
-    assert.ok(limit.safeParse(bounds[name]).success, `${name} at its bound`);
-    assert.ok(!limit.safeParse(bounds[name] + 1).success, `${name} past it`);
+    assert.ok(
+      limit.safeParse(pageBounds[name]).success,
+      `${name} at its bound`,
+    );
+    assert.ok(
+      !limit.safeParse(pageBounds[name] + 1).success,
+      `${name} past it`,
+    );
   }
 });
 
@@ -290,7 +301,21 @@ test("a page larger than the pod draws is refused rather than answered cut", asy
 test("the refusal names what this caller can lower, and says so where there is nothing", async () => {
   const body = "x".repeat(70_000);
   for (const [name, args, remedy] of [
-    ["list_executions", { limit: 100 }, /ask again with a smaller limit\.$/],
+    [
+      "list_executions",
+      { limit: 100 },
+      /list_executions is already asking for one; move past it with cursor\.$/,
+    ],
+    [
+      "read_refusals",
+      {},
+      /read_refusals is already asking for one, so this one cannot be answered\.$/,
+    ],
+    [
+      "list_tickets",
+      { phase: Array.from({ length: 4_096 }, () => "") },
+      /list_tickets refused its arguments and asked for nothing\.$/,
+    ],
     [
       "read_thread",
       { session: "t-1", limit: 1 },
@@ -1068,6 +1093,104 @@ test("every project tool a session holds asks its route, and answers what the ro
 
     assert.equal(api.calls.length, 1, name);
     assert.ok(answer.isError === undefined, name);
+  }
+});
+
+/** The `limit` one request asked with, or nothing where it asked with none. */
+function limitAsked({ path }) {
+  const asked = new URL(path, task.api.url).searchParams.get("limit");
+  return asked === null ? undefined : Number(asked);
+}
+
+/**
+ * The executions read at the weight an item ran on a live project, where a
+ * page of fifty was refused and the model was left to guess a limit. The
+ * route answers as many items as it is asked for and the cursor past them.
+ */
+test("a page too large is asked for again at half its limit until one fits, and that page is answered", async () => {
+  const { api, call } = toolsOf({}, (path) => {
+    const items = Array.from({ length: limitAsked({ path }) }, (_, at) => ({
+      at,
+      held: "x".repeat(1_400),
+    }));
+    return {
+      status: 200,
+      body: JSON.stringify({ items, nextCursor: `c-${String(items.length)}` }),
+    };
+  });
+
+  const answer = await call("list_executions", {
+    ticket: 3,
+    state: ["Running"],
+    cursor: "c-0",
+    limit: 50,
+  });
+
+  const asked =
+    "/api/v1/tenants/vteng/projects/chuggy/executions?ticket=3&state=Running&cursor=c-0&limit=";
+  assert.deepEqual(
+    api.calls.map(({ path }) => path),
+    [`${asked}50`, `${asked}25`, `${asked}12`],
+  );
+  assert.ok(answer.isError === undefined);
+  const page = JSON.parse(textOf(answer).slice("HTTP 200\n".length));
+  assert.equal(page.items.length, 12);
+  assert.equal(page.nextCursor, "c-12");
+});
+
+test("a call that gave no limit asks again from half the largest its shape admits", async () => {
+  for (const [name, max] of Object.entries(pageBounds)) {
+    const { api, call } = toolsOf({}, (path) => ({
+      status: 200,
+      body:
+        limitAsked({ path }) === undefined
+          ? "x".repeat(chuggyToolAnswerBytesMax)
+          : "{}",
+    }));
+
+    const answer = await call(name, projectToolArguments[name]);
+
+    assert.ok(answer.isError === undefined, name);
+    assert.equal(textOf(answer), "HTTP 200\n{}", name);
+    assert.deepEqual(
+      api.calls.map(limitAsked),
+      [undefined, Math.floor(max / 2)],
+      name,
+    );
+  }
+});
+
+/**
+ * Every paged read against an item too large alone, from the largest page it
+ * admits, which is the most one call can ask. Each ask is a read the client may
+ * repeat with a wait between, so the waits of every ask are added up here and
+ * held under the tool's own timeout: past it, a refusal would reach the model
+ * as a timeout that says nothing.
+ */
+test("an item too large alone is refused once one is asked for, inside what a tool call may wait", async () => {
+  for (const [name, max] of Object.entries(pageBounds)) {
+    const { api, call } = toolsOf({}, () => ({
+      status: 200,
+      body: "x".repeat(chuggyToolAnswerBytesMax),
+    }));
+
+    const answer = await call(name, {
+      ...projectToolArguments[name],
+      limit: max,
+    });
+
+    assert.equal(answer.isError, true, name);
+    assert.match(textOf(answer), /is already asking for one/, name);
+    const limits = api.calls.map(limitAsked);
+    assert.equal(limits[0], max, name);
+    assert.equal(limits.at(-1), 1, name);
+    for (const [at, limit] of limits.slice(1).entries())
+      assert.equal(limit, Math.floor(limits[at] / 2), name);
+    assert.ok(
+      limits.length * (chuggyRequestAttemptsMax - 1) * chuggyRequestRetryMs <
+        chuggyToolTimeoutMs,
+      `${name} can wait out its own timeout`,
+    );
   }
 });
 
