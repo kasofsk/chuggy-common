@@ -383,41 +383,11 @@ const ordinal = (z) => z.number().int().min(1);
 const anyObject = (z) => z.looseObject({});
 
 /**
- * The tools whose route this installation's API does not serve yet, and what
- * serves each when it lands.
- *
- * RELAYING THE 404 WOULD BE A LIE THE MODEL CANNOT SEE THROUGH. Every one of
- * these paths answers the same `404` a missing project answers, so a lead told
- * only the status reads "this project has no refusals" where the truth is "this
- * installation cannot answer that yet" — and it decides on the first. A stated
- * refusal is the honest answer, and it names the tool to reach for instead.
- *
- * IT IS ONE TABLE SO IT IS ONE DELETION. Each entry goes in the change that
- * registers its route; an entry left behind is a tool that refuses a route that
- * works, which the first turn against a served installation shows. Nothing here
- * can check that for itself — the route table is built by chuggy's server,
- * which this repository does not carry — so the suites hold what they can:
- * every key is a tool the roster carries, every tool named here refuses before
- * it makes a request, and no tool outside it does.
- */
-export const chuggyToolsNotYetServed = {
-  read_decision_log:
-    "This project's decision log cannot be read by this installation yet.",
-  read_refusals:
-    "This project's standing refusals cannot be read by this installation yet. This turn's observation carries them.",
-  read_ticket_refusals:
-    "A ticket's refusal ledger cannot be read by this installation yet. This turn's observation carries the standing refusals.",
-  read_lead: "The lead session cannot be read by this installation yet.",
-  read_lead_transcript:
-    "The lead's own transcript cannot be read by this installation yet.",
-};
-
-/**
  * Every project tool: its name, the shape its input is checked against at the
  * boundary, and the one route it reaches. It is a value rather than a function
  * because it is a roster, and a roster read twice must read the same both
- * times; it is exported so a suite can drive the route one tool builds even
- * where `chuggyToolsNotYetServed` is what a session's handler answers.
+ * times; it is exported so a suite can drive every tool's route, whatever
+ * roster a session holds.
  */
 export const chuggyProjectTools = [
   {
@@ -490,7 +460,7 @@ export const chuggyProjectTools = [
   {
     name: "read_decision_log",
     description:
-      "One page of this project's past selector decisions, newest first: what each chose and under which settings.",
+      "One page of this project's past selector decisions, oldest first: what each chose and under which settings. Answers `nextAfter` for the next page; `after` resumes from it.",
     shape: (z) => ({
       after: count(z).optional(),
       limit: limit(z, selectorHistoryLimitMax),
@@ -515,7 +485,7 @@ export const chuggyProjectTools = [
   {
     name: "read_ticket_refusals",
     description:
-      "One ticket's whole refusal ledger: every refusal recorded on it and every lift.",
+      "One ticket's refusal ledger, oldest first: the refusals recorded on it and their lifts. `more` says the ledger holds further entries than one answer carries.",
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
       read(
@@ -768,12 +738,7 @@ export function chuggyToolDefinitions(context) {
   );
   const project = chuggyProjectTools.map((definition) => ({
     ...definition,
-    call: (args) => {
-      const unserved = chuggyToolsNotYetServed[definition.name];
-      return unserved === undefined
-        ? definition.call(context, args)
-        : answered(unserved, true);
-    },
+    call: (args) => definition.call(context, args),
   }));
   return [...project, ...context.staging.definitions].filter((definition) =>
     admitted.has(definition.name),
