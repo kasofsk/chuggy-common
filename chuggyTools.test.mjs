@@ -8,7 +8,6 @@ import { sessionStoreBatchBytesMax } from "@chuggy/worker-contract/sessionPlane"
 import {
   agenticRefusalsAnsweredMax,
   allChuggyTools,
-  briefLineCharsMax,
   chuggyToolPrefix,
   chuggyToolResponseBytesMax,
   chuggyToolTimeoutMs,
@@ -136,11 +135,11 @@ test("every tool that takes a brief names the title it carries", () => {
 });
 
 /**
- * The bound a model cannot infer from an open object. An intent is refused a
- * line at a time, so a description that calls it a paragraph steers the model
- * into the one shape the door will not take.
+ * What bounds an intent, which a model cannot infer from an open object. An
+ * intent is bounded as a whole, so a description that gives one a line bound
+ * has the model break sentences the door never asked it to break.
  */
-test("every tool that takes a brief names the line bound an intent is held to", () => {
+test("every tool that takes a brief says an intent is bounded as a whole, and gives it no line bound", () => {
   const taking = chuggyToolDefinitions(
     chuggyToolContext(task, bearer, {
       capabilities: everyCapability,
@@ -148,19 +147,22 @@ test("every tool that takes a brief names the line bound an intent is held to", 
     }),
   ).filter((definition) => "brief" in definition.shape(z));
 
+  assert.notEqual(taking.length, 0, "no tool takes a brief");
   for (const { name, description } of taking) {
+    const [, intent] = /`intent` is ([^;]*);/u.exec(description) ?? [];
+    assert.ok(intent !== undefined, `${name} does not say what an intent is`);
     assert.ok(
-      description.includes(String(briefLineCharsMax)),
-      `${name} names no line bound`,
+      intent.includes("bounded only as a whole"),
+      `${name} does not say what bounds an intent`,
     );
     assert.ok(
-      description.includes("break a sentence across lines"),
-      `${name} does not say how to stay under it`,
+      intent.includes("no bound on a line of it or on how many lines it has"),
+      `${name} does not say an intent's lines are free`,
     );
     assert.equal(
-      description.includes("`intent` is the paragraph"),
+      intent.includes("break"),
       false,
-      `${name} still asks for one long line`,
+      `${name} tells a session where to break an intent`,
     );
   }
 });
