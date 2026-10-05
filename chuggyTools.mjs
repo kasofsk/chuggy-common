@@ -72,7 +72,8 @@
  * a session is opened with is the provisioning root's, not this image's, so
  * what is true here is the mapping: a roster without `DraftOriginate` cannot
  * reach the tool, and the derived-work rule is that mapping rather than a
- * sentence in a description.
+ * sentence in a description. `revoke_ticket` is under that capability too,
+ * which is what keeps it from a roster that does not hold it.
  * `Prerequisite` is admitted by the schema only so its refusal can name the
  * reason — a released ticket's dependencies are immutable in chuggy's
  * `model/domain.qnt`, which names re-authoring machinery as deliberately absent.
@@ -372,6 +373,18 @@ function claimedTurn(context) {
   return turn;
 }
 
+/** One command submitted as an operation, keyed by the identity its turn and itself mint. */
+function submit(context, mutation) {
+  const operation = chuggyOperationIdentity(claimedTurn(context), mutation);
+  return write(
+    context,
+    projectPath(context, "operations"),
+    "POST",
+    { operation, mutation },
+    { "idempotency-key": operation },
+  );
+}
+
 const ticket = (z) => z.number().int().min(1);
 const limit = (z, max) => z.number().int().min(1).max(max).optional();
 const count = (z) => z.number().int().min(0);
@@ -444,7 +457,7 @@ export const chuggyProjectTools = [
   {
     name: "list_configurations",
     description:
-      "One page of this project's configuration revisions, newest first, with the cursor for the next.",
+      "One page of this project's configuration revisions, newest first, with the cursor for the next. One imported from a repository carries its configuration's name in `provenance.name`; who does the work under it is read_configuration's to answer.",
     shape: (z) => ({
       cursor: identity(z).optional(),
       limit: limit(z, nativeHttpPageItemsMax),
@@ -458,7 +471,7 @@ export const chuggyProjectTools = [
   {
     name: "read_configuration",
     description:
-      "One configuration revision, canonical, as a draft is authored against it.",
+      "One configuration revision, canonical, as a draft is authored against it. `canonical` is the stored document as JSON text, and its `worker.mode` is who does the work of a ticket released against it: the agent, and what that agent is started with, a model where the configuration names one.",
     shape: (z) => ({ revision: identity(z) }),
     call: (context, { revision }) =>
       read(context, projectPath(context, "configuration", { revision })),
@@ -692,22 +705,13 @@ export const chuggyProjectTools = [
       authoringVersion: count(z),
       configurationRevision: identity(z),
     }),
-    call: (context, args) => {
-      const mutation = {
+    call: (context, args) =>
+      submit(context, {
         mutation: "ReleaseDraft",
         ticket: args.ticket,
         authoringVersion: args.authoringVersion,
         configurationRevision: args.configurationRevision,
-      };
-      const operation = chuggyOperationIdentity(claimedTurn(context), mutation);
-      return write(
-        context,
-        projectPath(context, "operations"),
-        "POST",
-        { operation, mutation },
-        { "idempotency-key": operation },
-      );
-    },
+      }),
   },
   {
     name: "create_draft",
@@ -727,6 +731,14 @@ export const chuggyProjectTools = [
         authoring: args.authoring,
         brief: args.brief,
       }),
+  },
+  {
+    name: "revoke_ticket",
+    description:
+      "Submits the revocation of one ticket, on your owner's word only. Revoking ends the ticket for good: it cancels the work running for it and undoes nothing that already landed. It revokes no other ticket. A ticket depending on a revoked one can never start, read_ticket names those dependencies in `revokedDependencies`, and its only exit is to be revoked too. Answers an accepted operation and its id, never an outcome: read that with read_operation.",
+    shape: (z) => ({ ticket: ticket(z) }),
+    call: (context, args) =>
+      submit(context, { mutation: "RevokeTicket", ticket: args.ticket }),
   },
 ];
 
