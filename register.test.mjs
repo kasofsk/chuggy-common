@@ -22,6 +22,7 @@ import {
   registerPoolFileWritten,
   registerPoolNameDefault,
   registerRedeemed,
+  registerAskedChecked,
   registerRequest,
 } from "./register.mjs";
 import {
@@ -259,6 +260,29 @@ test("a request declares this machine's platform and names the pool for its host
   assert.ok("request" in arm);
   assert.equal(arm.request.pool, "geoff-laptop");
   assert.equal(arm.request.capability, "Platform:Linux:Arm64");
+});
+
+test("the ask is checked apart from the platform, and a wrong ask is refused before an unknown platform is", () => {
+  const asked = { api: "https://chuggy.example/", token: "t", pool: undefined };
+  assert.deepEqual(registerAskedChecked(asked, "Shame.lan"), {
+    checked: {
+      api: new URL("https://chuggy.example"),
+      token: "t",
+      pool: "shame",
+    },
+  });
+  assert.deepEqual(registerAskedChecked({ ...asked, pool: "Shame" }, "x"), {
+    refused:
+      "--pool Shame is not a pool name: at most 63 lowercase letters, digits and hyphens, beginning and ending with a letter or digit",
+  });
+  assert.deepEqual(registerAskedChecked({ ...asked, token: "" }, "x"), {
+    refused: "--token is not a registration token",
+  });
+  const answer = registerRequest(
+    { ...asked, token: undefined },
+    { hostname: "shame", arch: "ia32" },
+  );
+  assert.deepEqual(answer, { refused: "register needs --api and --token" });
 });
 
 test("a hostname makes a pool name of its first label, lowercase, other characters hyphens", () => {

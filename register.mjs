@@ -179,26 +179,20 @@ function registerApi(text) {
 }
 
 /**
- * The redemption the operator asked for, or why it cannot be made. Nothing
- * here spends the token.
+ * What the operator asked, checked, or why it cannot be redeemed: everything
+ * but the platform, so a runner that must ask its engine for the platform can
+ * refuse a wrong ask first. Nothing here spends the token.
  *
  * @param {RegisterAsked} asked
- * @param {RegisterMachine} machine
- * @returns {{request: RegisterRequest} | {refused: string}}
+ * @param {string} hostname
+ * @returns {{checked: Omit<RegisterRequest, "capability">} | {refused: string}}
  */
-export function registerRequest(asked, machine) {
+export function registerAskedChecked(asked, hostname) {
   if (asked.api === undefined || asked.token === undefined)
     return { refused: "register needs --api and --token" };
   const api = registerApi(asked.api);
   if (typeof api === "string") return { refused: api };
-  const capability = Object.hasOwn(registerPlatforms, machine.arch)
-    ? registerPlatforms[machine.arch]
-    : undefined;
-  if (capability === undefined)
-    return {
-      refused: `this machine is ${machine.arch}, and a pool runs Linux on x64 or arm64`,
-    };
-  const pool = asked.pool ?? registerPoolNameDefault(machine.hostname);
+  const pool = asked.pool ?? registerPoolNameDefault(hostname);
   if (pool === undefined)
     return {
       refused: `this machine's hostname makes no pool name; name the pool with --pool`,
@@ -207,14 +201,31 @@ export function registerRequest(asked, machine) {
     return {
       refused: `--pool ${pool} is not a pool name: at most ${String(registerPoolNameCharsMax)} lowercase letters, digits and hyphens, beginning and ending with a letter or digit`,
     };
-  const redemption = workerPoolRedemptionSchema.safeParse({
-    token: asked.token,
-    pool,
-    capabilities: [capability],
-  });
-  if (!redemption.success)
+  if (!workerPoolRedemptionSchema.shape.token.safeParse(asked.token).success)
     return { refused: "--token is not a registration token" };
-  return { request: { api, token: asked.token, pool, capability } };
+  return { checked: { api, token: asked.token, pool } };
+}
+
+/**
+ * The redemption the operator asked for, or why it cannot be made: the ask
+ * checked, then the platform the machine's containers run. Nothing here
+ * spends the token.
+ *
+ * @param {RegisterAsked} asked
+ * @param {RegisterMachine} machine
+ * @returns {{request: RegisterRequest} | {refused: string}}
+ */
+export function registerRequest(asked, machine) {
+  const answer = registerAskedChecked(asked, machine.hostname);
+  if ("refused" in answer) return answer;
+  const capability = Object.hasOwn(registerPlatforms, machine.arch)
+    ? registerPlatforms[machine.arch]
+    : undefined;
+  if (capability === undefined)
+    return {
+      refused: `this machine is ${machine.arch}, and a pool runs Linux on x64 or arm64`,
+    };
+  return { request: { ...answer.checked, capability } };
 }
 
 /**
