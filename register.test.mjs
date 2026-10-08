@@ -344,6 +344,15 @@ test("a pool file's name carries no byte a path or a unit name reads specially",
   );
 });
 
+test("a bound on a pool file's name that is no count of characters is refused", () => {
+  for (const bound of [0, Number.NaN, 1.5, /** @type {any} */ (undefined)])
+    assert.throws(
+      () => registerPoolFileName(registered, bound),
+      RangeError,
+      String(bound),
+    );
+});
+
 test("names longer than a runner's service can be named for make a digest instead", () => {
   const long = {
     tenant: "t",
@@ -420,17 +429,33 @@ test("a pools directory anyone else can enter, or you cannot write, is made owne
   }
 });
 
-test("a pools directory that cannot be made yours to write is refused, saying no token was spent", async (t) => {
+test("a pools directory a file stands in the way of is refused, saying no token was spent", async (t) => {
   const directory = join(await scratch(t), "pools");
-  await symlink("/proc/self/fd", directory);
+  await writeFile(directory, "");
   await assert.rejects(
     registerPoolDirectory(directory),
     new RegExp(
-      `^Error: ${directory} cannot be made a directory only you can write, so no token was spent: E`,
+      `^Error: ${directory} cannot be made a directory only you can write, so no token was spent: EEXIST`,
       "u",
     ),
   );
 });
+
+test(
+  "a pools directory another user owns is refused, saying no token was spent",
+  { skip: process.getuid?.() === 0 && "root may make any directory its own" },
+  async (t) => {
+    const directory = join(await scratch(t), "pools");
+    await symlink("/", directory);
+    await assert.rejects(
+      registerPoolDirectory(directory),
+      new RegExp(
+        `^Error: ${directory} cannot be made a directory only you can write, so no token was spent: EPERM`,
+        "u",
+      ),
+    );
+  },
+);
 
 test("a pool file that cannot be renamed into place leaves no temporary file behind", async (t) => {
   const directory = await scratch(t);

@@ -379,6 +379,10 @@ function registerPoolFileNamePart(name) {
  * @param {number} nameCharsMax the longest name the runner's service manager takes in a pool's service's name
  */
 export function registerPoolFileName(identity, nameCharsMax) {
+  if (!Number.isSafeInteger(nameCharsMax) || nameCharsMax < 1)
+    throw new RangeError(
+      `a pool file's name is bounded by a count of characters, not ${String(nameCharsMax)}`,
+    );
   const name = [identity.tenant, identity.project, identity.pool]
     .map(registerPoolFileNamePart)
     .join(".");
