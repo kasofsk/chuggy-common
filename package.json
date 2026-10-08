@@ -40,6 +40,7 @@
     "poolJobPlane.mjs",
     "poolLoop.mjs",
     "poolPlane.mjs",
+    "poolRunner.mjs",
     "poolSessionPlane.mjs",
     "poolTokens.mjs",
     "rateLimit.mjs",
