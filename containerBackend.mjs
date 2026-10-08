@@ -91,7 +91,7 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @typedef {object} ContainerBackendSeams
  * @property {Engine} engine
  * @property {WorkerPoolTokens} tokens the pool's own, which the loop shares
- * @property {() => Promise<string | undefined>} tokenFileRefusal why this machine cannot hand a job the Claude token file, or nothing: the runner's to judge, since whether a job can read it turns on how its engine maps users
+ * @property {(tokenFile: string) => Promise<string | undefined>} tokenFileRefusal why this machine cannot hand a job the Claude token file the backend mounts, or nothing: the runner's to judge, since whether a job can read it turns on how its engine maps users
  * @property {() => number} nowMs
  * @property {(ms: number, signal: AbortSignal) => Promise<void>} sleep
  * @property {(line: string) => void} log
@@ -491,7 +491,7 @@ async function placementRefusal(state, assignment) {
     return `the assignment asks for ${String(assignment.cpuMillis)} CPU millis and this machine has ${String(machine.cpuMillis)}`;
   if (assignment.memoryMib > machine.memoryMib)
     return `the assignment asks for ${String(assignment.memoryMib)} MiB and this machine has ${String(machine.memoryMib)}`;
-  return state.seams.tokenFileRefusal();
+  return state.seams.tokenFileRefusal(state.settings.tokenFile);
 }
 
 /**

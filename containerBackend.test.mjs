@@ -1,14 +1,7 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import {
-  mkdtemp,
-  readdir,
-  readFile,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -45,7 +38,6 @@ async function harness(t, overrides = {}) {
   const directory = await mkdtemp(join(tmpdir(), "chuggy-backend-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const tokenFile = join(directory, "claude-token");
-  await writeFile(tokenFile, "claude-token-fixture", { mode: 0o600 });
   const { engine, state } = fakeEngine();
   const clock = { nowMs: startMs };
   /** @type {string[]} */
@@ -55,6 +47,8 @@ async function harness(t, overrides = {}) {
   let minted = 0;
   /** @type {string | undefined} why the runner says the token file cannot be handed over */
   let tokenFileRefused;
+  /** @type {string[]} the token files the runner was asked about */
+  const tokenFilesAsked = [];
   const settings = {
     engine: /** @type {"docker" | "podman"} */ ("podman"),
     pool,
@@ -85,7 +79,10 @@ async function harness(t, overrides = {}) {
       clock.nowMs += ms;
     },
     log: (line) => log.push(line),
-    tokenFileRefusal: async () => tokenFileRefused,
+    tokenFileRefusal: async (file) => {
+      tokenFilesAsked.push(file);
+      return tokenFileRefused;
+    },
   });
   return {
     backend,
@@ -95,6 +92,7 @@ async function harness(t, overrides = {}) {
     invalidated,
     settings,
     minted: () => minted,
+    tokenFilesAsked,
     /** @param {string | undefined} why */
     refuseTokenFile: (why) => {
       tokenFileRefused = why;
@@ -868,13 +866,15 @@ test("what this machine cannot take is refused, naming no value of the envelope"
 });
 
 test("an assignment is refused, and nothing run, while the runner says the Claude token file cannot be handed to a job", async (t) => {
-  const { backend, state, refuseTokenFile } = await harness(t);
+  const { backend, state, settings, tokenFilesAsked, refuseTokenFile } =
+    await harness(t);
   refuseTokenFile("the Claude token file is empty");
   assert.deepEqual(await backend.place(assignment(), "Job"), {
     placed: "Refused",
     evidence: "the Claude token file is empty",
   });
   assert.deepEqual(state.calls, []);
+  assert.deepEqual(tokenFilesAsked, [settings.tokenFile]);
   refuseTokenFile(undefined);
   assert.equal((await backend.place(assignment(), "Job")).placed, "Placed");
   await backend.settled();
