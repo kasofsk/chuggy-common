@@ -85,6 +85,7 @@ import {
   workerCheckCommands,
   workerReportText,
   workerStageEnvironment,
+  workerSummaryText,
 } from "./checks.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import { planeCredential, workerCredentialPath } from "./planeCredential.mjs";
@@ -108,6 +109,8 @@ import { answeredWith, rosterLabel, routePath } from "./wire.mjs";
 const executeFile = promisify(execFile);
 const agentResultSchemaFile = "/tmp/chuggy-agent-result-schema.json";
 const agentDiagnosticPath = ".chuggy/agent-result.json";
+/** Where an agent's summary is kept as it was written: the path chuggy reads its `work-summary` output from. */
+const agentSummaryPath = ".chuggy/outputs/summary.md";
 const checkDiagnosticPath = ".chuggy/check-output.json";
 const workerCredentialFilesMax = 64;
 const workspaceWrite = rosterLabel(filesystemAccesses, "WriteWorkspace");
@@ -310,6 +313,7 @@ async function runAgent(context) {
   return {
     ...context.agent.result([resultEvent]),
     diagnosticPath: agentDiagnosticPath,
+    summaryPath: agentSummaryPath,
   };
 }
 
@@ -456,6 +460,20 @@ async function diagnostic(context, path, result) {
     context.scrub(`${JSON.stringify(result, null, 2)}\n`),
   );
   return upload(context.task, context.bearer, path, content, context.request);
+}
+
+/**
+ * The summary of a run that names where it is kept, uploaded as
+ * `workerSummaryText` leaves it. No artifact where the run names nowhere, or
+ * where that text is empty.
+ */
+async function summaryDiagnostics(context, path, summary) {
+  if (path === undefined) return [];
+  const content = Buffer.from(workerSummaryText(summary, context.scrub));
+  if (content.byteLength === 0) return [];
+  return [
+    await upload(context.task, context.bearer, path, content, context.request),
+  ];
 }
 
 async function report(context, manifest) {
@@ -822,11 +840,14 @@ export async function workerAttempt(launch, seams = {}) {
 export async function publishWorkerResult(
   context,
   workspace,
-  { output, result, diagnosticPath },
+  { output, result, diagnosticPath, summaryPath },
 ) {
   await context.evidence.finish();
   const source = await workSource(context, workspace, result.verdict);
-  const diagnostics = [await diagnostic(context, diagnosticPath, output)];
+  const diagnostics = [
+    await diagnostic(context, diagnosticPath, output),
+    ...(await summaryDiagnostics(context, summaryPath, result.summary)),
+  ];
   await context.stopLease();
   await report(context, {
     verdict: result.verdict,

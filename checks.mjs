@@ -49,7 +49,10 @@ import {
   sessionTaskVariable,
   workerTaskVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
-import { workerPlaneUploadBytesMax } from "@chuggy/worker-contract/workerPlane";
+import {
+  runConfigurationBytesMax,
+  workerPlaneUploadBytesMax,
+} from "@chuggy/worker-contract/workerPlane";
 
 /**
  * What one character of a stage's own text can cost in that artifact. The
@@ -75,6 +78,22 @@ export const workerCheckStageOutputCharsMax = Math.floor(
 
 /** The characters one command keeps, so no single command spends the stage's room. */
 export const workerCheckOutputCharsMax = 262_144;
+
+/**
+ * What one character of a summary can weigh as the UTF-8 it is uploaded in.
+ * Not measured here: the suite builds the heaviest summary and weighs it.
+ */
+const checkSummaryCharBytesMax = 3;
+
+/**
+ * The characters an agent's summary keeps as an output. chuggy refuses to show
+ * an output heavier than its `outputPreviewBytesMax`, a bound the contract
+ * carries only as `runConfigurationBytesMax`, which chuggy's suite holds equal
+ * to it.
+ */
+export const workerSummaryCharsMax = Math.floor(
+  runConfigurationBytesMax / checkSummaryCharBytesMax,
+);
 
 /** What the report says before the failing command's output, which is what makes the excerpt readable as one. */
 const checkReportExcerptLabel = "; last output of ";
@@ -181,6 +200,18 @@ function checkPrintable(text) {
  */
 export function workerReportText(text, scrub) {
   return checkHead(checkPrintable(scrub(text)), resultReportCharsMax);
+}
+
+/**
+ * An agent's summary as an output carries it: scrubbed as a report's is and
+ * otherwise as it was written, line breaks kept, well formed, and cut to what
+ * an output holds. Empty where nothing in it is printable.
+ */
+export function workerSummaryText(text, scrub) {
+  const written = scrub(text).toWellFormed();
+  return checkPrintable(written).length === 0
+    ? ""
+    : checkHead(written, workerSummaryCharsMax);
 }
 
 /** The longest head of a well-formed text within this many code units that ends on a code point. */
