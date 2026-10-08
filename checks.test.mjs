@@ -15,7 +15,10 @@ import {
   sessionTaskVariable,
   workerTaskVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
-import { workerPlaneUploadBytesMax } from "@chuggy/worker-contract/workerPlane";
+import {
+  runConfigurationBytesMax,
+  workerPlaneUploadBytesMax,
+} from "@chuggy/worker-contract/workerPlane";
 import {
   briefingLineCharsMax,
   commandLinesMax,
@@ -27,6 +30,8 @@ import {
   workerCheckCommands,
   workerCheckOutputCharsMax,
   workerCheckStageOutputCharsMax,
+  workerSummaryCharsMax,
+  workerSummaryText,
 } from "./checks.mjs";
 
 const workspace = { directory: process.cwd() };
@@ -259,6 +264,16 @@ test("the worst artifact a stage can produce is one the plane accepts", () => {
     Buffer.byteLength(scrub(serialized)) < workerPlaneUploadBytesMax,
     `the worst artifact is ${String(Buffer.byteLength(scrub(serialized)))} bytes`,
   );
+});
+
+test("the heaviest summary an agent's run keeps is one the plane accepts and shows whole", () => {
+  const heaviest = replacementCharacter.repeat(workerSummaryCharsMax + 1);
+  const kept = workerSummaryText(heaviest, (text) => text);
+  const bytes = Buffer.byteLength(kept);
+
+  assert.equal(kept.length, workerSummaryCharsMax);
+  assert.ok(bytes <= runConfigurationBytesMax, String(bytes));
+  assert.ok(bytes <= workerPlaneUploadBytesMax, String(bytes));
 });
 
 test("a stage handed no commands is a crashed run and never a pass", async () => {

@@ -861,7 +861,7 @@ async function reportedManifest(publish) {
 /**
  * The writer driven, not a document built beside it: an evaluation's manifest
  * with a report at its bound, and a passing work attempt's with the source its
- * push left.
+ * push left and the summary an agent's run keeps.
  */
 test("the manifest the pod reports is one the contract's manifest schema reads", async () => {
   const evaluation = await reportedManifest((request) =>
@@ -893,11 +893,16 @@ test("the manifest the pod reports is one the contract's manifest schema reads",
         output: {},
         result: { verdict: "Pass", summary: "done" },
         diagnosticPath: ".chuggy/agent-result.json",
+        summaryPath: ".chuggy/outputs/summary.md",
       },
     ),
   );
   resultManifestDocumentSchema.parse(work);
   assert.equal(work.source.repository, "repository-1");
+  assert.deepEqual(
+    work.diagnostics.map(({ path }) => path),
+    [".chuggy/agent-result.json", ".chuggy/outputs/summary.md"],
+  );
 });
 
 /** An observation offering one ticket to dispatch and one to refuse. */

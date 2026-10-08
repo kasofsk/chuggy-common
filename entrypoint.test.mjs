@@ -16,11 +16,14 @@ import {
   workerWorkspaceVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
 import { resultReportCharsMax } from "@chuggy/worker-contract/workerDocuments";
-import { workerPlaneBytesMediaType } from "@chuggy/worker-contract/workerPlane";
+import {
+  runConfigurationBytesMax,
+  workerPlaneBytesMediaType,
+} from "@chuggy/worker-contract/workerPlane";
 import { workTaskAnswerSchema } from "@chuggy/worker-contract/workerTask";
 
 import { git, inCheckout, remoteRefs } from "./checkout.fixture.mjs";
-import { workerCheckCommands } from "./checks.mjs";
+import { workerCheckCommands, workerSummaryCharsMax } from "./checks.mjs";
 import { claudeAgent } from "./claude.mjs";
 import { pausedClock } from "./clock.fixture.mjs";
 import {
@@ -1021,6 +1024,160 @@ test("an agent's summary is cut to a report on a code point", async () => {
   assert.equal(report.length, resultReportCharsMax - 1);
 });
 
+/**
+ * The run an agent's process leaves, the agent stood in for by a shell that
+ * writes the one result event Claude Code ends with.
+ */
+function agentRun(summary, verdict = "Pass") {
+  const ended = JSON.stringify({
+    type: "result",
+    structured_output: { verdict, summary },
+  });
+  return runWorkerTask({
+    task,
+    directory: process.cwd(),
+    agentEnvironment: {},
+    evidence: { observed: () => undefined, record: () => undefined },
+    agent: {
+      ...claudeAgent,
+      executable: "/bin/sh",
+      invocation: () => ["-c", 'printf "%s\\n" "$1"', "agent", ended],
+    },
+  });
+}
+
+/** Each artifact a finished run uploaded, in the order it was sent. */
+function uploadedArtifacts(calls) {
+  const route = "/v1/artifacts/";
+  return calls
+    .filter(({ path }) => path.startsWith(route))
+    .map(({ path, init }) => ({
+      path: path.slice(route.length),
+      bytes: init.body.byteLength,
+      text: init.body.toString("utf8"),
+    }));
+}
+
+/** The summary a finished run kept as an output, or nothing where it kept none. */
+function keptSummary(calls) {
+  return uploadedArtifacts(calls).find(
+    ({ path }) => path === ".chuggy/outputs/summary.md",
+  );
+}
+
+/**
+ * Catches a summary that reaches the plane only as the report's one line, which
+ * is how a list of findings arrives as a paragraph.
+ */
+test("an agent's run keeps its summary as written beside its result", async () => {
+  const summary = "Two findings:\n\n- `a.mjs` drops the lease\n- no retry\n";
+  const { calls, request } = planeCalls();
+
+  await published(calls, request, (text) => text, await agentRun(summary));
+
+  const uploaded = uploadedArtifacts(calls);
+  const sized = ({ path, bytes }) => ({ path, bytes });
+  assert.deepEqual(
+    uploaded.map(({ path }) => path),
+    [".chuggy/agent-result.json", ".chuggy/outputs/summary.md"],
+  );
+  assert.equal(uploaded[1].text, summary);
+  assert.deepEqual(
+    JSON.parse(reportedBody(calls)).diagnostics.map(sized),
+    uploaded.map(sized),
+  );
+});
+
+/** Catches a summary kept for a pass alone, when a failed review's findings are what its reader came for. */
+test("a failing agent's summary is kept as a passing one's is", async () => {
+  const summary = "Fails:\n\n1. the lease is dropped\n";
+  const { calls, request } = planeCalls();
+
+  await published(
+    calls,
+    request,
+    (text) => text,
+    await agentRun(summary, "Fail"),
+  );
+
+  assert.equal(keptSummary(calls)?.text, summary);
+  assert.equal(JSON.parse(reportedBody(calls)).verdict, "Fail");
+});
+
+test("an agent's summary is kept scrubbed, a credential spanning its lines included", async () => {
+  const spanning = "-----BEGIN KEY-----\nabcdefghijklmnop\n-----END KEY-----";
+  const { calls, request } = planeCalls();
+
+  await published(
+    calls,
+    request,
+    credentialScrub([secret, spanning]),
+    await agentRun(`saw ${secret}\n\nand the key\n${spanning}\n`),
+  );
+
+  assert.equal(
+    keptSummary(calls)?.text,
+    "saw [redacted credential]\n\nand the key\n[redacted credential]\n",
+  );
+});
+
+/**
+ * A summary longer than one argument to the stand-in holds, so it is put on a
+ * run the stand-in left. Catches a cut made before the scrub, which the
+ * redaction then lengthens past the bound, and one that splits the astral
+ * character across it.
+ */
+test("an agent's summary past what an output holds is kept cut on a code point", async () => {
+  const short = "0123456789abcdef";
+  const redacted = "[redacted credential]";
+  const filler = "\u20ac".repeat(workerSummaryCharsMax - redacted.length - 1);
+  const run = await agentRun("a summary the stand-in can carry");
+  const { calls, request } = planeCalls();
+
+  await published(calls, request, credentialScrub([short]), {
+    ...run,
+    result: { ...run.result, summary: `${short}${filler}\u{1F600}\u{1F600}` },
+  });
+
+  const kept = keptSummary(calls);
+  assert.equal(kept?.text, `${redacted}${filler}`);
+  assert.ok(kept.bytes <= runConfigurationBytesMax, String(kept.bytes));
+});
+
+test("an agent's summary with nothing printable is kept nowhere", async () => {
+  const { calls, request } = planeCalls();
+
+  await published(
+    calls,
+    request,
+    (text) => text,
+    await agentRun("\u0007\u009b \n\t"),
+  );
+
+  assert.deepEqual(
+    uploadedArtifacts(calls).map(({ path }) => path),
+    [".chuggy/agent-result.json"],
+  );
+  assert.equal(JSON.parse(reportedBody(calls)).diagnostics.length, 1);
+});
+
+/** Catches a report that lists a summary the plane never took. */
+test("a summary the plane refuses fails the run before any report", async () => {
+  const calls = [];
+  const request = async (_task, _bearer, path, init) => {
+    calls.push({ path, init });
+    if (path.endsWith("summary.md")) throw new Error("plane refused");
+    return { ok: true, status: 204 };
+  };
+
+  await assert.rejects(
+    published(calls, request, (text) => text, await agentRun("done")),
+    /plane refused/u,
+  );
+
+  assert.ok(!calls.some(({ path }) => path === "/v1/report"));
+});
+
 test("a task carrying commands runs them and never reaches for an agent", async () => {
   const context = {
     directory: process.cwd(),
@@ -1102,6 +1259,19 @@ test("a check stage's captured output is the run's own diagnostic artifact", asy
       .report,
     ".chug/tasks/ci.sh exited 2",
   );
+});
+
+test("a check stage keeps no summary beside its captured output", async () => {
+  const { calls, request } = planeCalls();
+  const run = await runWorkerTask({ directory: process.cwd() }, ["exit 0"]);
+
+  await published(calls, request, (text) => text, run);
+
+  assert.deepEqual(
+    uploadedArtifacts(calls).map(({ path }) => path),
+    [".chuggy/check-output.json"],
+  );
+  assert.equal(JSON.parse(reportedBody(calls)).diagnostics.length, 1);
 });
 
 test("the failure text a crashed run uploads is scrubbed", async () => {
