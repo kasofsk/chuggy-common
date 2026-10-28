@@ -1190,8 +1190,8 @@ test("a thread originates through the API under its own session bearer, and answ
           configurationRevision: "r1",
           configurationDigest: "d1",
           expectedProjectSequence: 12,
-          authoring: { dependencies: [] },
-          brief: { title: "the footer" },
+          authoring: { dependencies: [], program: [] },
+          brief: { title: "the footer", intent: "the footer", links: [] },
         });
     },
     result("success", { result: "filed ticket 14" }),
