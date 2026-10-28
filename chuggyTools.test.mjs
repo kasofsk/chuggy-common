@@ -2531,10 +2531,7 @@ const briefClaims = [
 /** What an open brief's parameter says that a published brief's shape says instead. */
 const openBriefClaims = [
   /\{title\?, intent, links, images\?, checks\?/,
-  new RegExp(
-    `each one line of 1 to ${String(briefLineCharsMax)} characters`,
-    "u",
-  ),
+  new RegExp(`a check being 1 to ${String(briefLineCharsMax)} characters`, "u"),
 ];
 
 test("every tool that takes a brief says on its parameter what the server does with one", () => {
@@ -2546,6 +2543,26 @@ test("every tool that takes a brief says on its parameter what the server does w
     if (Object.keys(fields).length === 0)
       for (const claim of openBriefClaims) assert.match(says, claim, name);
   }
+});
+
+test("an open brief says each field as the published brief says it", () => {
+  const taking = briefTakers();
+  const open = taking.filter(({ fields }) => Object.keys(fields).length === 0);
+  const published = taking.filter(
+    ({ fields }) => Object.keys(fields).length > 0,
+  );
+
+  assert.notEqual(open.length, 0, "no tool takes an open brief");
+  assert.notEqual(published.length, 0, "no tool publishes a brief's shape");
+  for (const { fields } of published)
+    for (const [field, sentence] of Object.entries(fields))
+      for (const { name, says } of open)
+        assert.ok(
+          says.includes(
+            `\`${field}\` ${field.endsWith("s") ? "are" : "is"} ${sentence.charAt(0).toLowerCase()}${sentence.slice(1, -1)}`,
+          ),
+          `${name} says ${field} otherwise`,
+        );
 });
 
 /** What a release or an update of a draft running less than its plan is answered, and what lets it through. */
