@@ -1149,8 +1149,8 @@ const everyToolArgument = {
   configurationRevision: "r-1",
   configurationDigest: "d-1",
   expectedProjectSequence: 1,
-  authoring: { dependencies: [7] },
-  brief: {},
+  authoring: { dependencies: [7], program: [] },
+  brief: { intent: "i", links: [] },
 };
 
 /** The routes of the tools' table one path matches. */

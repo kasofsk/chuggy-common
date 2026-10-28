@@ -117,7 +117,8 @@
  * `zod` IS A PEER DEPENDENCY OF THE AGENT SDK, NOT ONE OF ITS DEPENDENCIES, so
  * the shapes are functions of a `z` the caller resolves rather than of an import
  * here, and the image's build probes are what prove the peer is installed and is
- * the one the contract parses with.
+ * the one the contract parses with. That one instance is also why a draft
+ * write's `brief`, `authoring` and `selection` are the contract's own schemas.
  */
 
 import { Buffer } from "node:buffer";
@@ -132,7 +133,9 @@ import {
   agenticRefusalsAnsweredMax,
   allChuggyTools,
   allDependentRelations,
+  authoringSchema,
   briefLineCharsMax,
+  briefSchema,
   builtInToolCapabilities,
   chuggyDocsIndex,
   chuggyToolCapabilities,
@@ -148,6 +151,7 @@ import {
   chuggyToolServerName,
   chuggyToolTicketLandingsResponseBytesMax,
   chuggyToolTimeoutMs,
+  configurationSelectionSchema,
   dependentRelationsAdmitted,
   imageMediaTypes,
   nativeHttpMediaType,
@@ -177,9 +181,70 @@ const chuggySelectionDescription = `\`selection\` is for a configuration that is
  */
 const chuggyBriefDescription = `\`brief\` is {title?, intent, links, images?, checks?, repository?, branch?, finalization?}: \`title\` is optional in the contract, so always give one — one short line naming the work, which the console lists tickets by; \`intent\` is what the ticket is for, in your own words — one text bounded only as a whole, with no bound on a line of it or on how many lines it has; \`repository\` is the repository the work happens in, by the clone URL list_repositories answers, which list_configurations answers as an imported configuration's \`repository\`, and a draft carrying none is refused when it is released; \`images\` are this project's images the work is handed, each by the identity fetch_image takes; \`checks\` are command lines added to the first Check stage the configuration runs as commands, each one line of 1 to ${String(briefLineCharsMax)} characters with no tab, line break or other control character in it, and initialize_draft answers that stage as \`commandedCheckStage\`, its program stage key, counted from one, and in words as \`commandedCheckStageNote\` (the same stage and, for a catalog, its plan, or that none does and which plans would), and a draft carrying them whose program leaves out that stage, or for a catalog the evaluator in it that runs commands, is refused when it is released whoever releases it (ProgramSkipsBriefChecks), and where it answers none a draft carrying checks is refused when it is released (BriefChecksUncommanded), and each runs under sh -eu with the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown, so a check that runs only what changed reads it as \${CHUG_CHANGE_BASE-} and runs everything where that is empty; \`branch\` is the refs/heads/ branch the work happens on, which the repository need not hold yet; \`finalization\` is how the work lands, and a brief naming none takes, on a version 2 catalog, the landing of the finalizer its selection lands with where that finalizer names one, and otherwise its repository's landing default, which for a newly bound repository is a pull request; the write's answer carries \`landing\`, the mode and target it stored, and its \`source\`: Brief, Finalizer, Repository, or Default for a brief naming no repository; a landing by PullRequest or PullRequestMerge opens its pull request from \`branch\` into the finalization's \`target\`, or into the repository's default branch where none is named, so whenever the landing is a pull request \`branch\` is a branch of its own, never the \`target\`, and where no target is named never the default branch; a \`branch\` that is the default branch with no target named is accepted when filed and then held by the finalizer (ProposalBaseIsHead). A 400 names the rule the brief broke, and for a check its position in \`checks\`, counted from zero.`;
 
-/** What a draft's brief is first told: the least a ticket can be filed with, ahead of everything a brief may carry. */
-const chuggyDraftBriefDescription = `The minimum brief is {title, intent, links: [], repository: <clone URL from list_repositories>, branch: "refs/heads/<a new branch of your own>"}.
-${chuggyBriefDescription}`;
+/**
+ * What a draft's brief is told beside the fields it publishes: the least a
+ * ticket can be filed with, what a release refuses for what the brief holds,
+ * and the landing and branch rules, none of which one field can carry.
+ */
+const chuggyDraftBriefDescription = `The minimum brief is {title, intent, links: [], repository: <clone URL from list_repositories>, branch: "refs/heads/<a new branch of your own>"}. A draft carrying no \`repository\` is refused when it is released. \`checks\` join the stage initialize_draft answers as \`commandedCheckStage\`, its program stage key, counted from one, and in words as \`commandedCheckStageNote\` (the same stage and, for a catalog, its plan, or that none does and which plans would): a draft carrying them whose program leaves out that stage, or for a catalog the evaluator in it that runs commands, is refused when it is released whoever releases it (ProgramSkipsBriefChecks), and where it answers none a draft carrying checks is refused when it is released (BriefChecksUncommanded). A brief naming no \`finalization\` takes, on a version 2 catalog, the landing of the finalizer its selection lands with where that finalizer names one, and otherwise its repository's landing default, which for a newly bound repository is a pull request; the write's answer carries \`landing\`, the mode and target it stored, and its \`source\`: Brief, Finalizer, Repository, or Default for a brief naming no repository. A landing by PullRequest or PullRequestMerge opens its pull request from \`branch\` into the finalization's \`target\`, or into the repository's default branch where none is named, so whenever the landing is a pull request \`branch\` is a branch of its own, never the \`target\`, and where no target is named never the default branch; a \`branch\` that is the default branch with no target named is accepted when filed and then held by the finalizer (ProposalBaseIsHead). A 400 names the rule the brief broke, and for a check its position in \`checks\`, counted from zero.`;
+
+/**
+ * A contract schema with a description on each of its fields. It is the
+ * contract's own object extended, so its bounds and refinements are the
+ * contract's and nothing here restates one.
+ */
+function described(schema, descriptions) {
+  return schema.safeExtend(
+    Object.fromEntries(
+      Object.keys(schema.shape).map((field) => [
+        field,
+        schema.shape[field].describe(descriptions[field]),
+      ]),
+    ),
+  );
+}
+
+/** The brief a draft write takes, as the contract shapes it. */
+const draftBrief = described(briefSchema, {
+  title:
+    "One short line naming the work, which the console lists tickets by. Optional in the contract, so always give one.",
+  intent:
+    "What the ticket is for, in your own words: one text bounded only as a whole, with no bound on a line of it or on how many lines it has.",
+  links: "What to read first, each an https:// URL; [] where there is nothing.",
+  checks:
+    "Command lines added to the first Check stage the configuration runs as commands, each one line with no tab, line break or other control character in it. Each runs under sh -eu with the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown, so a check that runs only what changed reads it as ${CHUG_CHANGE_BASE-} and runs everything where that is empty.",
+  images:
+    "This project's images the work is handed, each by the identity fetch_image takes.",
+  repository:
+    "The repository the work happens in, by the clone URL list_repositories answers, which list_configurations answers as an imported configuration's `repository`.",
+  branch:
+    "The refs/heads/ branch the work happens on, which the repository need not hold yet.",
+  finalization:
+    "How the work lands: its `mode`, and for any mode but None the `target` branch, left out for the branch the work happened on under Push and the repository's default branch under a pull request.",
+});
+
+/** The authoring a draft write takes, as the contract shapes it. */
+const draftAuthoring = described(authoringSchema, {
+  dependencies:
+    "The tickets this one waits on, by number, chosen from list_tickets, each once.",
+  program:
+    "The stages the ticket is evaluated by, in order: initialize_draft's `defaults.program` unless you mean otherwise.",
+});
+
+/** The selection a draft write takes, as the contract shapes it. */
+const draftSelection = described(configurationSelectionSchema, {
+  work: "The name of the catalog's `workloads` entry the ticket works under.",
+  evaluation:
+    "The name of the catalog's `plans` entry the ticket is evaluated by.",
+  finalization:
+    "The name of the catalog's `finalizers` entry the ticket lands with.",
+});
+
+/** What a draft write's authoring is, beside what its fields carry. */
+const chuggyDraftAuthoringDescription = `How the machine runs the ticket: pass initialize_draft's \`defaults\` unchanged unless you mean otherwise.`;
+
+/** What a draft write's selection is, beside the names its fields carry. */
+const chuggyDraftSelectionDescription = `For a configuration that is a catalog, one whose read_configuration \`canonical\` has \`version\` 2: the entries the ticket runs on in place of the catalog's \`defaults\`, and a field left out is that default. A draft on any other configuration carries none.`;
 
 /** What a draft's authoring carries, which initialize_draft answers the defaults of. */
 const chuggyAuthoringDescription = `\`authoring\` is {program, dependencies}: pass initialize_draft's \`defaults\` unchanged unless you mean otherwise, and \`dependencies\` are ticket numbers chosen from list_tickets.`;
@@ -1474,14 +1539,14 @@ export const chuggyProjectTools = [
       configurationRevision: identity(z).describe(
         "The configuration revision the revised draft is authored against, as read_draft or list_configurations answers it.",
       ),
-      authoring: anyObject(z).describe(chuggyAuthoringDescription),
-      brief: anyObject(z).describe(
+      authoring: draftAuthoring.describe(chuggyDraftAuthoringDescription),
+      brief: draftBrief.describe(
         `${chuggyDraftBriefDescription} It is replaced whole, so send back the \`repository\` and \`images\` read_draft answered or the revision clears them.`,
       ),
-      selection: anyObject(z)
+      selection: draftSelection
         .optional()
         .describe(
-          `${chuggySelectionDescription} It is replaced whole, so send back the \`selection\` read_draft answered or the revision clears it.`,
+          `${chuggyDraftSelectionDescription} It is replaced whole, so send back the \`selection\` read_draft answered or the revision clears it.`,
         ),
     }),
     call: (context, args) =>
@@ -1553,9 +1618,11 @@ export const chuggyProjectTools = [
       expectedProjectSequence: count(z).describe(
         chuggyExpectedProjectSequenceDescription,
       ),
-      authoring: anyObject(z).describe(chuggyAuthoringDescription),
-      brief: anyObject(z).describe(chuggyDraftBriefDescription),
-      selection: anyObject(z).optional().describe(chuggySelectionDescription),
+      authoring: draftAuthoring.describe(chuggyDraftAuthoringDescription),
+      brief: draftBrief.describe(chuggyDraftBriefDescription),
+      selection: draftSelection
+        .optional()
+        .describe(chuggyDraftSelectionDescription),
     }),
     call: (context, args) =>
       write(context, projectPath(context, "drafts"), "POST", {
