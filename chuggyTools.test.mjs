@@ -336,6 +336,16 @@ test("the refusal names what this caller can lower, and says so where there is n
       /list_executions is already asking for one; move past it with cursor\.$/,
     ],
     [
+      "list_tickets",
+      { limit: 1 },
+      /list_tickets is already asking for one; move past it with after\.$/,
+    ],
+    [
+      "list_tickets",
+      { order: "RecentActivity", limit: 1 },
+      /list_tickets is already asking for one, so this one cannot be answered\.$/,
+    ],
+    [
       "read_refusals",
       {},
       /read_refusals is already asking for one, so this one cannot be answered\.$/,

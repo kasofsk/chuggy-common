@@ -346,12 +346,18 @@ function answerTooLarge(remedy) {
  * How the refusal ends once nothing smaller is left to ask for: the tool has no
  * page bound, or its page of a single item is still too large. It says what
  * the caller can do, which is move past that item where the tool takes a
- * cursor and nothing where it takes none.
+ * cursor and nothing where it takes none. A tool whose cursor depends on the
+ * call says which through its `cursorOf(given)`, `undefined` where none moves
+ * past one item.
  */
-function smallestPageRemedy(name, fields) {
+function smallestPageRemedy(definition, fields, given) {
+  const { name } = definition;
   if (!(chuggyToolPageArgument in fields))
     return `${name} takes no ${chuggyToolPageArgument}, so this one cannot be answered`;
-  const cursor = chuggyToolCursorArguments.find((one) => one in fields);
+  const cursor =
+    definition.cursorOf === undefined
+      ? chuggyToolCursorArguments.find((one) => one in fields)
+      : definition.cursorOf(given);
   return cursor === undefined
     ? `${name} is already asking for one, so this one cannot be answered`
     : `${name} is already asking for one; move past it with ${cursor}`;
@@ -854,6 +860,8 @@ export const chuggyProjectTools = [
       order: z.enum(["RecentActivity"]).optional(),
       cursor: identity(z).optional(),
     }),
+    // An activity cursor is the server's own, so none names a ticket to move past.
+    cursorOf: ({ order }) => (order === undefined ? "after" : undefined),
     call: (context, { after, limit: pageLimit, phase, order, cursor }) =>
       read(
         context,
@@ -1397,7 +1405,7 @@ export function chuggyToolHandler(definition, z) {
     }
     return storable(answer)
       ? answer
-      : answerTooLarge(smallestPageRemedy(name, fields));
+      : answerTooLarge(smallestPageRemedy(definition, fields, given));
   };
 }
 
