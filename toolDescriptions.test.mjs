@@ -1,8 +1,9 @@
 /**
  * Every chuggy tool as an MCP client lists it: a description that opens with
- * one short sentence, and a description on every parameter. Both servers are
- * listed through the MCP SDK's own client, so what is held is the JSON schema
- * the SDK publishes and not the zod shape it is converted from.
+ * one short sentence, and a description on every parameter and on every field
+ * of one that is an object. Both servers are listed through the MCP SDK's own
+ * client, so what is held is the JSON schema the SDK publishes and not the zod
+ * shape it is converted from.
  */
 
 import assert from "node:assert/strict";
@@ -11,7 +12,10 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { allChuggyTools } from "@chuggy/worker-contract/sessionTools";
+import {
+  allChuggyTools,
+  briefIntentCharsMax,
+} from "@chuggy/worker-contract/sessionTools";
 import { z } from "zod";
 
 import {
@@ -26,15 +30,33 @@ import { localToolContext, localToolServer } from "./localTools.mjs";
 /** The longest a description's opening sentence may be, which is what an agent reads a tool list by. */
 const toolDescriptionOpeningCharsMax = 160;
 
-/** The tools a connected server lists, as a client is answered them. */
-async function listed(server) {
+/** A client connected to a server. */
+async function connected(server) {
   const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
   await server.connect(serverSide);
   const client = new Client({ name: "toolDescriptions", version: "1" });
   await client.connect(clientSide);
+  return client;
+}
+
+/** The tools a connected server lists, as a client is answered them. */
+async function listed(server) {
+  const client = await connected(server);
   const { tools } = await client.listTools();
   await client.close();
   return tools;
+}
+
+/** A request that records what it was asked and answers every one alike. */
+function recorded() {
+  const calls = [];
+  return {
+    calls,
+    request: async (...asked) => {
+      calls.push(asked);
+      return { status: 201, text: async () => "{}" };
+    },
+  };
 }
 
 /**
@@ -42,11 +64,12 @@ async function listed(server) {
  * `createSdkMcpServer` registers each of its `tool`s on an `McpServer`, and
  * this does the same, since the agent SDK is not this repository's to carry.
  */
-function podServer() {
+function podServer(request) {
   return chuggyToolServer(
     chuggyToolContext({ tenant: "t", project: "p" }, "bearer", {
       capabilities: Object.keys(sessionCapabilityTools),
       staging: leadDecisionStaging(),
+      ...(request === undefined ? {} : { request }),
     }),
     {
       z,
@@ -66,7 +89,7 @@ function podServer() {
   );
 }
 
-function localServer() {
+function localServer(request) {
   return localToolServer(
     localToolContext({
       site: "https://chuggy.example",
@@ -74,6 +97,7 @@ function localServer() {
       project: "p",
       version: "1",
       signIn: { token: async () => "token", invalidate() {} },
+      ...(request === undefined ? {} : { request }),
     }),
     { McpServer, z },
   );
@@ -90,9 +114,13 @@ function toolDescriptionFaults({ name, description, inputSchema }) {
     );
   for (const [parameter, schema] of Object.entries(
     inputSchema.properties ?? {},
-  ))
+  )) {
     if (typeof schema.description !== "string" || schema.description === "")
       faults.push(`${name}.${parameter} has no description`);
+    for (const [field, held] of Object.entries(schema.properties ?? {}))
+      if (typeof held.description !== "string" || held.description === "")
+        faults.push(`${name}.${parameter}.${field} has no description`);
+  }
   return faults;
 }
 
@@ -123,10 +151,20 @@ test("a tool listed with an undescribed parameter or a long opening is found wan
     () => ({ content: [] }),
   );
   server.registerTool("none", { description: "" }, () => ({ content: [] }));
+  server.registerTool(
+    "nested",
+    {
+      description: "Short.",
+      inputSchema: {
+        brief: z.object({ intent: z.string() }).describe("A brief."),
+      },
+    },
+    () => ({ content: [] }),
+  );
 
   const faults = (await listed(server)).flatMap(toolDescriptionFaults);
 
-  assert.equal(faults.length, 3);
+  assert.equal(faults.length, 4);
   assert.match(faults[0], /^undescribed\.ticket has no description$/u);
   assert.ok(
     faults[1].startsWith(
@@ -134,4 +172,88 @@ test("a tool listed with an undescribed parameter or a long opening is found wan
     ),
   );
   assert.match(faults[2], /^none opens with no sentence$/u);
+  assert.match(faults[3], /^nested\.brief\.intent has no description$/u);
 });
+
+/** The draft writes whose `brief`, `authoring` and `selection` are the contract's shapes. */
+const draftWrites = ["create_draft", "revise_draft"];
+
+/** One listed tool's published input schema. */
+function published(tools, name) {
+  const tool = tools.find((held) => held.name === name);
+  assert.ok(tool !== undefined, `${name} is not listed`);
+  return tool.inputSchema;
+}
+
+test("create_draft publishes the contract's brief and authoring, each field described", async () => {
+  const { brief, authoring } = published(
+    await listed(podServer()),
+    "create_draft",
+  ).properties;
+
+  assert.ok(brief.required.includes("intent"));
+  for (const field of [
+    "title",
+    "links",
+    "repository",
+    "branch",
+    "finalization",
+  ])
+    assert.notEqual(brief.properties[field]?.description ?? "", "", field);
+  assert.equal(brief.properties.intent.maxLength, briefIntentCharsMax);
+  assert.equal(brief.additionalProperties, false);
+  for (const field of ["program", "dependencies"])
+    assert.notEqual(authoring.properties[field]?.description ?? "", "", field);
+});
+
+/**
+ * The pod's server and the local server each hand the tools their own `z`,
+ * and a draft write's shapes are the contract's, so the two publish one schema
+ * only where the instances are one.
+ */
+test("the pod's server and the local server publish one schema for each draft write", async () => {
+  const [pod, local] = await Promise.all([
+    listed(podServer()),
+    listed(localServer()),
+  ]);
+
+  for (const name of draftWrites)
+    assert.deepEqual(published(pod, name), published(local, name), name);
+});
+
+/** The server would refuse the same brief; the tool refuses it first, and asks nothing. */
+for (const [server, built] of [
+  ["the pod's server", podServer],
+  ["the local server", localServer],
+])
+  test(`${server} refuses a create_draft whose intent is longer than the contract's bound before any request`, async () => {
+    const { calls, request } = recorded();
+    const client = await connected(built(request));
+    const origination = {
+      configurationRevision: "r1",
+      configurationDigest: "d1",
+      expectedProjectSequence: 1,
+      authoring: { dependencies: [], program: [] },
+    };
+
+    const refused = await client.callTool({
+      name: "create_draft",
+      arguments: {
+        ...origination,
+        brief: { intent: "i".repeat(briefIntentCharsMax + 1), links: [] },
+      },
+    });
+    assert.equal(refused.isError, true);
+    assert.equal(calls.length, 0);
+
+    const asked = await client.callTool({
+      name: "create_draft",
+      arguments: {
+        ...origination,
+        brief: { intent: "i".repeat(briefIntentCharsMax), links: [] },
+      },
+    });
+    await client.close();
+    assert.equal(asked.isError, undefined);
+    assert.equal(calls.length, 1);
+  });
