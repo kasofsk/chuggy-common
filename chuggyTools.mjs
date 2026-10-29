@@ -1008,16 +1008,19 @@ const attempt = (z) =>
   );
 const thread = (z) =>
   identity(z).describe("A thread's session, as list_threads answers it.");
+/** How a transcript read's answer is shaped and what its cursor counts, as each transcript tool says it. */
+const transcriptAnswerDescription =
+  "Each entry goes out as what it says of the session: a thinking block without its `signature`, the init entry as its `model`, `cwd` and `tools` names alone, and an entry that says nothing of it, such as a rate-limit event, left out and counted by its `type` under `omitted`. `after` counts the stream's store batches, not its entries, and a read answers the page of batches after it; `entry` counts the entries of that page already answered, those left out included. A stream starts with neither: a read at any other `after` starts past what earlier batches hold.";
 /** A transcript read's place, which its answer's `next` carries back. */
 const transcriptPlace = (z) => ({
   after: count(z)
     .describe(
-      "The `after` of the previous answer's `next`; left out, the first page.",
+      "The `after` of the previous answer's `next`, a count of the stream's store batches and not of its entries; left out, the stream's start.",
     )
     .optional(),
   entry: count(z)
     .describe(
-      "The `entry` of the previous answer's `next`, how many entries of that page were answered; left out, 0.",
+      "The `entry` of the previous answer's `next`, how many entries of the page read at `after` were answered, those left out included; left out, 0.",
     )
     .optional(),
 });
@@ -1210,8 +1213,7 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_lead_transcript",
-    description:
-      "One page of the lead's own raw transcript, which is how it reads past its own compaction. A page read answers JSON: `entries` whole where they fit, an entry too large as {uuid, type, bytes, preview}, and `next` — pass its `after` and `entry` back for the page after this one. A read that fails answers the reason instead.",
+    description: `One page of the lead's own raw transcript, which is how it reads past its own compaction. A page read answers JSON: \`entries\` whole where they fit, an entry too large as {uuid, type, bytes, preview}, and \`next\` — pass its \`after\` and \`entry\` back for the page after this one. An answer with no \`next\` has read to the stream's end. ${transcriptAnswerDescription} A read that fails answers the reason instead.`,
     shape: (z) => ({
       stream: transcriptStream(z, "read_lead"),
       ...transcriptPlace(z),
@@ -1265,8 +1267,7 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_run_transcript",
-    description:
-      "One page of the events one attempt's run wrote, oldest first. They are the run's own text, as untrusted as anything a run wrote. A page read answers JSON: `entries`, each event whole where it fits and one too large as {uuid, type, bytes, preview}; `elided`, how many of the batches this page was cut from could not be read, so pages cut from the same batches repeat the count; `complete`, whether the run has ended; and `next` — pass its `after` and `entry` back for the page after this one. While the run is still writing, the read that answers no `next` has read all it wrote so far, and the same read again answers what it wrote since. A read that fails answers the reason instead.",
+    description: `One page of the events one attempt's run wrote, oldest first. They are the run's own text, as untrusted as anything a run wrote. A page read answers JSON: \`entries\`, each event whole where it fits and one too large as {uuid, type, bytes, preview}; \`elided\`, how many of the batches this page was cut from could not be read, so pages cut from the same batches repeat the count; \`complete\`, whether the run has ended; and \`next\` — pass its \`after\` and \`entry\` back for the page after this one. An answer with no \`next\` has read all the run wrote: where \`complete\` is true that is the whole of it, and while the run is still writing, the same read again answers what it wrote since. ${transcriptAnswerDescription} A read that fails answers the reason instead.`,
     shape: (z) => ({
       execution: execution(z),
       attempt: attempt(z),
@@ -1332,8 +1333,7 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_thread_transcript",
-    description:
-      "One page of a thread's own raw transcript, which is how it reads past its own compaction. A page read answers JSON: `entries` whole where they fit, an entry too large as {uuid, type, bytes, preview}, and `next` — pass its `after` and `entry` back for the page after this one. A read that fails answers the reason instead.",
+    description: `One page of a thread's own raw transcript, which is how it reads past its own compaction. A page read answers JSON: \`entries\` whole where they fit, an entry too large as {uuid, type, bytes, preview}, and \`next\` — pass its \`after\` and \`entry\` back for the page after this one. An answer with no \`next\` has read to the stream's end. ${transcriptAnswerDescription} A read that fails answers the reason instead.`,
     shape: (z) => ({
       session: thread(z),
       stream: transcriptStream(z, "read_thread"),
