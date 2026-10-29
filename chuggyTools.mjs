@@ -1010,7 +1010,7 @@ const thread = (z) =>
   identity(z).describe("A thread's session, as list_threads answers it.");
 /** How a transcript read's answer is shaped and what its cursor counts, as each transcript tool says it. */
 const transcriptAnswerDescription =
-  "Each entry goes out as what it says of the session: a thinking block without its `signature`, the init entry as its `model`, `cwd` and `tools` names alone, and an entry that says nothing of it, such as a rate-limit event, left out and counted by its `type` under `omitted`. `after` counts the stream's store batches, not its entries, and a read answers the page of batches after it; `entry` counts the entries of that page already answered, those left out included. A stream starts with neither: a read at any other `after` starts past what earlier batches hold.";
+  "Each entry goes out as what it says of the session: a thinking block without its `signature`, the init entry reduced to what identifies it and its `model`, `cwd` and `tools` names, and an entry that says nothing of it, such as a rate-limit event, left out and counted by its `type` under `omitted`. `after` counts the stream's store batches, not its entries, and a read answers the page of batches after it; `entry` counts the entries of that page already answered, those left out included. A stream starts with neither: a read at any other `after` starts past what earlier batches hold.";
 /** A transcript read's place, which its answer's `next` carries back. */
 const transcriptPlace = (z) => ({
   after: count(z)

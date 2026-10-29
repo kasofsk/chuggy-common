@@ -645,9 +645,9 @@ test("a run event of the largest size, too heavy for one answer as the transcrip
 });
 
 /**
- * The events of a run's first batch as the transcript tools were found
- * answering them: the init event with the runtime's lists beside what it says
- * of the run, thinking under its signature, and rate-limit events between.
+ * The events of a run's first batch: the init event with the runtime's lists
+ * beside what it says of the run, thinking under its signature, and rate-limit
+ * events between.
  */
 const transcriptShapedEvents = [
   {
@@ -755,7 +755,7 @@ test("the transcript reads say what their cursor counts, where a stream starts a
     /`entry` counts the entries of that page already answered, those left out included/,
     /A stream starts with neither: a read at any other `after` starts past what earlier batches hold/,
     /without its `signature`/,
-    /the init entry as its `model`, `cwd` and `tools` names alone/,
+    /the init entry reduced to what identifies it and its `model`, `cwd` and `tools` names/,
     /left out and counted by its `type` under `omitted`/,
   ];
   const ends = {

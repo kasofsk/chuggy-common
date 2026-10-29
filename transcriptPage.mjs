@@ -125,8 +125,9 @@ function transcriptEntryPreview(entry, charsMax) {
 /**
  * The entries one answer takes from `from` on, each shaped, while `fits` holds
  * of what is taken under the cursor that would name it; and, where the first
- * entry it would give fits nowhere, that entry to preview. An entry left out
- * is always taken first, so every answer moves the cursor.
+ * entry it reads fits nowhere, that entry to preview. An entry left out is
+ * always taken first, so every answer moves the cursor, and an entry after one
+ * is never previewed: the next answer reads it first.
  */
 function transcriptPageAnswerTaken(entries, from, after, fits) {
   let given = [];
@@ -149,7 +150,7 @@ function transcriptPageAnswerTaken(entries, from, after, fits) {
       consumed = index + 1;
       continue;
     }
-    if (given.length === 0 && shaped !== undefined) previewOf = shaped;
+    if (consumed === from) previewOf = shaped;
     stop = previewOf === undefined ? index : index + 1;
     break;
   }

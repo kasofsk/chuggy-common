@@ -337,7 +337,7 @@ const runThinking = (uuid, bytes) => ({
   },
 });
 
-/** A run's first batch as the ticket's page read it: its init, thinking under signatures, and rate-limit events between them. */
+/** A run's first batch: its init, thinking under signatures, and rate-limit events between them. */
 const runEntries = [
   runInit,
   runRateLimit("l-1"),
@@ -439,4 +439,40 @@ test("a rate-limit event is left out and counted, and the cursor still counts th
 
   assert.deepEqual(read, ["i-1", "t-1", "t-2", "t-3"]);
   assert.ok(pages > 1, "the page was not read across answers");
+});
+
+test("an entry after a left-out one that fits only without `omitted` beside it is answered whole by the next answer", () => {
+  const edit = {
+    type: "assistant",
+    uuid: "e-1",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "e".repeat(400) }],
+    },
+  };
+  const entries = [runRateLimit("l-1"), edit];
+  const alone = Buffer.byteLength(
+    transcriptPageAnswer(pageOf([edit]), { after: 0, entry: 0 }, () => true) +
+      ',"next":{"after":0,"entry":2}',
+  );
+  const tight = (text) => Buffer.byteLength(text) <= alone;
+  const answers = [];
+  let cursor = { after: 0, entry: 0 };
+  while (answers.length < entries.length) {
+    const text = transcriptPageAnswer(pageOf(entries), cursor, tight);
+    assert.ok(
+      tight(text),
+      `answer ${String(answers.length + 1)} is over the bound`,
+    );
+    const answer = JSON.parse(text);
+    answers.push(answer);
+    if (answer.next === undefined) break;
+    cursor = answer.next;
+  }
+
+  assert.deepEqual(answers[0].entries, []);
+  assert.deepEqual(answers[0].omitted, { rate_limit_event: 1 });
+  assert.deepEqual(answers[0].next, { after: 0, entry: 1 });
+  assert.deepEqual(answers.at(-1).entries, [edit]);
+  assert.equal(answers.at(-1).next, undefined);
 });
