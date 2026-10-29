@@ -12,12 +12,14 @@
  * THE CURSOR IS THE TWO ARGUMENTS THE CALLER PASSES BACK. `after` is the
  * route's own batch cursor and `entry` is how many of that page's entries this
  * answer has already given, so resuming asks the route the same question and
- * skips what was read. Every answer either gives an entry, moves `after` on, or
- * names no next at all, which is what makes a walk terminate.
+ * skips what was read. Every answer gives an entry, takes a left-out one,
+ * moves `after` on, or names no next at all, which is what makes a walk
+ * terminate.
  *
  * WHAT GOES OUT IS A COMPOSITION ALREADY WEIGHED. Entries are taken while the
  * answer that carries them fits, each measured against the cursor that would
- * name it; where the page is exhausted the answer is composed instead with the
+ * name it, except a left-out entry first at the cursor, which is taken whether
+ * or not it fits; where the page is exhausted the answer is composed instead with the
  * wider cursor that names the next batch, and where that does not fit the
  * narrower one goes out — the same cursor the next call resumes at either way.
  * The only weight this cannot answer for is the route's own fields, which go
