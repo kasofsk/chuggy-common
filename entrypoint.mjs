@@ -610,6 +610,7 @@ async function workerMinted({
   keepSecret,
   request,
   write,
+  directory,
   repository,
 }) {
   const minted = await planeCredential({
@@ -619,6 +620,7 @@ async function workerMinted({
     ...(repository === undefined ? {} : { repository }),
     ...(request === undefined ? {} : { request }),
     ...(write === undefined ? {} : { write }),
+    ...(directory === undefined ? {} : { directory }),
   });
   if (minted?.unreached !== undefined)
     throw new Error(planeCredentialUnreachedText(minted.unreached));
@@ -681,8 +683,9 @@ export async function workerCredential(asked) {
  * the credential this pod resolved, that credential's `refresh` where the
  * plane minted it, and the commit the change started from where the bundle
  * names one the clone holds. `seams` names the plane, the clone, the file the
- * password is written to and the directory cloned into, this module's own and
- * the image's `CHUG_WORKER_WORKSPACE` where it names none. `images` are the
+ * password is written to, the directory it is written in and the directory
+ * cloned into, this module's own, the contract's and the image's
+ * `CHUG_WORKER_WORKSPACE` where it names none. `images` are the
  * brief's images the bundle pins, where it pins any. A credential refused or a
  * clone failed fails the clone step.
  */
@@ -698,6 +701,7 @@ export async function workerWorkspace(
     request = workerRequest,
     clone = cloneRepository,
     write,
+    minted,
     workspace,
   } = seams;
   const input = await (
@@ -717,6 +721,7 @@ export async function workerWorkspace(
         keepSecret,
         request,
         ...(write === undefined ? {} : { write }),
+        ...(minted === undefined ? {} : { directory: minted }),
       });
       const cloned = await clone(
         credential.repository,
@@ -1185,9 +1190,9 @@ async function workerAttemptWorked(attempt, workspace, git) {
 /**
  * One attempt, run from its task onwards the same whichever carrier brought it.
  * `seams` are `workerWorkspace`'s, less the directory, which is the launch's;
- * `minted`, the directory checked, the held credentials written to and the
- * reads served under in place of the contract's; and `agent`, run in place of
- * the one the task names.
+ * `minted`, the directory checked, the git credential and the held credentials
+ * written to and the reads served under in place of the contract's; and
+ * `agent`, run in place of the one the task names.
  */
 export async function workerAttempt(launch, seams = {}) {
   const {
@@ -1235,7 +1240,7 @@ export async function workerAttempt(launch, seams = {}) {
       credentialFiles,
       bearer,
       ran.keepSecret,
-      { ...workspaceSeams, workspace: into },
+      { ...workspaceSeams, minted, workspace: into },
     );
     reads = await workerProjectReads({
       task,

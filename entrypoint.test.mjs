@@ -21,6 +21,7 @@ import { fileURLToPath, pathToFileURL, URL } from "node:url";
 import { TextDecoder } from "node:util";
 
 import {
+  mintedCredentialDirectory,
   sessionTaskVariable,
   workerCredentialFilesVariable,
   workerRepositoriesVariable,
@@ -2681,9 +2682,9 @@ test("a push the plane says its app does not reach fails with which way", async 
 /**
  * One attempt's workspace, over a plane answering the input bundle and then the
  * mint. `clone` stands in for git, the directory it would have made being all
- * the workspace carries of it.
+ * the workspace carries of it; `seams` are laid over the suite's own.
  */
-function workspaceFrom(mint) {
+function workspaceFrom(mint, seams = {}) {
   const asks = [];
   return workerWorkspace(
     { ...task, authority: { credentials: ["forge"] } },
@@ -2708,9 +2709,37 @@ function workspaceFrom(mint) {
       },
       clone: async () => "/workspace/repository",
       write: async () => undefined,
+      ...seams,
     },
   );
 }
+
+/**
+ * Catches a clone or a push writing the git credential anywhere but the minted
+ * directory its workspace is given, or the contract's where it is given none.
+ */
+test("a workspace's clone and push write the git credential in the minted directory it is given, and in the contract's where it is given none", async () => {
+  process.env[workerWorkspaceVariable] = "/workspace";
+  for (const [given, expected] of [
+    [{ minted: "/jobs/job-1/minted" }, "/jobs/job-1/minted"],
+    [{}, mintedCredentialDirectory],
+  ]) {
+    const written = [];
+    const workspace = await workspaceFrom(
+      { status: 200, ok: true, json: async () => minted },
+      { ...given, write: async (file) => written.push(file) },
+    );
+    const pushing = await workspace.refresh();
+
+    assert.equal(written.length, 2);
+    for (const file of written) assert.equal(dirname(file), expected);
+    assert.equal(
+      workspace.environment.CHUG_WORKER_GIT_CREDENTIAL_FILE,
+      written[0],
+    );
+    assert.equal(pushing.CHUG_WORKER_GIT_CREDENTIAL_FILE, written[1]);
+  }
+});
 
 test("a workspace the plane minted for carries the refresh its push takes", async () => {
   process.env[workerWorkspaceVariable] = "/workspace";
@@ -3459,6 +3488,42 @@ test("a work attempt's git, from its clone to its push, and the hooks its setup 
     );
     assert.notEqual(await remoteRefs(remote), "");
     assert.ok(plane.asked.some(({ route }) => route === "report"));
+  });
+});
+
+/**
+ * Catches an attempt that writes its git credential, at its clone or at its
+ * push, anywhere but the minted directory it was given, as a job its runner
+ * started on its host is given its own.
+ */
+test("a host job's clone and push write the git credential in the job's own minted directory", async (t) => {
+  await inCheckout(async ({ remote, directory, base }) => {
+    await git("git", ["push", remote, `${base}:refs/heads/main`], {
+      cwd: directory,
+    });
+    const root = await mkdtemp(join(tmpdir(), "chuggy-attempt-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const hooks = join(root, "hooks");
+    await mkdir(hooks);
+    const plane = await hookedPlane(remote, base, hooks);
+    t.after(() => plane.close());
+    const served = {
+      ...envelope,
+      callbackUrl: plane.url,
+      workspace: join(root, "workspace"),
+    };
+    const { task: answered } = await envelopeTask(served);
+    const mintedDirectory = join(root, "minted");
+    await mkdir(mintedDirectory);
+    const written = [];
+
+    await workerAttempt(envelopeLaunch(served, answered), {
+      minted: mintedDirectory,
+      write: async (file) => written.push(file),
+    });
+
+    assert.equal(written.length, 2);
+    for (const file of written) assert.equal(dirname(file), mintedDirectory);
   });
 });
 
