@@ -248,15 +248,10 @@ test("a workflow refusal is named by GitHub's line and then what it needs", () =
   );
 });
 
-test("a refusal only named for a workflow refusal is not told what one needs", () => {
-  const named = "refusing-to-allow-a-GitHub-App-to-create-or-update-workflow";
-  for (const stderr of [
-    `To https://github.com/acme/${named}.git\n ! [remote rejected] main -> main (protected branch hook declined)\n`,
-    `To ${remote}\n ! [remote rejected] main -> ${named} (pre-receive hook declined)\n`,
-  ])
-    assert.equal(
-      gitFailureLine(gitFailed(stderr)).includes(workflowNeeds),
-      false,
-      stderr,
-    );
+test("a hook quoting a workflow refusal is not told what one needs", () => {
+  const stderr = `remote: lint: refusing to allow a GitHub App to create or update workflow \`.github/workflows/ci.yml\` declined\nTo ${remote}\n ! [remote rejected] main -> main (pre-receive hook declined)\n`;
+  assert.equal(
+    gitFailureLine(gitFailed(stderr)).includes(workflowNeeds),
+    false,
+  );
 });
