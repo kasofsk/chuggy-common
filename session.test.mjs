@@ -255,6 +255,28 @@ test("a session's agent never moves a command to the background, whatever the si
   assert.equal(seen.options.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
 });
 
+/**
+ * Catches a session's agent killed at a Bash timeout shorter than a
+ * repository's checks, including where the site's own environment sets one.
+ */
+test("a session's agent waits on a command past Claude Code's own Bash timeout, whatever the site says", async () => {
+  const plane = planeOf([], facts);
+  const { seen, query } = queryOf(() => []);
+
+  await run({
+    request: plane.request,
+    query,
+    environment: {
+      ...environment,
+      BASH_DEFAULT_TIMEOUT_MS: "120000",
+      BASH_MAX_TIMEOUT_MS: "600000",
+    },
+  });
+
+  assert.equal(seen.options.env.BASH_DEFAULT_TIMEOUT_MS, "1800000");
+  assert.equal(seen.options.env.BASH_MAX_TIMEOUT_MS, "3000000");
+});
+
 test("the query is opened eagerly against the store, with the session's own bounds", async () => {
   const plane = planeOf([], facts);
   const { seen, query } = queryOf(() => []);
