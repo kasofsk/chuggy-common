@@ -368,9 +368,10 @@ export async function commitAndPushSource({
  * THE WORKSPACE IS LEFT AS IT WAS. The commit is built from a copy of the index
  * with plumbing alone, so `HEAD`, the index and the repository's configuration
  * do not move and a run resumed after it finds its tree and history as it left
- * them, and no hook of the project's can refuse half-done work. What is
- * provisioned is left out, and the push is checked and made as a candidate's
- * is, but for being forced (`commitAndPushSource`). One that does not descend
+ * them. No hook of the project's runs, so none can refuse half-done work
+ * (`sourceWithoutHooks`). What is provisioned is left out, and the push is
+ * checked and made as a candidate's is, but for being forced
+ * (`commitAndPushSource`). One that does not descend
  * from `base` is refused like a candidate that does not: no attempt can start
  * from it, and being forced it would replace a checkpoint one can.
  *
@@ -392,8 +393,10 @@ export async function checkpointAndPushSource({
   pause,
   signal,
 }) {
+  const ref = ticketCheckpoint(task);
   const commit = await sourceCheckpointCommitted({
     task,
+    ref,
     base,
     directory,
     command,
@@ -402,11 +405,6 @@ export async function checkpointAndPushSource({
     signal,
   });
   if (commit === undefined) return undefined;
-  const ref = ticketCheckpoint(task);
-  await command("git", ["update-ref", sourceCheckpointSeenAt(ref), commit], {
-    cwd: directory,
-    env: workerStageEnvironment(process.env, { git }),
-  });
   await sourcePushed({
     repository,
     refspec: `+${commit}:${ref}`,
@@ -469,9 +467,41 @@ export async function sourceCheckpointSeen({
   return commit === "" ? undefined : { ref, commit };
 }
 
-/** What the tree holds beyond `HEAD`, committed from an index of its own and checked for what is held; nothing where the tree and `HEAD` are `base`'s. */
+/**
+ * `work`, handed `command` with no hook of the project's in the git it runs, and
+ * a directory of its own that goes with it. The hooks a run leaves are for a
+ * candidate: one that refuses a ref's update would lose the work a keep is there
+ * to save, or the start a restore is there to give.
+ */
+async function sourceWithoutHooks(command, work) {
+  const made = resolve(
+    await mkdtemp(workerTemporaryFile(sourceCheckpointPrefix)),
+  );
+  try {
+    const { hooks } = sourcePushPlaces(made);
+    await mkdir(hooks);
+    return await work(
+      (executable, args, options) =>
+        command(
+          executable,
+          ["-c", `core.hooksPath=${hooks}`, ...args],
+          options,
+        ),
+      made,
+    );
+  } finally {
+    await rm(made, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * What the tree holds beyond `HEAD`, committed from an index of its own, checked
+ * for what is held, and held in the clone as where `ref` is seen; nothing where
+ * the tree and `HEAD` are `base`'s.
+ */
 async function sourceCheckpointCommitted({
   task,
+  ref,
   base,
   directory,
   command,
@@ -494,13 +524,10 @@ async function sourceCheckpointCommitted({
     local,
   );
   const [parent, tree] = head.trim().split("\n");
-  const made = resolve(
-    await mkdtemp(workerTemporaryFile(sourceCheckpointPrefix)),
-  );
-  try {
+  return sourceWithoutHooks(command, async (hookless, made) => {
     const kept = join(made, "index");
     await copyFile(resolve(directory, index.trim()), kept);
-    const staged = await sourceStaged(task, command, {
+    const staged = await sourceStaged(task, hookless, {
       ...local,
       env: { ...local.env, GIT_INDEX_FILE: kept },
     });
@@ -520,10 +547,13 @@ async function sourceCheckpointCommitted({
     const commit = committed.trim();
     await sourceSecretRefused(directory, base, commit, secrets, signal);
     await sourceDescended(directory, base, commit, command);
+    await hookless(
+      "git",
+      ["update-ref", sourceCheckpointSeenAt(ref), commit],
+      local,
+    );
     return commit;
-  } finally {
-    await rm(made, { recursive: true, force: true }).catch(() => undefined);
-  }
+  });
 }
 
 /**
@@ -533,7 +563,8 @@ async function sourceCheckpointCommitted({
  * `{ref, commit}`, or nothing where there is no such branch in the clone or its
  * parent does not descend from `base`, as an old checkpoint does not once a
  * rework runs on a result it never reached. What setup changed in the tree is
- * the checkpoint's to say, since the checkpoint carries it.
+ * the checkpoint's to say, since the checkpoint carries it. No hook of the
+ * project's runs (`sourceWithoutHooks`).
  *
  * A failure is raised with the workspace back at `base`, so the attempt can run
  * from there: `read-tree` can stop partway, having written files no index
@@ -561,13 +592,21 @@ export async function sourceCheckpointRestored({
   );
   if (await sourceBaseMissing(directory, base, parent.trim(), command))
     return undefined;
-  try {
-    await command("git", ["read-tree", "--reset", "-u", commit], local);
-    await command("git", ["reset", "--mixed", "--quiet", parent.trim()], local);
-  } catch (failure) {
-    await runStep(runSetupFailed, () => sourceBackAtBase(base, local, command));
-    throw failure;
-  }
+  await sourceWithoutHooks(command, async (hookless) => {
+    try {
+      await hookless("git", ["read-tree", "--reset", "-u", commit], local);
+      await hookless(
+        "git",
+        ["reset", "--mixed", "--quiet", parent.trim()],
+        local,
+      );
+    } catch (failure) {
+      await runStep(runSetupFailed, () =>
+        sourceBackAtBase(base, local, hookless),
+      );
+      throw failure;
+    }
+  });
   return seen;
 }
 

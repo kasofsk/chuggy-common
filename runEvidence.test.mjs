@@ -1238,3 +1238,23 @@ test("a hold is a line of the transcript, saying until when and which window", a
     ),
   );
 });
+
+/** Catches a resume the limit stopped at once emptying the rows of what the run spent. */
+test("a resumed process whose result names no model leaves the rows before it", async () => {
+  const { recorder, calls } = harness();
+  recorder.observed(
+    processResult({ total_cost_usd: 1.2, modelUsage: modelUse(10, 1.2) }),
+  );
+  recorder.resumed();
+  recorder.observed(processResult({ num_turns: 1, total_cost_usd: 1.2 }));
+
+  const totals = await postedTotals(recorder, calls);
+  assert.equal(totals.costUsdMicros, 1_200_000);
+  assert.deepEqual(
+    totals.models.map(({ tokensInput, costUsdMicros }) => ({
+      tokensInput,
+      costUsdMicros,
+    })),
+    [{ tokensInput: 10, costUsdMicros: 1_200_000 }],
+  );
+});

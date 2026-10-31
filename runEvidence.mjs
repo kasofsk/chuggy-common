@@ -408,7 +408,8 @@ export function runTotals(result, turns) {
  * start, so those add. Its cost, its API time and its model rows carry on from
  * the session it resumed, so its figures already hold `earlier`'s. Where it
  * ended without accounting for itself, `accounted` being false, `earlier`'s
- * stand with what its turns folded to. The subtype and stop reason are its own.
+ * stand with what its turns folded to, and a result naming no model leaves them
+ * standing too. The subtype and stop reason are its own.
  */
 function runTotalsResumed(earlier, resumed, accounted) {
   return {
@@ -423,9 +424,10 @@ function runTotalsResumed(earlier, resumed, accounted) {
     permissionDenials: earlier.permissionDenials + resumed.permissionDenials,
     durationApiMs: Math.max(earlier.durationApiMs, resumed.durationApiMs),
     costUsdMicros: Math.max(earlier.costUsdMicros, resumed.costUsdMicros),
-    models: accounted
-      ? resumed.models
-      : foldedModels([...earlier.models, ...resumed.models]),
+    models:
+      accounted && resumed.models.length > 0
+        ? resumed.models
+        : foldedModels([...earlier.models, ...resumed.models]),
   };
 }
 

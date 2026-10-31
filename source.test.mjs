@@ -8,6 +8,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  stat,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -1535,6 +1536,13 @@ function checkpointFrom({ remote, directory, base }, more = {}) {
   });
 }
 
+/** What `args` ask of git, past the `-c` options leading them. */
+function gitAsked(args) {
+  return args.slice(
+    args.findIndex((arg, at) => arg !== "-c" && args[at - 1] !== "-c"),
+  );
+}
+
 /** What git prints for `args` in `directory`, without its last newline. */
 async function gitSays(directory, ...args) {
   const { stdout } = await git("git", args, { cwd: directory });
@@ -2021,7 +2029,7 @@ test("what the checkpoint holds outranks what setup left in the tree", async () 
 /** `git` for the suites, raising `failure` for the one verb it fails. */
 function gitFailingAt(verb, failure) {
   return async (program, args, options) => {
-    if (args[0] === verb) throw failure;
+    if (gitAsked(args)[0] === verb) throw failure;
     return git(program, args, options);
   };
 }
@@ -2035,7 +2043,8 @@ test("a restore that fails partway raises with the workspace at its base", async
     const clone = await nextClone(checkout);
     const failure = new Error("reset failed");
     const failing = async (program, args, options) => {
-      if (args[0] === "reset" && args[1] === "--mixed") throw failure;
+      if (gitAsked(args).slice(0, 2).join(" ") === "reset --mixed")
+        throw failure;
       return git(program, args, options);
     };
 
@@ -2049,7 +2058,7 @@ test("a restore that fails partway raises with the workspace at its base", async
 /** `command`, with `read-tree` stopping as git does: what it wrote left behind, in no index. */
 function stoppedPartway(clone, failure) {
   return async (program, args, options) => {
-    if (args[0] !== "read-tree") return git(program, args, options);
+    if (gitAsked(args)[0] !== "read-tree") return git(program, args, options);
     await writeFile(join(clone, "written"), "half\n");
     await mkdir(join(clone, "made"));
     await writeFile(join(clone, "made", "written"), "half\n");
@@ -2108,17 +2117,17 @@ const putBackFailures = [
   [
     "its reset fails",
     async (args) => {
-      if (args[0] === "reset" && args[1] === "--hard")
+      if (gitAsked(args).slice(0, 2).join(" ") === "reset --hard")
         throw new Error("reset failed");
     },
   ],
   [
     "its clean fails",
     async (args) => {
-      if (args[0] === "clean") throw new Error("clean failed");
+      if (gitAsked(args)[0] === "clean") throw new Error("clean failed");
     },
   ],
-  ["its clean does nothing", async (args) => args[0] === "clean"],
+  ["its clean does nothing", async (args) => gitAsked(args)[0] === "clean"],
 ];
 
 /** Catches an attempt run on a tree nothing can vouch for, or a clean-up that exits clean and removed nothing. */
@@ -2274,4 +2283,72 @@ test("a briefing is told what an earlier attempt left, and is as it was where no
   );
   assert.match(briefed.briefing.text, /unstaged/u);
   assert.equal(task.briefing.text, "the brief");
+});
+
+/**
+ * Hooks of the project's in the clone at `directory`, each refusing what it is
+ * asked. Answers the file each one that runs is named in.
+ */
+async function hooksRefusing(directory) {
+  const hooks = join(directory, ".git", "hooks");
+  const ran = join(directory, ".git", "hooks-ran");
+  await mkdir(hooks, { recursive: true });
+  for (const hook of ["post-index-change", "reference-transaction"]) {
+    await writeFile(
+      join(hooks, hook),
+      `#!/bin/sh\necho ${hook} >> '${ran}'\nexit 1\n`,
+    );
+    await chmod(join(hooks, hook), 0o755);
+  }
+  return ran;
+}
+
+/** A clone with the project's hooks in it, of `checkout` once a checkpoint holds `work`. */
+async function hookedCloneOfCheckpoint(checkout) {
+  await writeFile(join(checkout.directory, "work"), "the work\n");
+  await checkpointFrom(checkout);
+  const clone = await nextClone(checkout);
+  return { clone, ran: await hooksRefusing(clone) };
+}
+
+/** Catches a hook reaching the git of a keep, where one that refuses loses the work. */
+test("no hook of the project's runs for a checkpoint", async () => {
+  await inCheckout(async (checkout) => {
+    await writeFile(join(checkout.directory, "work"), "the work\n");
+    const ran = await hooksRefusing(checkout.directory);
+
+    const kept = await checkpointFrom(checkout);
+
+    assert.equal(kept.ref, checkpointRef);
+    await assert.rejects(stat(ran), { code: "ENOENT" });
+    assert.ok((await remoteRefs(checkout.remote)).includes(checkpointRef));
+  });
+});
+
+/** Catches a hook reaching the git of a restore, where one that refuses loses the start. */
+test("no hook of the project's runs for a restore", async () => {
+  await inCheckout(async (checkout) => {
+    const { clone, ran } = await hookedCloneOfCheckpoint(checkout);
+
+    await restoredIn(clone, checkout.base);
+
+    await assert.rejects(stat(ran), { code: "ENOENT" });
+    assert.equal(await readFile(join(clone, "work"), "utf8"), "the work\n");
+  });
+});
+
+/** Catches a hook refusing the reset that puts a stopped restore back, which is the attempt's failure. */
+test("no hook of the project's runs putting a stopped restore back", async () => {
+  await inCheckout(async (checkout) => {
+    const { clone, ran } = await hookedCloneOfCheckpoint(checkout);
+    const failure = new Error("read-tree stopped");
+
+    await assert.rejects(
+      restoredIn(clone, checkout.base, stoppedPartway(clone, failure)),
+      failure,
+    );
+
+    await assert.rejects(stat(ran), { code: "ENOENT" });
+    assert.equal(await headOf(clone), checkout.base);
+  });
 });

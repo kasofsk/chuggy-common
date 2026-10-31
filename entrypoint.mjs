@@ -524,8 +524,8 @@ async function runAgentEnvironment(context, shell) {
 
 /**
  * One process of the agent, run to its end: its stream's last result and how it
- * exited. One whose stream cannot be read is stopped, so that nothing is still
- * writing to the tree once the failure is raised.
+ * exited. One whose stream cannot be read is killed before the failure is raised.
+ * That is the process alone: anything it started can still be writing to the tree.
  */
 async function runAgentProcess(context, argv, environment, stream) {
   const child = spawn(context.agent.executable, argv, {
@@ -753,6 +753,9 @@ const workAsideCapMs = 1_200_000;
 /** What a push aside leaves before the run's deadline, for a report the plane is slow to take. */
 const workAsideReportMs = workerPlaneAwayMillisecondsMax;
 
+/** How much of what a step aside failed with is carried beside the run's own failure. */
+export const workFailureSaidMax = 4_096;
+
 /** What the directory a push aside's credential is written in is named by, in the minted directory. */
 const workAsidePrefix = "chuggy-aside-";
 
@@ -772,10 +775,11 @@ function workAsideBoundMs(capMs, nowMs, deadlineMs) {
 /**
  * `command` for what `signal` stops: nothing begins once it has gone, and each
  * child is in a process group of its own, which is killed whole, because a
- * killed `git push` leaves its transport and a remote's hook running. It is
- * spawned here because `execFile` makes no group. Windows has no groups, so
- * there the child alone is killed. What it says is bounded as `command` bounds
- * it, and past that it is stopped and fails as `command` does.
+ * killed `git push` leaves its transport running, and with it, over a local
+ * path, a remote's hook. It is spawned here because `execFile` makes no group.
+ * Windows has no groups, so there the child alone is killed. What it says is
+ * bounded as `command` bounds it: past that it is stopped and fails as `command`
+ * does, and whatever a writer outside its group goes on saying is dropped.
  */
 export function commandStopped(signal) {
   const alone = process.platform === "win32";
@@ -798,6 +802,7 @@ export function commandStopped(signal) {
       const said = { stdout: "", stderr: "" };
       for (const stream of ["stdout", "stderr"])
         child[stream].setEncoding("utf8").on("data", (text) => {
+          if (said[stream].length > commandBufferMax) return;
           said[stream] += text;
           if (said[stream].length <= commandBufferMax) return;
           stopped();
@@ -834,9 +839,21 @@ function workFailureSaid(context, failure) {
 }
 
 /**
+ * `said`, already scrubbed, cut short enough to stand beside the run's own
+ * failure, since a remote can say anything and an upload past its size keeps only
+ * its end. What is left starts with git's line saying why, which a flood buries.
+ */
+function workFailureCut(said) {
+  if (said.length <= workFailureSaidMax) return said;
+  const line = gitFailureLine({ stderr: said });
+  const led = line === undefined ? said : `${line}\n${said}`;
+  return `${led.slice(0, workFailureSaidMax)}\n(the rest of what it said is cut)`;
+}
+
+/**
  * `work`, handed the `command` and `signal` that stop it, as something aside from
- * the run's result. It answers `{done}` or `{failure}`, scrubbed, and raises
- * nothing, so whatever goes wrong never reaches how the run ended.
+ * the run's result. It answers `{done}` or `{failure}`, scrubbed and cut, and
+ * raises nothing, so whatever goes wrong never reaches how the run ended.
  *
  * ONE BOUND HOLDS ALL OF IT. Retries are inside it, its git children are stopped
  * when it lands, and a mint the plane has not answered is simply left, so no
@@ -863,7 +880,7 @@ async function workWithinBound(context, work) {
     return {
       failure: signal?.aborted
         ? `it was stopped after ${String(boundMs)} ms`
-        : workFailureSaid(context, failure),
+        : workFailureCut(workFailureSaid(context, failure)),
     };
   }
 }
@@ -942,9 +959,10 @@ async function workCheckpointed(context, workspace) {
  * it, and `discard` removes what deleting it took. Until the report has landed
  * the run can still be lost, and the next attempt goes on from the checkpoint, so
  * only the credential is taken before it, since the bearer may be dead after it.
- * A clone that sees none readies nothing. What becomes of the delete is logged
- * and nothing else: neither raises, and it touches neither the pass nor its
- * report, since a checkpoint left standing only risks being restored.
+ * That comes before the lease stops, so a mint that stalls cannot cost a pass its
+ * lease. A clone that sees none readies nothing. What becomes of the delete is
+ * logged and nothing else: neither raises, and it touches neither the pass nor
+ * its report, since a checkpoint left standing only risks being restored.
  */
 async function workCheckpointClearing(context, workspace) {
   if (context.task.taskKind !== "Work") return undefined;
@@ -1814,12 +1832,12 @@ export async function publishWorkerResult(
     await diagnostic(context, diagnosticPath, output),
     ...(await summaryDiagnostics(context, summaryPath, result.summary)),
   ];
-  await context.stopLease();
   const clearing =
     result.verdict === "Pass"
       ? await workCheckpointClearing(context, workspace)
       : undefined;
   try {
+    await context.stopLease();
     await report(context, {
       verdict: result.verdict,
       report: reportSummary(result.summary, context.scrub, kept),
