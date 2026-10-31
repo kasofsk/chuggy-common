@@ -37,11 +37,15 @@ import {
   runPushFailed,
 } from "./runEvidence.mjs";
 import {
+  checkpointAndPushSource,
   commitAndPushSource,
   resultDocument,
+  sourceCheckpointRestored,
   sourcePushPlacingVariables,
+  sourceRestoredBriefed,
   sourceSecretReader,
   ticketBranch,
+  ticketCheckpoint,
 } from "./source.mjs";
 
 /** Two secrets a pod holds, as its push is handed them. */
@@ -1506,4 +1510,605 @@ test("every worker report uses the schema that carries its summary", () => {
     }).version,
     3,
   );
+});
+
+/** The attempt the checkpoint suites stand for. */
+const checkpointTask = { ticket: 9, attempt: "opaque", worker: {} };
+
+/** The branch every checkpoint of that task lands on. */
+const checkpointRef = ticketCheckpoint(checkpointTask);
+
+/** The run in `checkout` kept as its ticket's checkpoint, by git itself. */
+function checkpointFrom({ remote, directory, base }, more = {}) {
+  return checkpointAndPushSource({
+    task: checkpointTask,
+    repository: remote,
+    base,
+    directory,
+    command: git,
+    environment: process.env,
+    secrets: held,
+    ...more,
+  });
+}
+
+/** What git prints for `args` in `directory`, without its last newline. */
+async function gitSays(directory, ...args) {
+  const { stdout } = await git("git", args, { cwd: directory });
+  return stdout.trimEnd();
+}
+
+/**
+ * What `directory`'s repository is at rest: `HEAD`, the state of its tree and
+ * index, and who it says commits are by. A checkpoint is taken in the middle of
+ * a run, so none of it may move.
+ */
+async function atRest(directory) {
+  return {
+    head: await headOf(directory),
+    status: await gitSays(directory, "status", "--porcelain=v1"),
+    index: await gitSays(directory, "ls-files", "--stage"),
+    config: await gitSays(directory, "config", "--local", "--list"),
+  };
+}
+
+/**
+ * What a next attempt starts from: `remote` cloned as an attempt's workspace
+ * is, so a checkpoint is a remote-tracking ref, at `base`. Its `base` is on the
+ * remote, as a real target always is.
+ */
+async function nextClone({ remote, directory, base }, name = "next") {
+  await git("git", ["push", remote, `${base}:refs/heads/main`], {
+    cwd: directory,
+  });
+  const clone = join(dirname(directory), name);
+  await git("git", ["clone", "--quiet", "--no-checkout", remote, clone]);
+  await git("git", ["checkout", "--quiet", "--detach", base], { cwd: clone });
+  return clone;
+}
+
+/** The checkpoint a next attempt finds in `clone` restored, by git itself. */
+function restoredIn(clone, base, command = git) {
+  return sourceCheckpointRestored({
+    task: checkpointTask,
+    base,
+    directory: clone,
+    command,
+  });
+}
+
+/**
+ * Catches a checkpoint that moves `HEAD`, the index or the repository's
+ * configuration: a run resumed after a hold would find its history changed
+ * under it, and its own next commit would carry the worker's name.
+ */
+test("a checkpoint keeps everything the tree holds and moves nothing", async () => {
+  await inCheckout(async (checkout) => {
+    const { remote, directory } = checkout;
+    await writeFile(join(directory, "README.md"), "# half rewritten\n");
+    await writeFile(join(directory, "staged"), "staged\n");
+    await git("git", ["add", "staged"], { cwd: directory });
+    await writeFile(join(directory, "untracked"), "untracked\n");
+    const before = await atRest(directory);
+
+    const kept = await checkpointFrom(checkout);
+
+    assert.deepEqual(await atRest(directory), before);
+    assert.equal(kept.ref, checkpointRef);
+    assert.match(await remoteRefs(remote), new RegExp(`${kept.ref}$`, "mu"));
+    assert.equal(await gitSays(remote, "rev-parse", kept.ref), kept.commit);
+    assert.equal(
+      await gitSays(remote, "rev-parse", `${kept.commit}^`),
+      before.head,
+    );
+    assert.equal(
+      await gitSays(remote, "show", `${kept.commit}:README.md`),
+      "# half rewritten",
+    );
+    assert.equal(
+      await gitSays(remote, "show", `${kept.commit}:staged`),
+      "staged",
+    );
+    assert.equal(
+      await gitSays(remote, "show", `${kept.commit}:untracked`),
+      "untracked",
+    );
+    assert.equal(
+      await gitSays(remote, "log", "-1", "--format=%an %ae", kept.commit),
+      "Chuggy Worker worker@chuggy.invalid",
+    );
+  });
+});
+
+/**
+ * Catches a name read from the process's environment, which git prefers to any
+ * configuration: a host runner's shell can export one, and `git commit` exports
+ * its own to a hook.
+ */
+test("a checkpoint carries the worker's name whatever the environment names", async (t) => {
+  const given = process.env["GIT_AUTHOR_NAME"];
+  process.env["GIT_AUTHOR_NAME"] = "Someone Else";
+  t.after(() => {
+    if (given === undefined) delete process.env["GIT_AUTHOR_NAME"];
+    else process.env["GIT_AUTHOR_NAME"] = given;
+  });
+  await inCheckout(async (checkout) => {
+    await writeFile(join(checkout.directory, "work.txt"), "work\n");
+
+    const kept = await checkpointFrom(checkout);
+
+    assert.equal(
+      await gitSays(checkout.remote, "log", "-1", "--format=%an", kept.commit),
+      "Chuggy Worker",
+    );
+  });
+});
+
+/**
+ * The agent's own commits are on `HEAD`, and a pass whose commit landed there
+ * and whose push failed leaves a tree with nothing else in it, so reading a
+ * clean tree as nothing to keep would lose the whole of the work.
+ */
+test("a clean tree past its base is kept, since its commits are on no remote", async () => {
+  await inCheckout(async (checkout) => {
+    const { remote, directory } = checkout;
+    const committed = await agentCommitted(directory, "work", "the work\n");
+
+    const kept = await checkpointFrom(checkout);
+
+    assert.equal(
+      await gitSays(remote, "rev-parse", `${kept.commit}^`),
+      committed,
+    );
+    assert.equal(
+      await gitSays(remote, "show", `${kept.commit}:work`),
+      "the work",
+    );
+  });
+});
+
+test("a tree and a head that are still the base's leave nothing to keep and push nothing", async () => {
+  await inCheckout(async (checkout) => {
+    assert.equal(await checkpointFrom(checkout), undefined);
+    assert.equal(await remoteRefs(checkout.remote), "");
+  });
+});
+
+test("a file only the attempt's block provisioned is nothing to keep", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, remote } = checkout;
+    await writeFile(join(directory, ".provisioned"), "from the block\n");
+    const task = {
+      ...checkpointTask,
+      worker: {
+        files: [{ path: ".provisioned", content: "from the block\n" }],
+      },
+    };
+
+    assert.equal(await checkpointFrom(checkout, { task }), undefined);
+    assert.equal(await remoteRefs(remote), "");
+  });
+});
+
+test("a checkpoint leaves out what the attempt's block provisioned", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, remote } = checkout;
+    await writeFile(join(directory, ".provisioned"), "from the block\n");
+    await writeFile(join(directory, "work"), "the work\n");
+    const task = {
+      ...checkpointTask,
+      worker: {
+        files: [{ path: ".provisioned", content: "from the block\n" }],
+      },
+    };
+
+    const { commit } = await checkpointFrom(checkout, { task });
+
+    assert.equal(
+      await gitSays(remote, "ls-tree", "--name-only", commit),
+      ["README.md", "work"].join("\n"),
+    );
+  });
+});
+
+/**
+ * Starting from an empty index would drop a tracked file a project's
+ * `.gitignore` also matches, which `git add --all` never adds back, and the
+ * next attempt would read that as a deletion.
+ */
+test("a checkpoint keeps a tracked file the project also ignores", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, remote } = checkout;
+    await writeFile(join(directory, ".gitignore"), "ignored\n");
+    await writeFile(join(directory, "ignored"), "tracked anyway\n");
+    await git("git", ["add", "--force", ".gitignore", "ignored"], {
+      cwd: directory,
+    });
+
+    const { commit } = await checkpointFrom(checkout);
+
+    assert.equal(
+      await gitSays(remote, "show", `${commit}:ignored`),
+      "tracked anyway",
+    );
+  });
+});
+
+/** Half-done work is what a project's hooks refuse, and they must not decide whether it is kept. */
+test("a checkpoint runs no hook of the project's", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, remote } = checkout;
+    const hooks = join(dirname(directory), "hooks");
+    await mkdir(hooks);
+    for (const hook of [
+      "pre-commit",
+      "commit-msg",
+      "post-commit",
+      "pre-push",
+    ]) {
+      await writeFile(join(hooks, hook), "#!/bin/sh\nexit 1\n");
+      await chmod(join(hooks, hook), 0o755);
+    }
+    await git("git", ["config", "core.hooksPath", hooks], { cwd: directory });
+    await writeFile(join(directory, "work"), "the work\n");
+
+    const kept = await checkpointFrom(checkout);
+
+    assert.equal(await gitSays(remote, "rev-parse", kept.ref), kept.commit);
+  });
+});
+
+test("a checkpoint made under a relative temporary directory is still made", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, remote } = checkout;
+    await writeFile(join(directory, "work"), "the work\n");
+    const saved = process.env.TMPDIR;
+    const cwd = process.cwd();
+    process.chdir(dirname(directory));
+    process.env.TMPDIR = ".";
+    try {
+      const kept = await checkpointFrom(checkout);
+      assert.equal(await gitSays(remote, "rev-parse", kept.ref), kept.commit);
+    } finally {
+      process.chdir(cwd);
+      if (saved === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = saved;
+    }
+  });
+});
+
+test("a checkpoint leaves nothing behind where it built its index", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory } = checkout;
+    const temporary = join(dirname(directory), "temporary");
+    await mkdir(temporary);
+    await writeFile(join(directory, "work"), "the work\n");
+    const saved = process.env.TMPDIR;
+    process.env.TMPDIR = temporary;
+    try {
+      await checkpointFrom(checkout);
+      assert.deepEqual(
+        (await readdir(temporary)).filter((name) =>
+          name.startsWith("chuggy-checkpoint-"),
+        ),
+        [],
+      );
+    } finally {
+      if (saved === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = saved;
+    }
+  });
+});
+
+/** A checkpoint is pushed where any later reader of the forge can see it, so what a candidate may not carry it may not either. */
+test("a checkpoint carrying a held secret is refused, naming the kind and never the value", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, remote } = checkout;
+    await writeFile(join(directory, "leaked"), `${held[0].value}\n`);
+
+    await assert.rejects(checkpointFrom(checkout), (failure) => {
+      assert.match(failure.message, /carries the Claude Code credential/u);
+      assert.ok(!failure.message.includes(held[0].value));
+      return true;
+    });
+
+    assert.equal(await remoteRefs(remote), "");
+  });
+});
+
+test("a secret in a commit under a clean tree is refused as well", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, remote } = checkout;
+    await agentCommitted(directory, "leaked", `${held[1].value}\n`);
+
+    await assert.rejects(checkpointFrom(checkout), /carries /u);
+
+    assert.equal(await remoteRefs(remote), "");
+  });
+});
+
+/**
+ * A second attempt that gave up on the first's history leaves a checkpoint that
+ * does not descend from the last. Catches a push that is not forced, which
+ * would lose the newer work to the older.
+ */
+test("a checkpoint replaces the last, whatever history it is on", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, remote, base } = checkout;
+    await agentCommitted(directory, "first", "the first run's\n");
+    await checkpointFrom(checkout);
+    await git("git", ["reset", "--quiet", "--hard", base], { cwd: directory });
+    await agentCommitted(directory, "second", "the second run's\n");
+
+    const { commit } = await checkpointFrom(checkout);
+
+    assert.equal(await gitSays(remote, "rev-parse", checkpointRef), commit);
+  });
+});
+
+/**
+ * Attempt two restores the checkpoint, rewrites the history below its base and
+ * fails. Restore ignores what that leaves, and the push is forced, so pushing
+ * it would lose the checkpoint attempt three could have started from.
+ */
+test("a checkpoint no attempt could start from does not replace one it could", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, remote, base } = checkout;
+    await writeFile(join(directory, "work"), "the work\n");
+    const kept = await checkpointFrom(checkout);
+    await git("git", [...author, "commit", "--amend", "-m", "rewritten"], {
+      cwd: directory,
+    });
+
+    await assert.rejects(
+      checkpointFrom(checkout),
+      new RegExp(`does not descend from ${base}`, "u"),
+    );
+
+    assert.equal(
+      await gitSays(remote, "rev-parse", checkpointRef),
+      kept.commit,
+    );
+  });
+});
+
+/** The checkpoint is taken during a hold, and the run may pass after it: the attempt's own push, not forced, must still land. */
+test("a run that passes after a checkpoint pushes its candidate as it would have", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, remote } = checkout;
+    await writeFile(join(directory, "work"), "half\n");
+    await checkpointFrom(checkout);
+    await writeFile(join(directory, "work"), "done\n");
+
+    const { source } = await publishedFrom(checkout);
+
+    assert.equal(
+      await gitSays(remote, "show", `${source.commit}:work`),
+      "done",
+    );
+    assert.notEqual(
+      await gitSays(remote, "rev-parse", checkpointRef),
+      source.commit,
+    );
+  });
+});
+
+test("the checkpoint is one branch a ticket's attempts share, apart from each attempt's own", () => {
+  assert.equal(
+    ticketCheckpoint({ ticket: 9, attempt: "another" }),
+    "refs/heads/chuggy/tickets/9/checkpoint",
+  );
+  assert.ok(!ticketBranch(checkpointTask).endsWith("/checkpoint"));
+});
+
+/**
+ * Catches a restore that leaves the checkpoint's commit in history, which the
+ * next candidate would carry, or the work staged, which the agent did not stage
+ * and a `git commit` of its own would sweep up.
+ */
+test("a restored checkpoint is its parent's history with the rest unstaged in the tree", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, base } = checkout;
+    const committed = await agentCommitted(directory, "committed", "kept\n");
+    await writeFile(join(directory, "README.md"), "# half rewritten\n");
+    await writeFile(join(directory, "untracked"), "half\n");
+    const kept = await checkpointFrom(checkout);
+    const clone = await nextClone(checkout);
+
+    assert.deepEqual(await restoredIn(clone, base), kept);
+
+    assert.equal(await headOf(clone), committed);
+    assert.equal(
+      await readFile(join(clone, "README.md"), "utf8"),
+      "# half rewritten\n",
+    );
+    assert.equal(await readFile(join(clone, "committed"), "utf8"), "kept\n");
+    assert.equal(
+      await gitSays(clone, "status", "--porcelain=v1"),
+      " M README.md\n?? untracked",
+    );
+  });
+});
+
+test("a file the run deleted is deleted again", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, base } = checkout;
+    await rm(join(directory, "README.md"));
+    await writeFile(join(directory, "work"), "the work\n");
+    await checkpointFrom(checkout);
+    const clone = await nextClone(checkout);
+
+    await restoredIn(clone, base);
+
+    assert.ok(!(await present(join(clone, "README.md"))));
+  });
+});
+
+/** What a pass whose push failed leaves: nothing unstaged, everything in a commit the next attempt must start on. */
+test("a checkpoint of a clean tree restores to its commits, with the work in the tree", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, base } = checkout;
+    const committed = await agentCommitted(directory, "work", "the work\n");
+    await checkpointFrom(checkout);
+    const clone = await nextClone(checkout);
+
+    await restoredIn(clone, base);
+
+    assert.equal(await headOf(clone), committed);
+    assert.equal(await readFile(join(clone, "work"), "utf8"), "the work\n");
+    assert.equal(await gitSays(clone, "status", "--porcelain=v1"), "");
+  });
+});
+
+test("a clone with no checkpoint is left as it was", async () => {
+  await inCheckout(async (checkout) => {
+    const { base } = checkout;
+    const clone = await nextClone(checkout);
+
+    assert.equal(await restoredIn(clone, base), undefined);
+
+    assert.equal(await headOf(clone), base);
+  });
+});
+
+/**
+ * A rework runs on a result the old checkpoint never reached, so its parent
+ * does not descend from the new base. Catches that old work being laid over
+ * the base it was not made on.
+ */
+test("a checkpoint that does not descend from the base is ignored", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, base } = checkout;
+    await writeFile(join(directory, "stale"), "the old run's\n");
+    await checkpointFrom(checkout);
+    await git("git", ["checkout", "--quiet", "--detach", base], {
+      cwd: directory,
+    });
+    const moved = await agentCommitted(directory, "newer", "the new base\n");
+    const clone = await nextClone({ ...checkout, base: moved });
+
+    assert.equal(await restoredIn(clone, moved), undefined);
+
+    assert.equal(await headOf(clone), moved);
+    assert.ok(!(await present(join(clone, "stale"))));
+  });
+});
+
+/** Setup's edit to a tracked file was made on the base, and the checkpoint already holds what the run made of it. */
+test("what the checkpoint holds outranks what setup left in the tree", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, base } = checkout;
+    await writeFile(join(directory, "README.md"), "# the run's\n");
+    await writeFile(join(directory, "added"), "the run's\n");
+    await checkpointFrom(checkout);
+    const clone = await nextClone(checkout);
+    await writeFile(join(clone, "README.md"), "# setup's\n");
+    await writeFile(join(clone, "added"), "setup's\n");
+
+    await restoredIn(clone, base);
+
+    assert.equal(
+      await readFile(join(clone, "README.md"), "utf8"),
+      "# the run's\n",
+    );
+    assert.equal(await readFile(join(clone, "added"), "utf8"), "the run's\n");
+  });
+});
+
+/** `git` for the suites, raising `failure` for the one verb it fails. */
+function gitFailingAt(verb, failure) {
+  return async (program, args, options) => {
+    if (args[0] === verb) throw failure;
+    return git(program, args, options);
+  };
+}
+
+/** Catches a failed restore that leaves half of a checkpoint under an attempt told it starts from its base. */
+test("a restore that fails partway raises with the workspace at its base", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, base } = checkout;
+    await writeFile(join(directory, "README.md"), "# half rewritten\n");
+    await checkpointFrom(checkout);
+    const clone = await nextClone(checkout);
+    const failure = new Error("reset failed");
+    const failing = async (program, args, options) => {
+      if (args[0] === "reset" && args[1] === "--mixed") throw failure;
+      return git(program, args, options);
+    };
+
+    await assert.rejects(restoredIn(clone, base, failing), failure);
+
+    assert.equal(await headOf(clone), base);
+    assert.equal(await gitSays(clone, "status", "--porcelain=v1"), "");
+  });
+});
+
+/** `read-tree` writes nothing where it fails, so resetting after it would only throw away what setup did. */
+test("a restore that fails before it writes anything leaves what setup left", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, base } = checkout;
+    await writeFile(join(directory, "work"), "the work\n");
+    await checkpointFrom(checkout);
+    const clone = await nextClone(checkout);
+    await writeFile(join(clone, "README.md"), "# setup's\n");
+    const failure = new Error("read-tree failed");
+
+    await assert.rejects(
+      restoredIn(clone, base, gitFailingAt("read-tree", failure)),
+      failure,
+    );
+
+    assert.equal(
+      await readFile(join(clone, "README.md"), "utf8"),
+      "# setup's\n",
+    );
+  });
+});
+
+/**
+ * The last link of the whole: an attempt restored from a checkpoint and then
+ * passing. Catches a candidate that does not descend from the base, one that
+ * carries the checkpoint's own commit, and an agent's own commits lost.
+ */
+test("an attempt restored from a checkpoint pushes a candidate on its base with the work in it", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, remote, base } = checkout;
+    const committed = await agentCommitted(directory, "committed", "kept\n");
+    await writeFile(join(directory, "untracked"), "half\n");
+    const kept = await checkpointFrom(checkout);
+    const clone = await nextClone(checkout);
+    await restoredIn(clone, base);
+
+    const { source } = await publishedFrom({
+      remote,
+      directory: clone,
+      base,
+    });
+
+    assert.equal(
+      await gitSays(remote, "show", `${source.commit}:untracked`),
+      "half",
+    );
+    const history = await gitSays(remote, "rev-list", source.commit);
+    assert.ok(history.includes(committed));
+    assert.ok(history.includes(base));
+    assert.ok(!history.includes(kept.commit));
+  });
+});
+
+test("a briefing is told what an earlier attempt left, and is as it was where nothing was restored", () => {
+  const task = { briefing: { text: "the brief", purpose: "Work" } };
+
+  assert.equal(sourceRestoredBriefed(task, undefined), task);
+  const briefed = sourceRestoredBriefed(task, {
+    ref: checkpointRef,
+    commit: "abc",
+  });
+  assert.equal(briefed.briefing.purpose, "Work");
+  assert.match(
+    briefed.briefing.text,
+    /^the brief\n\n## Unfinished work from an earlier attempt\n/u,
+  );
+  assert.match(briefed.briefing.text, /unstaged/u);
+  assert.equal(task.briefing.text, "the brief");
 });
