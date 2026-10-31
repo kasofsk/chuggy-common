@@ -190,6 +190,8 @@ const executionStatuses = [
 
 const chuggySelectionDescription = `\`selection\` is for a configuration that is a catalog, one whose read_configuration \`canonical\` has \`version\` 2: {work?, evaluation?, finalization?}, each the name of one of its \`workloads\`, \`plans\` or \`finalizers\` the ticket runs on in place of the catalog's \`defaults\`, and a field left out is that default. A draft on any other configuration carries none.`;
 
+const chuggyOverridesDescription = `\`overrides\` is what this ticket replaces of its configuration. On a catalog it is {workloads}, each key the name the catalog holds a workload under and each value the fields of that workload it replaces; on any other configuration it is {worker?, practices?, brief?, work?} with \`work\` holding only \`instructions\`. A field named replaces that field's whole and nothing is merged, so changing a workload's model means sending its whole \`worker\`, such as {"workloads": {"build": {"worker": {"mode": {"type": "SingleAgent", "agent": "Codex", "arguments": [], "model": "<model>"}, "setup": [], "files": []}}}}. read_configuration with a \`path\`, such as ["workloads", "build", "worker"], reads the field to start from. Left out, the ticket overrides nothing.`;
+
 /**
  * What a session is told a brief carries, `brief` being an open object on the
  * wire. An intent is bounded as a whole and by nothing a line at a time, so a
@@ -1711,6 +1713,7 @@ export const chuggyProjectTools = [
         `${chuggyAuthoringDescription} \`authoring.dependencies\` must carry the parent.`,
       ),
       brief: anyObject(z).describe(chuggyBriefDescription),
+      overrides: anyObject(z).optional().describe(chuggyOverridesDescription),
       selection: anyObject(z).optional().describe(chuggySelectionDescription),
     }),
     call: (context, args) => {
@@ -1726,6 +1729,7 @@ export const chuggyProjectTools = [
         expectedProjectSequence: args.expectedProjectSequence,
         authoring: args.authoring,
         brief: args.brief,
+        overrides: args.overrides,
         selection: args.selection,
       });
     },
@@ -1733,7 +1737,7 @@ export const chuggyProjectTools = [
   {
     name: "revise_draft",
     description:
-      "Replaces one open draft's authoring, brief and selection, fenced on `expectedVersion`. A Pending ticket's draft takes a revision too, which its ticket runs only once update_ticket releases it.",
+      "Replaces one open draft's authoring, brief, overrides and selection, fenced on `expectedVersion`. A Pending ticket's draft takes a revision too, which its ticket runs only once update_ticket releases it.",
     shape: (z) => ({
       ticket: ticket(z).describe(
         "The ticket number the draft holds, as read_draft answers it.",
@@ -1748,6 +1752,11 @@ export const chuggyProjectTools = [
       brief: anyObject(z).describe(
         `${chuggyDraftBriefDescription} It is replaced whole, so send back the \`repository\` and \`images\` read_draft answered or the revision clears them.`,
       ),
+      overrides: anyObject(z)
+        .optional()
+        .describe(
+          `${chuggyOverridesDescription} It is replaced whole, so send back the \`overrides\` read_draft answered or the revision clears them.`,
+        ),
       selection: anyObject(z)
         .optional()
         .describe(
@@ -1764,6 +1773,7 @@ export const chuggyProjectTools = [
           configurationRevision: args.configurationRevision,
           authoring: args.authoring,
           brief: args.brief,
+          overrides: args.overrides,
           selection: args.selection,
         },
       ),
@@ -1825,6 +1835,7 @@ export const chuggyProjectTools = [
       ),
       authoring: anyObject(z).describe(chuggyAuthoringDescription),
       brief: anyObject(z).describe(chuggyDraftBriefDescription),
+      overrides: anyObject(z).optional().describe(chuggyOverridesDescription),
       selection: anyObject(z).optional().describe(chuggySelectionDescription),
     }),
     call: (context, args) =>
@@ -1834,6 +1845,7 @@ export const chuggyProjectTools = [
         expectedProjectSequence: args.expectedProjectSequence,
         authoring: args.authoring,
         brief: args.brief,
+        overrides: args.overrides,
         selection: args.selection,
       }),
   },
