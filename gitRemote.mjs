@@ -46,7 +46,8 @@ const gitRefusals = [
 
 /**
  * GitHub failing on its own side: the line saying so, and a ref rejected for
- * that alone. Each is the whole line, so a ref named for either is not one.
+ * that alone. Each is the whole line, so a hook's line quoting either is not
+ * one.
  */
 const gitRemoteFailureLine = /^remote: fatal error in commit_refs$/u;
 const gitRemoteFailureRejected =
