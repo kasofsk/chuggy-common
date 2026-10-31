@@ -8,7 +8,7 @@
 /**
  * @typedef {import("./engine.mjs").EngineAnswer} EngineAnswer
  *
- * @typedef {"Unreachable" | "NoSuchContainer" | "NoSuchVolume" | "NameConflict" | "ImageInUse" | "Unauthorized" | "PlatformAbsent" | "PlatformUnbuilt" | "FlagUnknown" | "NotFound" | "Other"} EngineFailure
+ * @typedef {"Unreachable" | "NoSuchContainer" | "NoSuchVolume" | "NameConflict" | "ImageInUse" | "Unauthorized" | "PlatformAbsent" | "PlatformUnbuilt" | "FlagUnknown" | "NotFound" | "TransferCut" | "Other"} EngineFailure
  */
 
 const engineFailures = /** @type {const} */ ([
@@ -34,6 +34,10 @@ const engineFailures = /** @type {const} */ ([
   ],
   ["FlagUnknown", /unknown flag|requires api version/iu],
   ["NotFound", /no such image|image not known|manifest unknown|not found/iu],
+  [
+    "TransferCut",
+    /unexpected eof|connection reset by peer|i\/o timeout|tls handshake timeout/iu,
+  ],
 ]);
 
 /**

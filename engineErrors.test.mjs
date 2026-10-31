@@ -113,6 +113,27 @@ const sourced = {
     // cmd/docker/docker.go: `areFlagsSupported`.
     'Error: "--platform" requires API version 1.49, but the Docker daemon API version is 1.47',
   ],
+  TransferCut: [
+    // docker's CLI, docker/cli's cmd/docker/docker.go: `main`, printing alone
+    // the error a pull's stream ended with as moby's
+    // client/pkg/jsonmessage/jsonmessage.go: `Display` returns it, here Go's
+    // src/io/io.go: `ErrUnexpectedEOF`.
+    "unexpected EOF",
+    // Go's src/net/net.go: `OpError.Error`, a read the registry's end reset,
+    // in the words of src/syscall/zerrors_linux_amd64.go's `errors`.
+    "read tcp 172.17.0.2:41234->140.82.112.33:443: read: connection reset by peer",
+    // The same, a dial that timed out, in the words of
+    // src/internal/poll/fd.go: `DeadlineExceededError.Error`.
+    'Error response from daemon: Get "https://registry.chuggy.example/v2/": dial tcp 140.82.112.33:443: i/o timeout',
+    // Go's src/net/http/transport.go: `tlsHandshakeTimeoutError.Error`.
+    'Error response from daemon: Get "https://registry.chuggy.example/v2/": net/http: TLS handshake timeout',
+    // podman, containers/container-libs's image/copy/blob.go:
+    // `errorAnnotationReader.Read`, wrapped by
+    // image/storage/storage_dest.go's `putBlobToPendingFile`, image/copy's
+    // `imageCopier.copyBlobFromStream` and `Image`, and
+    // common/libimage/copier.go's `Copier.copyToStorage`.
+    'Trying to pull registry.chuggy.example/worker:1...\nError: unable to copy from source docker://registry.chuggy.example/worker:1: copying system image from manifest list: writing blob: storing blob to file "/var/tmp/container_images_storage1/1": happened during read: unexpected EOF',
+  ],
 };
 
 for (const [said, table] of [
@@ -194,6 +215,11 @@ test("a pull the registry refused the image to, or whose reference names none, i
       failed: "Interrupted",
     }),
   );
+});
+
+test("a pull the network cut short is not refused", () => {
+  for (const stderr of sourced.TransferCut)
+    assert.ok(!enginePullRefused(pullAnswer(stderr)), stderr);
 });
 
 for (const [cause, stderr] of [

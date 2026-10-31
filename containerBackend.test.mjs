@@ -2256,7 +2256,7 @@ test("a job's image whose reference names none through a runtime is refused Imag
   }
 });
 
-test("a job's image whose pull can still pass is pulled again through a runtime, until it is here or the dwell since its first pull has passed", async (t) => {
+test("a job's image whose pull can still pass is pulled again through a runtime, until it is here or the dwell since its first failure has passed", async (t) => {
   const said =
     'Error response from daemon: Get "https://registry.chuggy.example/v2/": dial tcp: lookup registry.chuggy.example on 127.0.0.53:53: no such host';
   const failing = await harness(t);
@@ -2320,10 +2320,7 @@ test("a runtime slow to pull takes none of the dwell its job's image is pulled a
   let failures = 0;
   state.pull = (pulled) => {
     if (pulled === runtime) clock.nowMs += pullFailureDwellMs;
-    else if (failures++ === 0)
-      return failedWith(
-        'Error response from daemon: Get "https://registry.chuggy.example/v2/": net/http: TLS handshake timeout',
-      );
+    else if (failures++ === 0) return failedWith(noSuchHost);
     state.images.add(pulled);
     return { code: 0, stdout: "", stderr: "" };
   };
@@ -2331,6 +2328,79 @@ test("a runtime slow to pull takes none of the dwell its job's image is pulled a
   await backend.settled();
   assert.equal(failures, 2);
   assert.deepEqual(await backend.held(), listedJobs("asg-1"));
+});
+
+/** A failure of a job's image's pull that can pass, and is not one the network cut short. */
+const noSuchHost =
+  'Error response from daemon: Get "https://registry.chuggy.example/v2/": dial tcp: lookup registry.chuggy.example on 127.0.0.53:53: no such host';
+
+test("a job's image whose pull ran longer than the dwell before it failed is pulled again", async (t) => {
+  const { backend, state, clock } = await harness(t);
+  state.images.add(runtime);
+  let pulls = 0;
+  state.pull = (pulled) => {
+    pulls += 1;
+    if (pulls === 1) {
+      clock.nowMs += 2 * pullFailureDwellMs;
+      return failedWith(noSuchHost);
+    }
+    state.images.add(pulled);
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  await backend.place(assignment({ runtime }), "Job");
+  await backend.settled();
+  assert.equal(pulls, 2);
+  assert.deepEqual(await backend.held(), listedJobs("asg-1"));
+});
+
+test("a job's image whose transfer the network cut short is pulled again past the dwell, and ends at the deadline as this runner's failure", async (t) => {
+  const deadlineSecs = 600;
+  const { backend, state, clock, settings } = await harness(t);
+  state.images.add(runtime);
+  state.pull = () => {
+    clock.nowMs += 1_000;
+    return failedWith("unexpected EOF");
+  };
+  await backend.place(assignment({ runtime, deadlineSecs }), "Job");
+  await backend.settled();
+  assert.ok(clock.nowMs - startMs >= deadlineSecs * 1000);
+  assert.ok(
+    verbs(state).filter((verb) => verb === "pull").length >
+      pullFailureDwellMs / settings.pullRetryMs + 1,
+  );
+  const [ended] = await endsNamed(backend);
+  assert.ok(ended?.kind === "Job");
+  assert.equal(ended.refusal, undefined);
+  assert.equal(
+    ended.why,
+    "its container was not started: its image was not pulled by the assignment's deadline",
+  );
+});
+
+test("a job's image whose transfer was cut short and whose pull then failed otherwise is given the whole dwell from that failure", async (t) => {
+  const { backend, state, clock, settings } = await harness(t);
+  state.images.add(runtime);
+  let cuts = 3;
+  /** @type {number | undefined} */
+  let firstFailureMs;
+  let failures = 0;
+  state.pull = () => {
+    if (cuts-- > 0) {
+      clock.nowMs += pullFailureDwellMs;
+      return failedWith("unexpected EOF");
+    }
+    failures += 1;
+    firstFailureMs ??= clock.nowMs;
+    return failedWith(noSuchHost);
+  };
+  await backend.place(assignment({ runtime }), "Job");
+  await backend.settled();
+  assert.ok(firstFailureMs !== undefined);
+  assert.equal(clock.nowMs - firstFailureMs, pullFailureDwellMs);
+  assert.equal(failures, pullFailureDwellMs / settings.pullRetryMs + 1);
+  const [ended] = await endsNamed(backend);
+  assert.ok(ended?.kind === "Job");
+  assert.deepEqual(ended.refusal, { fault: "ImageUnpullable" });
 });
 
 test("a job's image whose engine could not be reached through a runtime fails as any placement does", async (t) => {

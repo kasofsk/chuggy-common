@@ -445,12 +445,13 @@ function checkedImageFault(exitCode) {
 }
 
 /**
- * How long after its first pull a job's image may go on failing to pull for
- * a cause that can pass before the failure is read as the image's: the
+ * How long after its first failure a job's image may go on failing to pull
+ * for a cause that can pass before the failure is read as the image's: the
  * counterpart of the dwell chuggy's cluster reads a pull by,
  * `kubernetesPullFailureDwellSecs` in chuggy's
- * `src/adapters/kubernetes/podFaults.ts`. It is counted from that pull, so a
- * runtime slow to pull before it takes none of it.
+ * `src/adapters/kubernetes/podFaults.ts`. It is counted from that failure, so
+ * neither a runtime slow to pull before it nor a pull slow to fail takes any
+ * of it.
  */
 export const pullFailureDwellMs = 120_000;
 
@@ -1742,8 +1743,9 @@ function unpullable(failure) {
  * a pull that fails is the image's fault: at once where the registry refused
  * the image or the reference names none, and otherwise, since any other cause
  * can pass, only once it has gone on failing until `pullFailureDwellMs` after
- * the first pull. An engine that could not be reached, a pool with no
- * token to pull with and the deadline are this runner's, never the image's.
+ * the first such failure. An engine that could not be reached, a pool with no
+ * token to pull with, a transfer the network cut short and the deadline are
+ * this runner's, never the image's.
  *
  * @param {State} state
  * @param {Placement} placement
@@ -1751,6 +1753,8 @@ function unpullable(failure) {
 async function jobImagePulled(state, placement) {
   const { settings, seams } = state;
   const firstPullMs = seams.nowMs();
+  /** @type {number | undefined} */
+  let firstFailureMs;
   for (;;) {
     try {
       await placementImagePulled(state, placement, firstPullMs);
@@ -1761,11 +1765,12 @@ async function jobImagePulled(state, placement) {
         engineFailure(failure.answer) === "Unreachable"
       )
         throw failure;
-      if (
-        enginePullRefused(failure.answer) ||
-        seams.nowMs() - firstPullMs >= pullFailureDwellMs
-      )
-        throw unpullable(failure);
+      if (enginePullRefused(failure.answer)) throw unpullable(failure);
+      if (engineFailure(failure.answer) !== "TransferCut") {
+        firstFailureMs ??= seams.nowMs();
+        if (seams.nowMs() - firstFailureMs >= pullFailureDwellMs)
+          throw unpullable(failure);
+      }
       seams.log(
         `${placement.name}: its image could not be pulled yet, and is pulled again: ${engineFailureLine(failure.answer)}`,
       );
