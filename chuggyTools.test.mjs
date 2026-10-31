@@ -53,6 +53,7 @@ import {
   chuggyToolServer,
   chuggyToolSignal,
   chuggyTranscriptBodyBytesMax,
+  readConfigurationChildCharsMax,
   sessionAllowedTools,
   sessionBuiltInTools,
   sessionCapabilityTools,
@@ -1502,6 +1503,258 @@ test("a draft's initialization is answered without its configuration's canonical
     !body.includes("dependencyCandidates"),
     "the dependency candidates were answered",
   );
+});
+
+/** A configuration route's body carrying `document` as its canonical. */
+function configurationAnswered(document) {
+  return JSON.stringify({
+    partition: { tenant: task.tenant, project: task.project },
+    revision: "r1",
+    canonical: JSON.stringify(document),
+    digest: "sha256:ab",
+  });
+}
+
+/** The tools with the configuration route answering `document`. */
+function configurationToolsOf(document) {
+  return toolsOf({}, () => ({
+    status: 200,
+    body: configurationAnswered(document),
+  }));
+}
+
+/** A read_configuration answer that is no refusal, parsed past its status line. */
+function configurationRead(answer) {
+  assert.equal(answer.isError, undefined, textOf(answer));
+  const text = textOf(answer);
+  assert.equal(text.slice(0, text.indexOf("\n")), "HTTP 200");
+  return JSON.parse(text.slice(text.indexOf("\n") + 1));
+}
+
+/**
+ * Every piece of a string or every entry of an outline at `path`, read on by
+ * `offset` until nothing is left, with how many answers that took. The reads
+ * are bounded by the characters they could ever answer.
+ */
+async function configurationReadOn(call, path, length) {
+  const pieces = [];
+  let offset;
+  for (let reads = 1; reads <= length; reads += 1) {
+    const read = configurationRead(
+      await call("read_configuration", { revision: "r1", path, offset }),
+    );
+    assert.equal(read.offset, offset ?? 0);
+    pieces.push(read);
+    const left = read.charsLeft ?? read.entriesLeft;
+    if (left === 0) return pieces;
+    offset = read.offset + (read.text?.length ?? read.outline.length);
+    assert.match(read.note, new RegExp(`offset ${String(offset)} reads on`));
+  }
+  assert.fail("the reads never reached the end");
+}
+
+/** A prompt as long as `chars`, escaped twice over in a route's body and holding a pair that is one code point. */
+function configurationPrompt(chars) {
+  return 'Read "the diff" 🙂.\n'.repeat(chars / 20);
+}
+
+/** A catalog whose canonical fits a configuration, and whose route body is more than one answer holds and more than an ordinary read draws. */
+const catalogOverBounds = {
+  version: 2,
+  workloads: Object.fromEntries(
+    ["work", "review", "security", "docs", "tests"].map((name) => [
+      name,
+      { prompt: configurationPrompt(10_000), model: "opus" },
+    ]),
+  ),
+  plans: { standard: { stages: [{ name: "review", evaluators: ["review"] }] } },
+  finalizers: { land: { landing: "PullRequest" } },
+  defaults: { work: "work", evaluation: "standard", finalization: "land" },
+};
+
+test("a catalog over both bounds is answered as an outline with no path, and a workload and its prompt whole by path", async () => {
+  const body = configurationAnswered(catalogOverBounds);
+  assert.ok(Buffer.byteLength(body) > chuggyToolResponseBytesMax);
+  const { call } = configurationToolsOf(catalogOverBounds);
+
+  const outline = configurationRead(
+    await call("read_configuration", { revision: "r1" }),
+  );
+  assert.deepEqual(outline.path, []);
+  assert.equal(outline.kind, "object");
+  assert.equal(outline.entriesLeft, 0);
+  assert.deepEqual(outline.outline, [
+    { key: "version", value: 2 },
+    {
+      key: "workloads",
+      kind: "object",
+      entries: 5,
+      chars: JSON.stringify(catalogOverBounds.workloads).length,
+    },
+    { key: "plans", value: catalogOverBounds.plans },
+    { key: "finalizers", value: catalogOverBounds.finalizers },
+    { key: "defaults", value: catalogOverBounds.defaults },
+  ]);
+  assert.match(outline.note, /Append an entry's key to path/);
+
+  assert.deepEqual(
+    configurationRead(
+      await call("read_configuration", {
+        revision: "r1",
+        path: ["workloads", "review"],
+      }),
+    ),
+    catalogOverBounds.workloads.review,
+  );
+  assert.equal(
+    configurationRead(
+      await call("read_configuration", {
+        revision: "r1",
+        path: ["workloads", "review", "prompt"],
+      }),
+    ),
+    catalogOverBounds.workloads.review.prompt,
+  );
+});
+
+test("a prompt too long for one answer is read to its end by offset, never split inside a code point", async () => {
+  const prompt = `${configurationPrompt(20_000)}${"🙂".repeat(10_000)}`;
+  const { call } = configurationToolsOf({
+    version: 2,
+    workloads: { review: { prompt } },
+  });
+  const path = ["workloads", "review", "prompt"];
+
+  const pieces = await configurationReadOn(call, path, prompt.length);
+
+  assert.ok(pieces.length > 1);
+  for (const piece of pieces) assert.ok(piece.text.isWellFormed());
+  assert.equal(pieces.map(({ text }) => text).join(""), prompt);
+  const past = await call("read_configuration", {
+    revision: "r1",
+    path,
+    offset: prompt.length + 1,
+  });
+  assert.equal(past.isError, true);
+  assert.match(textOf(past), /past the end of this string/);
+});
+
+test("an outline too long for one answer is read to its end by offset", async () => {
+  const workloads = Object.fromEntries(
+    Array.from({ length: 150 }, (_, index) => [
+      `workload-${String(index)}`,
+      { prompt: `${"p".repeat(180)}${String(index)}` },
+    ]),
+  );
+  for (const child of Object.values(workloads))
+    assert.ok(JSON.stringify(child).length <= readConfigurationChildCharsMax);
+  const { call } = configurationToolsOf({ version: 2, workloads });
+
+  const pieces = await configurationReadOn(
+    call,
+    ["workloads"],
+    Object.keys(workloads).length,
+  );
+
+  assert.ok(pieces.length > 1);
+  assert.deepEqual(
+    pieces.flatMap(({ outline }) => outline),
+    Object.entries(workloads).map(([key, value]) => ({ key, value })),
+  );
+});
+
+test("a version 1 document is navigated as a catalog is", async () => {
+  const prompt = configurationPrompt(40_000);
+  const document = {
+    worker: { mode: { type: "SingleAgent", agent: "Claude" } },
+    review: { prompt },
+    evaluations: [{ prompt: "check" }],
+  };
+  const { call } = configurationToolsOf(document);
+
+  const outline = configurationRead(
+    await call("read_configuration", { revision: "r1" }),
+  );
+  assert.deepEqual(
+    outline.outline.map(({ key }) => key),
+    ["worker", "review", "evaluations"],
+  );
+  assert.deepEqual(outline.outline[1], {
+    key: "review",
+    kind: "object",
+    entries: 1,
+    chars: JSON.stringify(document.review).length,
+  });
+  for (const path of [
+    ["evaluations", 0],
+    ["evaluations", "0"],
+  ])
+    assert.deepEqual(
+      configurationRead(
+        await call("read_configuration", { revision: "r1", path }),
+      ),
+      document.evaluations[0],
+    );
+  const pieces = await configurationReadOn(
+    call,
+    ["review", "prompt"],
+    prompt.length,
+  );
+  assert.equal(pieces.map(({ text }) => text).join(""), prompt);
+});
+
+test("a configuration that fits one answer is answered as the route answered it", async () => {
+  const body = configurationAnswered({
+    version: 2,
+    workloads: { review: { prompt: "Review it." } },
+  });
+  const { call } = toolsOf({}, () => ({ status: 200, body }));
+
+  const answer = await call("read_configuration", { revision: "r1" });
+
+  assert.equal(answer.isError, undefined);
+  assert.equal(textOf(answer), `HTTP 200\n${body}`);
+});
+
+test("a path the configuration does not hold is refused, naming what is there", async () => {
+  const { call } = configurationToolsOf(catalogOverBounds);
+  const refused = async (path) => {
+    const answer = await call("read_configuration", { revision: "r1", path });
+    assert.equal(answer.isError, true, path.join("/"));
+    return textOf(answer);
+  };
+
+  assert.equal(
+    await refused(["workloads", "lint"]),
+    'the configuration holds no "lint" at ["workloads"], which is an object whose keys are ["work","review","security","docs","tests"].',
+  );
+  assert.equal(
+    await refused(["plans", "standard", "stages", 1]),
+    'the configuration holds no 1 at ["plans","standard","stages"], which is an array whose indices are 0 to 0.',
+  );
+  assert.equal(
+    await refused(["version", "name"]),
+    'the configuration holds no "name" at ["version"], which is a number and holds no keys.',
+  );
+});
+
+test("a draft's initialization is answered for a catalog whose route body is more than an ordinary read draws", async () => {
+  const body = JSON.stringify({
+    ...draftInitialized,
+    configuration: {
+      ...draftInitialized.configuration,
+      canonical: JSON.stringify(catalogOverBounds),
+    },
+  });
+  assert.ok(Buffer.byteLength(body) > chuggyToolResponseBytesMax);
+  const { call } = toolsOf({}, () => ({ status: 200, body }));
+
+  const answer = await call("initialize_draft", { revision: "r1" });
+
+  assert.equal(answer.isError, undefined, textOf(answer));
+  const answered = JSON.parse(textOf(answer).split("\n")[1]);
+  assert.deepEqual(answered.fence, draftInitialized.fence);
+  assert.ok(!("canonical" in answered.configuration));
 });
 
 /** A request that hangs until its signal aborts, then rejects with that signal's reason, as fetch does. */

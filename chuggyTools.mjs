@@ -66,6 +66,15 @@
  * what one landing weighs, and the suite holds the heaviest one inside an
  * answer.
  *
+ * ANOTHER IS A CONFIGURATION, ANSWERED BY `path` where it is larger than one
+ * answer. Its route answers the canonical whole, bounded by what a
+ * configuration may hold rather than by what one answer holds, so
+ * `read_configuration` answers the value at `path` in it: whole where it fits,
+ * and otherwise an object or an array as the outline of its entries and a
+ * string cut to fit, each read on by `offset`. `initialize_draft` draws its
+ * route's body under the same bound, since that body carries the canonical
+ * too.
+ *
  * THREE ARE ANSWERED RESHAPED. `list_repositories` adds to each row whether a
  * ticket may be filed in it, read from that row alone, and `initialize_draft`
  * leaves out the configuration's `canonical`, which `read_configuration`
@@ -621,8 +630,14 @@ async function readTicketLandings(context, path) {
  * verbatim: `undefined` from `reshape` is a body that is not `what` as the
  * route answers it. A refusal is relayed as any read's is.
  */
-async function readReshaped(context, path, what, reshape) {
-  const body = await drawn(context, path, chuggyToolResponseBytesMax, what);
+async function readReshaped(
+  context,
+  path,
+  what,
+  reshape,
+  bytesMax = chuggyToolResponseBytesMax,
+) {
+  const body = await drawn(context, path, bytesMax, what);
   if (body.refused !== undefined) return body.refused;
   let parsed;
   try {
@@ -638,6 +653,217 @@ async function readReshaped(context, path, what, reshape) {
         true,
       )
     : answered(`HTTP ${String(body.status)}\n${JSON.stringify(reshaped)}`);
+}
+
+/** The longest a child's JSON may be and still be written whole in an outline. */
+export const readConfigurationChildCharsMax = 255;
+
+/** The most keys a `path` may walk. */
+const readConfigurationPathKeysMax = 64;
+
+/** The longest key a `path` may name. */
+const readConfigurationKeyCharsMax = 1_024;
+
+/** What `value` is, as an outline or a refusal names it. */
+function readConfigurationKind(value) {
+  if (value === null) return "null";
+  return Array.isArray(value) ? "array" : typeof value;
+}
+
+/** An object's or an array's entries as key and child, an array's keyed by index. */
+function readConfigurationEntries(value) {
+  return Array.isArray(value)
+    ? value.map((child, index) => [index, child])
+    : Object.entries(value);
+}
+
+/** The index `key` names in an array of `length`, or nothing where it names none. */
+function readConfigurationIndex(key, length) {
+  const index =
+    typeof key === "string" && /^(0|[1-9][0-9]*)$/.test(key)
+      ? Number(key)
+      : key;
+  return Number.isSafeInteger(index) && index < length ? index : undefined;
+}
+
+/** The child `key` names in `value`, or nothing where `value` holds none by it. */
+function readConfigurationChild(value, key) {
+  if (Array.isArray(value)) {
+    const index = readConfigurationIndex(key, value.length);
+    return index === undefined ? undefined : { child: value[index] };
+  }
+  return value !== null &&
+    typeof value === "object" &&
+    typeof key === "string" &&
+    Object.hasOwn(value, key)
+    ? { child: value[key] }
+    : undefined;
+}
+
+/**
+ * A count in `0..total` whose `compose` fits one answer and whose next does
+ * not, or `total` where that fits: the largest that fits wherever a larger
+ * count never composes a lighter answer. `compose(0)` fits.
+ */
+function readConfigurationFitting(total, compose) {
+  let low = 0;
+  let high = total;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (chuggyToolAnswerFits(compose(middle))) low = middle;
+    else high = middle - 1;
+  }
+  return low;
+}
+
+/** Why `path` walks out of the document at its `depth`th key, naming what is there instead. */
+function readConfigurationMissing(path, depth, value) {
+  const opening = `the configuration holds no ${JSON.stringify(path[depth])} at ${JSON.stringify(path.slice(0, depth))}`;
+  const kind = readConfigurationKind(value);
+  if (Array.isArray(value))
+    return value.length === 0
+      ? `${opening}, which is an empty array.`
+      : `${opening}, which is an array whose indices are 0 to ${String(value.length - 1)}.`;
+  if (kind !== "object")
+    return `${opening}, which is a ${kind} and holds no keys.`;
+  const keys = Object.keys(value);
+  const compose = (named) => {
+    const left = keys.length - named;
+    return `${opening}, which is an object whose keys are ${JSON.stringify(keys.slice(0, named))}${left > 0 ? ` and ${String(left)} more` : ""}.`;
+  };
+  return compose(readConfigurationFitting(keys.length, compose));
+}
+
+/** One outline entry: its key, and its child whole where that is short, or what the child is. */
+function readConfigurationOutlineEntry([key, child]) {
+  const text = JSON.stringify(child);
+  if (text.length <= readConfigurationChildCharsMax)
+    return { key, value: child };
+  const kind = readConfigurationKind(child);
+  return kind === "string"
+    ? { key, kind, chars: child.length }
+    : {
+        key,
+        kind,
+        entries: readConfigurationEntries(child).length,
+        chars: text.length,
+      };
+}
+
+/** An object or an array too large for one answer, as the outline of its entries from `offset` that fits. */
+function readConfigurationOutline(head, path, value, offset) {
+  const kind = readConfigurationKind(value);
+  const entries = readConfigurationEntries(value);
+  const outline = entries.slice(offset).map(readConfigurationOutlineEntry);
+  const compose = (listed) => {
+    const left = outline.length - listed;
+    const next = offset + listed;
+    return `${head}${JSON.stringify({
+      path,
+      kind,
+      entries: entries.length,
+      chars: JSON.stringify(value).length,
+      offset,
+      outline: outline.slice(0, listed),
+      entriesLeft: left,
+      note: `This ${kind} is larger than one answer holds, so this is its outline: each entry's child whole where it is short, and otherwise its kind, its entries and its length in characters. ${left > 0 ? `${String(left)} entries are left, which offset ${String(next)} reads on from. ` : ""}Append an entry's key to path to read that child.`,
+    })}`;
+  };
+  return compose(readConfigurationFitting(outline.length, compose));
+}
+
+/**
+ * A string too long for one answer, as the piece from `offset` that fits and
+ * whose next longer does not. A piece ending inside a surrogate pair weighs
+ * more than the one a unit longer, because JSON escapes the lone half, so the
+ * piece found never ends inside one.
+ */
+function readConfigurationCut(head, path, value, offset) {
+  const compose = (taken) => {
+    const next = offset + taken;
+    const left = value.length - next;
+    return `${head}${JSON.stringify({
+      path,
+      kind: "string",
+      chars: value.length,
+      offset,
+      text: value.slice(offset, next),
+      charsLeft: left,
+      note:
+        left > 0
+          ? `This string is longer than one answer holds; ${String(left)} characters are left, which offset ${String(next)} reads on from.`
+          : "This is the string's end.",
+    })}`;
+  };
+  return compose(readConfigurationFitting(value.length - offset, compose));
+}
+
+/**
+ * The answer at `path` in a configuration's parsed canonical `document`: the
+ * value whole where it fits, an object or an array too large as its outline,
+ * and a string too long as a piece of it, both read on from by `offset`. A
+ * `path` the document does not hold, or an `offset` past the end, is refused.
+ */
+function readConfigurationAnswer(status, document, path, offset = 0) {
+  let value = document;
+  for (const [depth, key] of path.entries()) {
+    const held = readConfigurationChild(value, key);
+    if (held === undefined)
+      return answered(readConfigurationMissing(path, depth, value), true);
+    value = held.child;
+  }
+  const head = `HTTP ${String(status)}\n`;
+  const whole = `${head}${JSON.stringify(value)}`;
+  if (chuggyToolAnswerFits(whole)) return answered(whole);
+  const kind = readConfigurationKind(value);
+  const length =
+    kind === "string" ? value.length : readConfigurationEntries(value).length;
+  if (offset > length)
+    return answered(
+      `offset ${String(offset)} is past the end of this ${kind}, which has ${String(length)} ${kind === "string" ? "characters" : "entries"}.`,
+      true,
+    );
+  return kind === "string"
+    ? answered(readConfigurationCut(head, path, value, offset))
+    : answered(readConfigurationOutline(head, path, value, offset));
+}
+
+/** A configuration route's body's canonical document, parsed, or nothing where the body is not one. */
+function readConfigurationDocument(text) {
+  try {
+    const { canonical } = JSON.parse(text) ?? {};
+    return typeof canonical === "string"
+      ? { document: JSON.parse(canonical) }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * One configuration revision. With no `path`, a body that fits one answer is
+ * answered verbatim; otherwise its canonical is parsed and
+ * answered at `path` by `readConfigurationAnswer`. It is drawn under a bound
+ * its whole canonical fits, which the route's own body bound is not.
+ */
+async function readConfiguration(context, route, path, offset) {
+  const body = await drawn(
+    context,
+    route,
+    chuggyToolDispatchViewResponseBytesMax,
+    "this configuration",
+  );
+  if (body.refused !== undefined) return body.refused;
+  const verbatim = `HTTP ${String(body.status)}\n${body.text}`;
+  if (path === undefined && chuggyToolAnswerFits(verbatim))
+    return answered(verbatim);
+  const parsed = readConfigurationDocument(body.text);
+  return parsed === undefined
+    ? answered(
+        `the configuration route answered HTTP ${String(body.status)} with a body that is not a configuration as the contract answers it.`,
+        true,
+      )
+    : readConfigurationAnswer(body.status, parsed.document, path ?? [], offset);
 }
 
 /** Why a ticket filed in a listed binding would not run, or nothing where it would. */
@@ -1159,12 +1385,30 @@ export const chuggyProjectTools = [
   {
     name: "read_configuration",
     description:
-      "One configuration revision's canonical document, as a draft is authored against it. Call it for who does a ticket's work and what evaluates it. `canonical` is the stored document as JSON text, and its `worker.mode` is who does the work of a ticket released against it: the agent, and what that agent is started with, a model where the configuration names one. Its evaluation stages run in the order listed and a failed stage ends evaluation, while the evaluators of one stage run in parallel; in a catalog each evaluator of a plan stage names its own workload, so review lenses that should run side by side belong in one stage.",
-    shape: (z) => ({ revision: revision(z) }),
-    call: (context, args) =>
-      read(
+      "One configuration revision's canonical document, as a draft is authored against it. Call it for who does a ticket's work and what evaluates it. `canonical` is the stored document as JSON text, and its `worker.mode` is who does the work of a ticket released against it: the agent, and what that agent is started with, a model where the configuration names one. Its evaluation stages run in the order listed and a failed stage ends evaluation, while the evaluators of one stage run in parallel; in a catalog each evaluator of a plan stage names its own workload, so review lenses that should run side by side belong in one stage. A configuration larger than one answer is read by `path`, keys walking into the parsed `canonical`: the value there is answered whole where it fits; an object or an array that does not is answered as its outline, each entry's key with its child whole where that is short and otherwise the child's kind, entries and length in characters; a string that does not is answered cut to fit; and either says how much is left, which `offset` reads on from. With no `path`, a configuration that fits is answered as before and one that does not as the outline of its `canonical`. A `path` the document does not hold is refused, naming the keys where it stopped.",
+    shape: (z) => ({
+      revision: revision(z),
+      path: z
+        .array(
+          z.union([z.string().max(readConfigurationKeyCharsMax), count(z)]),
+        )
+        .max(readConfigurationPathKeysMax)
+        .describe(
+          'The keys walking into the parsed `canonical`, an array\'s entries by index, such as ["workloads", "review", "prompt"]; left out, the whole configuration.',
+        )
+        .optional(),
+      offset: count(z)
+        .describe(
+          "Where an outline's entries or a cut string's characters read on from, as the previous answer at the same `path` said; left out, the start.",
+        )
+        .optional(),
+    }),
+    call: (context, { revision: given, path, offset }) =>
+      readConfiguration(
         context,
-        projectPath(context, "configuration", { revision: args.revision }),
+        projectPath(context, "configuration", { revision: given }),
+        path,
+        offset,
       ),
   },
   {
@@ -1412,7 +1656,7 @@ export const chuggyProjectTools = [
   {
     name: "initialize_draft",
     description:
-      "The defaults and the fence a new draft is filed against, for one configuration revision. Call it before create_draft or file_dependent. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from: each stage's `key` and each evaluator's `key` are positions counted from one in the configuration's plan, and passing it unchanged runs the whole plan. `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, stage N runs the selected plan's Nth stage, and `defaults` and `choices` are those of the selection passed. `commandedCheckStage` is the stage a brief's `checks` join, by its program stage key, counted from one as `defaults.program` keys are, and absent where none takes them, and `commandedCheckStageNote` says it in words: the same stage and, for a catalog, the plan and the stage's name, or that none does and which plans would. `configuration` is answered without its `canonical`; read_configuration answers the document. Dependencies are chosen from list_tickets.",
+      "The defaults and the fence a new draft is filed against, for one configuration revision. Call it before create_draft or file_dependent. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from: each stage's `key` and each evaluator's `key` are positions counted from one in the configuration's plan, and passing it unchanged runs the whole plan. `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, stage N runs the selected plan's Nth stage, and `defaults` and `choices` are those of the selection passed. `commandedCheckStage` is the stage a brief's `checks` join, by its program stage key, counted from one as `defaults.program` keys are, and absent where none takes them, and `commandedCheckStageNote` says it in words: the same stage and, for a catalog, the plan and the stage's name, or that none does and which plans would. `configuration` is answered without its `canonical`; read_configuration answers the document, by `path` where it is larger than one answer. Dependencies are chosen from list_tickets.",
     shape: (z) => ({
       revision: revision(z),
       work: identity(z)
@@ -1437,6 +1681,7 @@ export const chuggyProjectTools = [
         `${projectPath(context, "draftInitialization", { revision })}${search({ work, evaluation, finalization })}`,
         "a draft's initialization",
         initializeDraftUncanonical,
+        chuggyToolDispatchViewResponseBytesMax,
       ),
   },
   {
