@@ -19,6 +19,21 @@ function gitFailed(stderr) {
   });
 }
 
+/** GitHub's own failure, as a push met it: its first line keeps the trailing spaces git prints. */
+const commitRefsFailed = `remote: fatal error in commit_refs        
+To https://github.com/eannagroup/argus.git
+ ! [remote rejected] 8d84c8eb6de6098ddbe8b3e6bbb049f5a02e4ad1 -> chuggy/tickets/283/attempts/2c8dea2a7bd2021edf8f9da4d6d576dbc769593a2708612519e373060a9ac450 (failure)
+error: failed to push some refs to 'https://github.com/eannagroup/argus.git'
+`;
+
+/** GitHub refusing an App a workflow file, as a push met it. */
+const workflowRefused = ` ! [remote rejected] 8d84c8eb6de6098ddbe8b3e6bbb049f5a02e4ad1 -> chuggy/tickets/348/attempts/1 (refusing to allow a GitHub App to create or update workflow \`.github/workflows/ci.yml\` without \`workflows\` permission)
+`;
+
+/** What the workflow refusal's line says after GitHub's own words. */
+const workflowNeeds =
+  "In chuggy, the repository's Workflow files setting must be On, and the App must hold Workflows.";
+
 /** What the remote answers when it refuses, each as git reports it. */
 const refused = {
   "a denied credential": `remote: Permission to acme/widgets.git denied to bot.\nfatal: unable to access '${remote}': The requested URL returned error: 403\n`,
@@ -28,6 +43,11 @@ const refused = {
   "a protected branch": `remote: error: GH006: Protected branch update failed for refs/heads/main.\nTo ${remote}\n ! [remote rejected] main -> main (protected branch hook declined)\nerror: failed to push some refs to '${remote}'\n`,
   "a rejected update": `To ${remote}\n ! [rejected]        main -> main (fetch first)\nerror: failed to push some refs to '${remote}'\n`,
   "a declining hook": `remote: rejected by policy\nTo ${remote}\n ! [remote rejected] main -> main (pre-receive hook declined)\n`,
+  "a rejection as a failure, with no word from GitHub of its own": `To ${remote}\n ! [remote rejected] main -> main (failure)\nerror: failed to push some refs to '${remote}'\n`,
+  "GitHub's own failure alongside a protected branch": `${commitRefsFailed}remote: error: GH006: Protected branch update failed for refs/heads/main.\n ! [remote rejected] main -> main (protected branch hook declined)\n`,
+  "a rejection as a failure, a hook quoting GitHub's words": `remote: lint: remote: fatal error in commit_refs\nTo ${remote}\n ! [remote rejected] main -> main (failure)\n`,
+  "GitHub's own failure, the ref rejected for another reason": `remote: fatal error in commit_refs\nTo ${remote}\n ! [remote rejected] main -> main (pre-receive hook declined)\n`,
+  "a workflow file refused to an App": workflowRefused,
   "a request too large, git ending it by hanging up": `error: RPC failed; HTTP 413 curl 22 The requested URL returned error: 413\nsend-pack: unexpected disconnect while reading sideband packet\nfatal: the remote end hung up unexpectedly\n`,
 };
 
@@ -43,6 +63,7 @@ const transient = {
   "a failed handshake": `fatal: unable to access '${remote}': gnutls_handshake() failed: The TLS connection was non-properly terminated.\n`,
   "a broken transfer": `error: RPC failed; curl 56 GnuTLS recv error (-9): Error decoding the received TLS packet.\nfatal: early EOF\n`,
   "a dropped sideband": `fetch-pack: unexpected disconnect while reading sideband packet\nfatal: early EOF\nfatal: fetch-pack: invalid index-pack output\n`,
+  "GitHub's own failure": commitRefsFailed,
 };
 
 /** What git writes when the remote found no repository, each as git reports it. */
@@ -60,6 +81,8 @@ const unnamed = {
   "a pre-push hook quoting GitHub's words before its own": `remote: Repository not found. says lint\nerror: failed to push some refs to '${remote}'\n`,
   "a pre-push hook quoting git's words after its own": `lint: fatal: repository 'widgets' not found\nerror: failed to push some refs to '${remote}'\n`,
   "a pre-push hook quoting git's words before its own": `fatal: repository 'widgets' not found, says lint\nerror: failed to push some refs to '${remote}'\n`,
+  "GitHub's failure line alone": `remote: fatal error in commit_refs\nerror: failed to push some refs to '${remote}'\n`,
+  "a ref named for GitHub's failure": `To ${remote}\n ! [remote rejected] main -> remote:fatal-error-in-commit_refs (failure)\n`,
   "a remote that hung up": `fatal: the remote end hung up unexpectedly\n`,
   "a certificate the image does not trust": `fatal: unable to access '${remote}': SSL certificate problem: unable to get local issuer certificate\n`,
   "a child with no standard error": undefined,
@@ -204,6 +227,36 @@ test("the line a failure is named by is the one that decided it, and otherwise g
     gitFailureLine(gitFailed(unnamed["a pre-push hook"])),
     `error: failed to push some refs to '${remote}'`,
   );
+  assert.equal(
+    gitFailureLine(gitFailed(commitRefsFailed)),
+    "remote: fatal error in commit_refs",
+  );
+  assert.equal(
+    gitFailureLine(
+      gitFailed(refused["GitHub's own failure alongside a protected branch"]),
+    ),
+    "remote: error: GH006: Protected branch update failed for refs/heads/main.",
+  );
   assert.equal(gitFailureLine(gitFailed("lint failed\n")), undefined);
   assert.equal(gitFailureLine(new Error("spawn git ENOENT")), undefined);
+});
+
+test("a workflow refusal is named by GitHub's line and then what it needs", () => {
+  assert.equal(
+    gitFailureLine(gitFailed(workflowRefused)),
+    `${workflowRefused.trim()} ${workflowNeeds}`,
+  );
+});
+
+test("a refusal only named for a workflow refusal is not told what one needs", () => {
+  const named = "refusing-to-allow-a-GitHub-App-to-create-or-update-workflow";
+  for (const stderr of [
+    `To https://github.com/acme/${named}.git\n ! [remote rejected] main -> main (protected branch hook declined)\n`,
+    `To ${remote}\n ! [remote rejected] main -> ${named} (pre-receive hook declined)\n`,
+  ])
+    assert.equal(
+      gitFailureLine(gitFailed(stderr)).includes(workflowNeeds),
+      false,
+      stderr,
+    );
 });
