@@ -36,6 +36,11 @@
  * the same field name and says the opposite thing: the request is being retried,
  * not refused. So the assistant arm is guarded on `type`, and a rate-limited
  * retry the runtime recovered from is not a hold.
+ *
+ * A REJECTED FRAME SAYS WHEN THE WINDOW REOPENS, as `resetsAt`, in Unix seconds,
+ * and which window as `rateLimitType`. Only a rejected frame's are read, since
+ * an allowed frame names a window that is refusing nothing, and a later status
+ * drops them. The sentence the runtime writes for a person is never parsed.
  */
 
 const rateLimitEventType = "rate_limit_event";
@@ -43,16 +48,34 @@ const rateLimitRejectedStatus = "rejected";
 const assistantMessageType = "assistant";
 const rateLimitErrorKind = "rate_limit";
 
+/** The last second a date can name, past which no reset is one. */
+const rateLimitResetsAtSecsMax = 8_640_000_000_000;
+
 /** What has been seen so far, which until a frame says otherwise is nothing. */
 export function rateLimitSightings() {
-  return { status: undefined, refused: false };
+  return { status: undefined, refused: false, reset: undefined };
+}
+
+/** When the window a frame's `info` refuses reopens and which it is, or nothing where it refuses none or does not say. */
+function rateLimitResetOf(info) {
+  const { status, resetsAt, rateLimitType } = info;
+  if (status !== rateLimitRejectedStatus || !Number.isFinite(resetsAt))
+    return undefined;
+  if (resetsAt <= 0 || resetsAt > rateLimitResetsAtSecsMax) return undefined;
+  return {
+    resetsAtSecs: resetsAt,
+    window: typeof rateLimitType === "string" ? rateLimitType : undefined,
+  };
 }
 
 /** Folds one runtime frame into the sightings it may carry. */
 export function observeRateLimit(sightings, event) {
   if (event?.type === rateLimitEventType) {
-    const status = event.rate_limit_info?.status;
-    if (typeof status === "string") sightings.status = status;
+    const info = event.rate_limit_info;
+    if (typeof info?.status === "string") {
+      sightings.status = info.status;
+      sightings.reset = rateLimitResetOf(info);
+    }
     return sightings;
   }
   if (

@@ -338,22 +338,23 @@ function reportedModels(modelUsage) {
     }));
 }
 
-function foldedModels(turns) {
+function foldedModels(rows) {
   const byModel = new Map();
-  for (const turn of turns.slice(0, runTurnSeriesMax)) {
-    const held = byModel.get(turn.model) ?? {
-      model: turn.model,
+  for (const row of rows.slice(0, runTurnSeriesMax)) {
+    const held = byModel.get(row.model) ?? {
+      model: row.model,
       tokensInput: 0,
       tokensOutput: 0,
       tokensCacheCreation: 0,
       tokensCacheRead: 0,
       costUsdMicros: 0,
     };
-    held.tokensInput += turn.tokensInput;
-    held.tokensOutput += turn.tokensOutput;
-    held.tokensCacheCreation += turn.tokensCacheCreation;
-    held.tokensCacheRead += turn.tokensCacheRead;
-    byModel.set(turn.model, held);
+    held.tokensInput += row.tokensInput;
+    held.tokensOutput += row.tokensOutput;
+    held.tokensCacheCreation += row.tokensCacheCreation;
+    held.tokensCacheRead += row.tokensCacheRead;
+    held.costUsdMicros += row.costUsdMicros ?? 0;
+    byModel.set(row.model, held);
   }
   return [...byModel.values()].slice(0, nativeHttpPageItemsMax);
 }
@@ -402,6 +403,41 @@ export function runTotals(result, turns) {
 }
 
 /**
+ * A resumed process's totals on top of `earlier`, the whole of what the run has
+ * spent. A process counts its tokens, turns, wall time and denials from its own
+ * start, so those add. Its cost, its API time and its model rows carry on from
+ * the session it resumed, so its figures already hold `earlier`'s. Where it
+ * ended without accounting for itself, `accounted` being false, `earlier`'s
+ * stand with what its turns folded to. The subtype and stop reason are its own.
+ */
+function runTotalsResumed(earlier, resumed, accounted) {
+  return {
+    ...resumed,
+    tokensInput: earlier.tokensInput + resumed.tokensInput,
+    tokensOutput: earlier.tokensOutput + resumed.tokensOutput,
+    tokensCacheCreation:
+      earlier.tokensCacheCreation + resumed.tokensCacheCreation,
+    tokensCacheRead: earlier.tokensCacheRead + resumed.tokensCacheRead,
+    turns: earlier.turns + resumed.turns,
+    durationMs: earlier.durationMs + resumed.durationMs,
+    permissionDenials: earlier.permissionDenials + resumed.permissionDenials,
+    durationApiMs: Math.max(earlier.durationApiMs, resumed.durationApiMs),
+    costUsdMicros: Math.max(earlier.costUsdMicros, resumed.costUsdMicros),
+    models: accounted
+      ? resumed.models
+      : foldedModels([...earlier.models, ...resumed.models]),
+  };
+}
+
+/** What the run has spent so far: its process's totals on those before it. */
+function runTotalsSoFar(state) {
+  const latest = runTotals(state.result, state.turns.slice(state.turnsCarried));
+  return state.carried === undefined
+    ? latest
+    : runTotalsResumed(state.carried, latest, state.result !== undefined);
+}
+
+/**
  * Which of the plane's run-ended labels this failure was. A run that stopped at
  * one of the harness's own steps is labelled by that `step`, whatever else it
  * saw. A run the runtime accounted for is labelled by that account, so a
@@ -428,6 +464,10 @@ function turnsTruncationLine(turns) {
   return JSON.stringify({ type: "chuggy_turns_truncated", turns });
 }
 
+function runHeldLine({ until, window }) {
+  return JSON.stringify({ type: "chuggy_run_held", until, window });
+}
+
 function evidenceState(scrub) {
   return {
     scrub,
@@ -443,6 +483,8 @@ function evidenceState(scrub) {
     turns: [],
     pending: [],
     result: undefined,
+    carried: undefined,
+    turnsCarried: 0,
     sightings: rateLimitSightings(),
     totalsPosted: false,
     flushing: undefined,
@@ -597,7 +639,7 @@ function evidenceUploads(state, call, warn, drain, done) {
         await call(workerPlaneRoutes.runTotals.path, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(runTotals(state.result, state.turns)),
+          body: JSON.stringify(runTotalsSoFar(state)),
         });
       } catch (failure) {
         refuse(state, warn, "run totals", failure);
@@ -665,6 +707,24 @@ export function runEvidenceRecorder(task, bearer, scrub, services = {}) {
     },
     observed(result) {
       state.result = result;
+    },
+    sightings: () => state.sightings,
+    /** The line saying the run is held, written to the transcript and answered for the log. */
+    held(hold) {
+      const line = runHeldLine(hold);
+      append(state.scrub(line));
+      return line;
+    },
+    /**
+     * A resumed process starting: what the one before it spent is carried, and
+     * what it saw of the limit is dropped, since that hold is over and this
+     * process's end is its own.
+     */
+    resumed() {
+      state.carried = runTotalsSoFar(state);
+      state.turnsCarried = state.turns.length;
+      state.result = undefined;
+      state.sightings = rateLimitSightings();
     },
   };
 }

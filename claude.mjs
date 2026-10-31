@@ -64,14 +64,12 @@ function configuredArguments(task) {
   return args;
 }
 
-/**
- * The argv of one run. The briefing comes after `--`, so it is the prompt
- * whatever precedes it: `--mcp-config` takes every word after it up to the
- * next option, as can an option a worker configures, and either would
- * otherwise take the briefing as one of its values. The configuration is
- * given as `--mcp-config=` for the same reason.
- */
-export function claudeInvocation(task) {
+/** What a run that was held is told when its conversation is resumed. */
+const claudeResumePrompt =
+  "The usage limit that stopped this run has reset. Carry on where you left off, in the same workspace, and finish the task.";
+
+/** Every argument of a run but its prompt. */
+function claudeRunArguments(task) {
   return [
     "-p",
     "--output-format",
@@ -84,8 +82,28 @@ export function claudeInvocation(task) {
     "--strict-mcp-config",
     `--mcp-config=${JSON.stringify({ mcpServers: {} })}`,
     ...configuredArguments(task),
+  ];
+}
+
+/**
+ * The argv of one run. The briefing comes after `--`, so it is the prompt
+ * whatever precedes it: `--mcp-config` takes every word after it up to the
+ * next option, as can an option a worker configures, and either would
+ * otherwise take the briefing as one of its values. The configuration is
+ * given as `--mcp-config=` for the same reason.
+ */
+export function claudeInvocation(task) {
+  return [...claudeRunArguments(task), "--", task.briefing.text];
+}
+
+/** The same run carrying on in the conversation `session` named. */
+export function claudeResumeInvocation(task, session) {
+  return [
+    ...claudeRunArguments(task),
+    "--resume",
+    session,
     "--",
-    task.briefing.text,
+    claudeResumePrompt,
   ];
 }
 
@@ -168,13 +186,20 @@ export function claudeCredentialPrepared(text, given = {}) {
   };
 }
 
+/** What a result frame says beyond its verdict: the runtime's own sentence and the conversation it ended. */
+function claudeEnded(event) {
+  return { sentence: event?.result, session: event?.session_id };
+}
+
 export const claudeAgent = {
   name: "Claude",
   runtime: "Claude Code",
   executable: coreRuntime.claude,
   credential: "claude-code",
   invocation: claudeInvocation,
+  resumeInvocation: claudeResumeInvocation,
   result: claudeResult,
+  ended: claudeEnded,
   prepareCredential: claudeCredentialPrepared,
   prepareShell: prepareClaudeShell,
   configurationEvent: (event) =>

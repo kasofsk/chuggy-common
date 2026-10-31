@@ -19,6 +19,11 @@ import {
   rateLimitSightings,
   rateLimited,
 } from "./rateLimit.mjs";
+import {
+  limitFrames,
+  limitRejected,
+  limitResetsAtSecs,
+} from "./rateLimit.fixture.mjs";
 
 /** `SDKRateLimitInfo.status` as `sdk.d.ts` declares it, in its declared order. */
 const declaredStatuses = ["allowed", "allowed_warning", "rejected"];
@@ -157,4 +162,74 @@ test("no other frame the runtime emits is read as a hold", () => {
       false,
       JSON.stringify(event ?? null),
     );
+});
+
+/** A frame of `info` beside what the real rejected frame carried. */
+function limitFrame(info) {
+  return {
+    ...limitRejected,
+    rate_limit_info: { ...limitRejected.rate_limit_info, ...info },
+  };
+}
+
+/** What folding `frames` leaves as the reset. */
+function resetAfter(...frames) {
+  return frames.reduce(observeRateLimit, rateLimitSightings()).reset;
+}
+
+test("a run the limit stopped says when its window reopens and which window it is", () => {
+  assert.deepEqual(resetAfter(...limitFrames), {
+    resetsAtSecs: limitResetsAtSecs,
+    window: "five_hour",
+  });
+});
+
+/**
+ * Catches a reset read from a frame that refuses nothing: an `allowed_warning`
+ * names a window nearing its limit, and a run held to that window's reset would
+ * wait out a limit that never stopped it.
+ */
+test("a reset is read only from a rejected frame", () => {
+  for (const status of declaredStatuses.filter((one) => one !== "rejected"))
+    assert.equal(resetAfter(limitFrame({ status })), undefined, status);
+});
+
+test("a later status drops the reset, as it drops the refusal", () => {
+  assert.equal(
+    resetAfter(limitRejected, limitFrame({ status: "allowed" })),
+    undefined,
+  );
+});
+
+test("a later frame's reset replaces the one before it", () => {
+  assert.equal(
+    resetAfter(limitRejected, limitFrame({ resetsAt: limitResetsAtSecs + 60 }))
+      .resetsAtSecs,
+    limitResetsAtSecs + 60,
+  );
+});
+
+test("a reset that names no instant is none", () => {
+  for (const resetsAt of [
+    undefined,
+    null,
+    "1793296800",
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    0,
+    -1,
+    8_640_000_000_001,
+  ])
+    assert.equal(
+      resetAfter(limitFrame({ resetsAt })),
+      undefined,
+      String(resetsAt),
+    );
+});
+
+test("a window that is not a name is none, and the reset still stands", () => {
+  assert.deepEqual(resetAfter(limitFrame({ rateLimitType: 5 })), {
+    resetsAtSecs: limitResetsAtSecs,
+    window: undefined,
+  });
 });

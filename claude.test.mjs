@@ -22,6 +22,7 @@ import {
   claudeEnvironment,
   claudeInvocation,
   claudeResult,
+  claudeResumeInvocation,
   claudeShellScript,
   prepareClaudeShell,
 } from "./claude.mjs";
@@ -31,6 +32,12 @@ import {
   strayEnvironment,
   strayLeftFor,
 } from "./claudeCredential.fixture.mjs";
+import { codexAgent } from "./codex.mjs";
+import {
+  limitResult,
+  limitSentence,
+  limitSession,
+} from "./rateLimit.fixture.mjs";
 import { agentShells, posixShells } from "./shells.fixture.mjs";
 
 /** Catches a job's agent moving a long command to the background, where the headless run kills it unseen. */
@@ -83,6 +90,50 @@ test("a configured Claude worker composes a valid default Claude invocation", as
     "--verbose",
     "--json-schema",
   ]);
+});
+
+/**
+ * Catches a resumed run that drops an option of the run it continues, its
+ * prompt no longer after `--`, or a session that lands where an option taking
+ * every word after it would swallow it.
+ */
+test("a resumed run is the same run in the conversation it left, told the limit reset", () => {
+  const task = {
+    worker: { mode: { arguments: ["--allowedTools", "Bash"] } },
+    briefing: { text: "briefing" },
+  };
+  const first = claudeInvocation(task);
+
+  const resumed = claudeResumeInvocation(task, "the-session");
+
+  const flags = first.slice(0, first.indexOf("--"));
+  assert.deepEqual(resumed.slice(0, flags.length), flags);
+  assert.deepEqual(resumed.slice(flags.length, flags.length + 3), [
+    "--resume",
+    "the-session",
+    "--",
+  ]);
+  assert.equal(resumed.length, flags.length + 4);
+  assert.match(resumed.at(-1), /limit .*has reset/u);
+  assert.ok(!resumed.includes("briefing"));
+  assert.equal(claudeAgent.resumeInvocation, claudeResumeInvocation);
+});
+
+/** Which runtime may resume is what decides whether a limit can be waited out. */
+test("a Codex run has no conversation to resume, so no limit of its is waited out", () => {
+  assert.equal(codexAgent.resumeInvocation, undefined);
+  assert.equal(codexAgent.ended, undefined);
+});
+
+test("a result frame says what the runtime said and which conversation it ended", () => {
+  assert.deepEqual(claudeAgent.ended(limitResult), {
+    sentence: limitSentence,
+    session: limitSession,
+  });
+  assert.deepEqual(claudeAgent.ended(undefined), {
+    sentence: undefined,
+    session: undefined,
+  });
 });
 
 test("the final structured event is retained after streamed progress", () => {
