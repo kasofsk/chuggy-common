@@ -3127,7 +3127,7 @@ test("a passing work attempt that rewrote the history below its base fails and p
 
     assert.equal(
       refused.message,
-      `commit ${amended} does not descend from ${checkout.base}, the commit this attempt started from: the history below it was rewritten, so the attempt pushes nothing. Add commits on top of ${checkout.base} instead, merging the target in rather than rebasing onto it.`,
+      `commit ${amended} does not descend from ${checkout.base}, the commit this attempt started from, so the attempt pushes nothing. A rebase does this, and so does checking out a different commit. Add commits on top of ${checkout.base} instead, merging the target in rather than rebasing onto it.`,
     );
     assert.equal(await remoteRefs(checkout.remote), "");
     assert.ok(!calls.some(({ path }) => path === "/v1/report"));
