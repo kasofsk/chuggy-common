@@ -35,7 +35,7 @@ const sourceObjectPlaces = new Map([
 /** What the directory a push is made from is named by, under the temporary directory. */
 const sourcePushPrefix = "chuggy-push-";
 
-/** What the directory a checkpoint's index is built in is named by, there too. */
+/** What the directory a keep or a restore works in apart from the workspace is named by, there too. */
 const sourceCheckpointPrefix = "chuggy-checkpoint-";
 
 /** Who the commits this core makes are by. */
@@ -365,10 +365,10 @@ export async function commitAndPushSource({
  * that follows it. Nothing reads this branch as a candidate; the next attempt
  * reads it as where to start (`sourceCheckpointRestored`).
  *
- * THE WORKSPACE IS LEFT AS IT WAS. The commit is built from a copy of the index
- * with plumbing alone, so `HEAD`, the index and the repository's configuration
- * do not move and a run resumed after it finds its tree and history as it left
- * them. No hook of the project's runs, so none can refuse half-done work
+ * THE WORKSPACE IS LEFT AS IT WAS. The commit is built from a copy of the index,
+ * so `HEAD`, the index and the repository's configuration do not move and a run
+ * resumed after it finds its tree and history as it left them. No hook of the
+ * project's runs, so none can refuse half-done work
  * (`sourceWithoutHooks`). What is provisioned is left out, and the push is
  * checked and made as a candidate's is, but for being forced
  * (`commitAndPushSource`). One that does not descend
@@ -468,10 +468,10 @@ export async function sourceCheckpointSeen({
 }
 
 /**
- * `work`, handed `command` with no hook of the project's in the git it runs, and
- * a directory of its own that goes with it. The hooks a run leaves are for a
- * candidate: one that refuses a ref's update would lose the work a keep is there
- * to save, or the start a restore is there to give.
+ * `work`, handed `command` with no hook or filesystem monitor of the project's
+ * in the git it runs, and a directory of its own that goes with it. The hooks a
+ * run leaves are for a candidate: one that refuses a ref's update would lose the
+ * work a keep is there to save, or the start a restore is there to give.
  */
 async function sourceWithoutHooks(command, work) {
   const made = resolve(
@@ -484,7 +484,13 @@ async function sourceWithoutHooks(command, work) {
       (executable, args, options) =>
         command(
           executable,
-          ["-c", `core.hooksPath=${hooks}`, ...args],
+          [
+            "-c",
+            `core.hooksPath=${hooks}`,
+            "-c",
+            "core.fsmonitor=false",
+            ...args,
+          ],
           options,
         ),
       made,
@@ -649,7 +655,7 @@ export function sourceRestoredBriefed(task, restored) {
   };
 }
 
-/** Where, in the directory a push is made from, its repository, its empty hooks directory, its empty global configuration and its empty home are. */
+/** Where, in a directory the core made, a push's repository, the empty hooks directory, the empty global configuration and the empty home are. */
 function sourcePushPlaces(made) {
   return {
     repository: join(made, "repository"),

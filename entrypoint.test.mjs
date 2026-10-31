@@ -91,7 +91,7 @@ import { runHoldMarginMs, runHoldReserveMs, runHoldsMax } from "./runHold.mjs";
 import {
   cloneRepository,
   commandStopped,
-  workFailureSaidMax,
+  workFailureSaidCharsMax,
   envelopeLaunch,
   envelopeTask,
   prepareWorker,
@@ -5793,12 +5793,14 @@ test("a mint answered after its keep was stopped writes nothing", async (t) => {
       t,
       checkout,
       [revokedRun()],
-      { request, write, asideCapMs: 200 },
+      { request, write, asideCapMs: 2_000 },
     );
 
     assert.match(failure.message, /could not be kept: it was stopped after/u);
     answer();
-    while (writes.length === 0) await wait(10);
+    for (let polls = 0; writes.length === 0 && polls < 3_000; polls += 1)
+      await wait(10);
+    assert.equal(writes.length, 1, "the late mint's answer was never written");
     await assert.rejects(writes[0], { code: "ENOENT" });
     assert.deepEqual(
       (await readdir(dirname(workspace))).filter((name) =>
@@ -6758,7 +6760,9 @@ test("a failure is scrubbed before it is cut", async (t) => {
     commandedRun(0),
     async () => {
       if (pushes.push("push") === 1) return { stdout: "" };
-      throw new Error(`${"x".repeat(workFailureSaidMax - 4)}${secret}xxxxxxxx`);
+      throw new Error(
+        `${"x".repeat(workFailureSaidCharsMax - 4)}${secret}xxxxxxxx`,
+      );
     },
     { context: { scrub: (text) => text.replaceAll(secret, "held") } },
   );

@@ -754,7 +754,7 @@ const workAsideCapMs = 1_200_000;
 const workAsideReportMs = workerPlaneAwayMillisecondsMax;
 
 /** How much of what a step aside failed with is carried beside the run's own failure. */
-export const workFailureSaidMax = 4_096;
+export const workFailureSaidCharsMax = 4_096;
 
 /** What the directory a push aside's credential is written in is named by, in the minted directory. */
 const workAsidePrefix = "chuggy-aside-";
@@ -844,10 +844,10 @@ function workFailureSaid(context, failure) {
  * its end. What is left starts with git's line saying why, which a flood buries.
  */
 function workFailureCut(said) {
-  if (said.length <= workFailureSaidMax) return said;
+  if (said.length <= workFailureSaidCharsMax) return said;
   const line = gitFailureLine({ stderr: said });
   const led = line === undefined ? said : `${line}\n${said}`;
-  return `${led.slice(0, workFailureSaidMax)}\n(the rest of what it said is cut)`;
+  return `${led.slice(0, workFailureSaidCharsMax)}\n(the rest of what it said is cut)`;
 }
 
 /**

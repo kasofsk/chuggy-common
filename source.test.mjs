@@ -1824,6 +1824,10 @@ test("a checkpoint carrying a held secret is refused, naming the kind and never 
     });
 
     assert.equal(await remoteRefs(remote), "");
+    assert.equal(
+      await gitSays(directory, "for-each-ref", "refs/remotes/origin/chuggy"),
+      "",
+    );
   });
 });
 
@@ -2293,13 +2297,20 @@ async function hooksRefusing(directory) {
   const hooks = join(directory, ".git", "hooks");
   const ran = join(directory, ".git", "hooks-ran");
   await mkdir(hooks, { recursive: true });
-  for (const hook of ["post-index-change", "reference-transaction"]) {
+  for (const hook of [
+    "post-index-change",
+    "reference-transaction",
+    "monitor",
+  ]) {
     await writeFile(
       join(hooks, hook),
       `#!/bin/sh\necho ${hook} >> '${ran}'\nexit 1\n`,
     );
     await chmod(join(hooks, hook), 0o755);
   }
+  await git("git", ["config", "core.fsmonitor", join(hooks, "monitor")], {
+    cwd: directory,
+  });
   return ran;
 }
 
