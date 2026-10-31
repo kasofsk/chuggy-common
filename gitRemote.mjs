@@ -1,11 +1,16 @@
 /**
- * Git's reach of a remote, tried again where git says its transport failed or
- * the remote found no repository, and never where the remote refused.
+ * Git's reach of a remote, tried again where git says its transport failed,
+ * GitHub failed on its own side or the remote found no repository, and never
+ * where the remote refused.
  *
  * A REFUSAL IS FINAL. A remote that denied the credential, refused the
  * request or the ref, or declined the push answers the same on every try, so a
  * failure naming one is not tried again, whatever else it names. A failure naming git's own
  * transport is tried again; anything else, a hook's included, is final.
+ *
+ * BUT GITHUB'S OWN FAILURE IS NOT A REFUSAL. A ref GitHub rejects as a
+ * `(failure)` where it says `commit_refs` failed is tried again, like a
+ * transport failure.
  *
  * BUT NOT FINDING THE REPOSITORY IS NOT FINAL. GitHub answers a credential
  * minted moments before as if no such repository existed, so a remote's saying
@@ -38,6 +43,26 @@ const gitRefusals = [
   /! \[rejected\]/u,
   /^remote:.*(?:protected branch|declined)/iu,
 ];
+
+/**
+ * GitHub failing on its own side: the line saying so, and a ref rejected for
+ * that alone. Each is the whole line, so a hook's line quoting either is not
+ * one.
+ */
+const gitRemoteFailureLine = /^remote: fatal error in commit_refs$/u;
+const gitRemoteFailureRejected =
+  /^! \[remote rejected\] \S+ -> \S+ \(failure\)$/u;
+
+/**
+ * GitHub refusing a workflow file to an App, read off the remote's rejection
+ * of a ref, so a repository or branch named for it is not one.
+ */
+const gitWorkflowRefused =
+  /^! \[remote rejected\] \S+ -> \S+ \(refusing to allow a GitHub App to create or update workflow /u;
+
+/** What a workflow refusal needs, since GitHub names only the App's half. */
+const gitWorkflowRefusedNeeds =
+  "In chuggy, the repository's Workflow files setting must be On, and the App must hold Workflows.";
 
 /** Lines naming git's transport failing: the connection, its TLS short of a certificate, or a server error. */
 const gitTransportFailures = [
@@ -74,15 +99,38 @@ function lineMatching(lines, patterns) {
   return lines.find((line) => patterns.some((pattern) => pattern.test(line)));
 }
 
+/** GitHub's line saying it failed, where it also rejected a ref for that alone. */
+function gitRemoteFailure(lines) {
+  return lines.some((line) => gitRemoteFailureRejected.test(line))
+    ? lines.find((line) => gitRemoteFailureLine.test(line))
+    : undefined;
+}
+
+/** The first line naming a refusal, a rejection GitHub's own failure explains not among them. */
+function gitRefusal(lines) {
+  const remoteFailed = gitRemoteFailure(lines) !== undefined;
+  return lineMatching(
+    lines.filter(
+      (line) => !(remoteFailed && gitRemoteFailureRejected.test(line)),
+    ),
+    gitRefusals,
+  );
+}
+
 /**
- * The line that says why git failed: the refusal or the transport failure it
- * names, and otherwise its last `fatal:` or `error:` line. Nothing where it
- * wrote none of them.
+ * The line that says why git failed: the refusal, GitHub's own failure or the
+ * transport failure it names, and otherwise its last `fatal:` or `error:`
+ * line. Nothing where it wrote none of them. A workflow refusal is followed by
+ * what it needs.
  */
 export function gitFailureLine(failure) {
   const lines = gitErrorLines(failure);
+  const refusal = gitRefusal(lines);
+  if (refusal !== undefined && gitWorkflowRefused.test(refusal))
+    return `${refusal} ${gitWorkflowRefusedNeeds}`;
   return (
-    lineMatching(lines, gitRefusals) ??
+    refusal ??
+    gitRemoteFailure(lines) ??
     lineMatching(lines, gitTransportFailures) ??
     lines.findLast((line) => /^(?:fatal|error):/u.test(line))
   );
@@ -92,9 +140,12 @@ export function gitFailureLine(failure) {
 export function gitRemoteRetries(failure) {
   const lines = gitErrorLines(failure);
   return (
-    lineMatching(lines, gitRefusals) === undefined &&
-    lineMatching(lines, [...gitTransportFailures, ...gitRepositoryNotFound]) !==
-      undefined
+    gitRefusal(lines) === undefined &&
+    (gitRemoteFailure(lines) !== undefined ||
+      lineMatching(lines, [
+        ...gitTransportFailures,
+        ...gitRepositoryNotFound,
+      ]) !== undefined)
   );
 }
 
