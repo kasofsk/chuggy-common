@@ -35,11 +35,13 @@ import {
   RunStepFailure,
   runCommitFailed,
   runPushFailed,
+  runSetupFailed,
 } from "./runEvidence.mjs";
 import {
   checkpointAndPushSource,
   commitAndPushSource,
   resultDocument,
+  sourceCheckpointDeleted,
   sourceCheckpointRestored,
   sourcePushPlacingVariables,
   sourceRestoredBriefed,
@@ -2043,24 +2045,178 @@ test("a restore that fails partway raises with the workspace at its base", async
   });
 });
 
-/** `read-tree` writes nothing where it fails, so resetting after it would only throw away what setup did. */
-test("a restore that fails before it writes anything leaves what setup left", async () => {
+/** `command`, with `read-tree` stopping as git does: what it wrote left behind, in no index. */
+function stoppedPartway(clone, failure) {
+  return async (program, args, options) => {
+    if (args[0] !== "read-tree") return git(program, args, options);
+    await writeFile(join(clone, "written"), "half\n");
+    await mkdir(join(clone, "made"));
+    await writeFile(join(clone, "made", "written"), "half\n");
+    await writeFile(join(clone, "README.md"), "# half\n");
+    throw failure;
+  };
+}
+
+/** Catches what a stopped `read-tree` wrote left in a tree the attempt is told is its base. */
+test("a restore stopped partway removes what it wrote, which no index knows of", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, base } = checkout;
+    await writeFile(join(directory, "work"), "the work\n");
+    await checkpointFrom(checkout);
+    const clone = await nextClone(checkout);
+    const failure = new Error("read-tree stopped");
+    const before = await readFile(join(clone, "README.md"), "utf8");
+
+    await assert.rejects(
+      restoredIn(clone, base, stoppedPartway(clone, failure)),
+      failure,
+    );
+
+    assert.equal(await headOf(clone), base);
+    assert.equal(await gitSays(clone, "status", "--porcelain=v1"), "");
+    assert.deepEqual((await readdir(clone)).sort(), [".git", "README.md"]);
+    assert.equal(await readFile(join(clone, "README.md"), "utf8"), before);
+  });
+});
+
+/** Setup's own files are excluded from the work, so putting the tree back must leave them too. */
+test("a restore stopped partway leaves what setup excluded", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, base } = checkout;
+    await writeFile(join(directory, "work"), "the work\n");
+    await checkpointFrom(checkout);
+    const clone = await nextClone(checkout);
+    await writeFile(join(clone, ".git", "info", "exclude"), "provisioned\n");
+    await writeFile(join(clone, "provisioned"), "setup's\n");
+    const failure = new Error("read-tree stopped");
+
+    await assert.rejects(
+      restoredIn(clone, base, stoppedPartway(clone, failure)),
+      failure,
+    );
+
+    assert.equal(
+      await readFile(join(clone, "provisioned"), "utf8"),
+      "setup's\n",
+    );
+  });
+});
+
+/** Each way a workspace can fail to come back, none of which the attempt may run on. */
+const putBackFailures = [
+  [
+    "its reset fails",
+    async (args) => {
+      if (args[0] === "reset" && args[1] === "--hard")
+        throw new Error("reset failed");
+    },
+  ],
+  [
+    "its clean fails",
+    async (args) => {
+      if (args[0] === "clean") throw new Error("clean failed");
+    },
+  ],
+  ["its clean does nothing", async (args) => args[0] === "clean"],
+];
+
+/** Catches an attempt run on a tree nothing can vouch for, or a clean-up that exits clean and removed nothing. */
+for (const [how, broken] of putBackFailures)
+  test(`a restore whose clean-up cannot finish is the setup step's failure, where ${how}`, async () => {
+    await inCheckout(async (checkout) => {
+      const { directory, base } = checkout;
+      await writeFile(join(directory, "work"), "the work\n");
+      await checkpointFrom(checkout);
+      const clone = await nextClone(checkout);
+      const stopped = stoppedPartway(clone, new Error("read-tree stopped"));
+      const command = async (program, args, options) =>
+        (await broken(args)) === true
+          ? { stdout: "", stderr: "" }
+          : stopped(program, args, options);
+
+      await assert.rejects(
+        restoredIn(clone, base, command),
+        (failure) =>
+          failure instanceof RunStepFailure &&
+          failure.evidence === runSetupFailed,
+      );
+    });
+  });
+
+/** Nothing about a failure to look can have changed the tree, so nothing is reset. */
+test("a restore that fails before it writes leaves what setup left", async () => {
   await inCheckout(async (checkout) => {
     const { directory, base } = checkout;
     await writeFile(join(directory, "work"), "the work\n");
     await checkpointFrom(checkout);
     const clone = await nextClone(checkout);
     await writeFile(join(clone, "README.md"), "# setup's\n");
-    const failure = new Error("read-tree failed");
+    const failure = new Error("for-each-ref failed");
 
     await assert.rejects(
-      restoredIn(clone, base, gitFailingAt("read-tree", failure)),
+      restoredIn(clone, base, gitFailingAt("for-each-ref", failure)),
       failure,
     );
 
     assert.equal(
       await readFile(join(clone, "README.md"), "utf8"),
       "# setup's\n",
+    );
+  });
+});
+
+/** The checkpoint `directory`'s own clone can see, deleted from `remote`. */
+function deletedFrom({ directory, remote }, command = git) {
+  return sourceCheckpointDeleted({
+    task: checkpointTask,
+    repository: remote,
+    directory,
+    command,
+    environment: { PATH: process.env.PATH ?? "" },
+  });
+}
+
+/** Catches a checkpoint this clone's own attempt left going unseen, so it is never deleted. */
+test("a checkpoint is deleted from its remote by the clone that kept it", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, remote } = checkout;
+    await writeFile(join(directory, "work"), "the work\n");
+    const kept = await checkpointFrom(checkout);
+    assert.match(await remoteRefs(remote), new RegExp(`${kept.ref}$`, "mu"));
+
+    assert.deepEqual(await deletedFrom(checkout), { ref: kept.ref });
+
+    assert.doesNotMatch(await remoteRefs(remote), new RegExp(kept.ref, "u"));
+  });
+});
+
+/** Catches a ticket with no checkpoint reaching a remote to say so. */
+test("a clone that sees no checkpoint pushes nothing", async () => {
+  await inCheckout(async (checkout) => {
+    const verbs = [];
+    const command = async (program, args, options) => {
+      verbs.push(args[0]);
+      return git(program, args, options);
+    };
+
+    assert.equal(await deletedFrom(checkout, command), undefined);
+
+    assert.deepEqual(verbs, ["for-each-ref"]);
+  });
+});
+
+/** Catches a secret check that runs on past the bound on what it is part of. */
+test("a checkpoint's secret check stops with its signal", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory } = checkout;
+    await writeFile(join(directory, "work"), "the work\n");
+
+    await assert.rejects(
+      checkpointFrom(checkout, {
+        secrets: [{ kind: "the bearer", value: "unfound" }],
+        signal: globalThis.AbortSignal.abort(),
+      }),
+      /git rev-list exited null/u,
     );
   });
 });

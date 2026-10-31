@@ -12,7 +12,12 @@ import {
   workerTemporaryFile,
 } from "./checks.mjs";
 import { gitFailureLine, gitRemoteTried } from "./gitRemote.mjs";
-import { runCommitFailed, runPushFailed, runStep } from "./runEvidence.mjs";
+import {
+  runCommitFailed,
+  runPushFailed,
+  runSetupFailed,
+  runStep,
+} from "./runEvidence.mjs";
 
 /** Longer than any header `git cat-file --batch` writes: a name, a type and a size. */
 const sourceObjectHeaderBytesMax = 256;
@@ -193,12 +198,13 @@ function sourceGitExited(child) {
  * found. Replacement refs are ignored, as the push ignores them, so what is
  * read is what would be sent.
  */
-async function sourceSecretCarried(directory, base, head, secrets) {
+async function sourceSecretCarried(directory, base, head, secrets, signal) {
   const git = (args, input) =>
     spawn("git", ["--no-replace-objects", ...args], {
       cwd: directory,
       env: workerStageEnvironment(process.env),
       stdio: [input, "pipe", "pipe"],
+      signal,
     });
   const listing = git(
     [
@@ -367,6 +373,11 @@ export async function commitAndPushSource({
  * is, but for being forced (`commitAndPushSource`). One that does not descend
  * from `base` is refused like a candidate that does not: no attempt can start
  * from it, and being forced it would replace a checkpoint one can.
+ *
+ * THE CLONE SEES IT BEFORE IT IS PUSHED, as it sees one an earlier attempt left,
+ * since a push cut off may still have landed (`sourceCheckpointDeleted`).
+ *
+ * `signal` stops the secret check; the rest stops as `command` does.
  */
 export async function checkpointAndPushSource({
   task,
@@ -379,6 +390,7 @@ export async function checkpointAndPushSource({
   secrets,
   git = [],
   pause,
+  signal,
 }) {
   const commit = await sourceCheckpointCommitted({
     task,
@@ -387,9 +399,14 @@ export async function checkpointAndPushSource({
     command,
     secrets,
     git,
+    signal,
   });
   if (commit === undefined) return undefined;
   const ref = ticketCheckpoint(task);
+  await command("git", ["update-ref", sourceCheckpointSeenAt(ref), commit], {
+    cwd: directory,
+    env: workerStageEnvironment(process.env, { git }),
+  });
   await sourcePushed({
     repository,
     refspec: `+${commit}:${ref}`,
@@ -403,6 +420,53 @@ export async function checkpointAndPushSource({
   return { ref, commit };
 }
 
+/**
+ * The ticket's checkpoint deleted from the remote, once a candidate carries what
+ * it held: a checkpoint left standing could be restored into a rework of that
+ * candidate, handing it work a later attempt threw away. `{ref}`, or nothing
+ * where the clone sees no checkpoint, which reaches no remote at all. Made from
+ * a repository of its own, as every push is.
+ */
+export async function sourceCheckpointDeleted({
+  task,
+  repository,
+  directory,
+  command,
+  environment,
+  refresh,
+  git = [],
+}) {
+  const ref = ticketCheckpoint(task);
+  const seen = await sourceCheckpointSeen(ref, { directory, command, git });
+  if (seen === undefined) return undefined;
+  await sourcePushed({
+    repository,
+    refspec: `:${ref}`,
+    commit: seen,
+    directory,
+    command,
+    environment,
+    refresh,
+  });
+  return { ref };
+}
+
+/** Where a clone holds the remote's `ref`. */
+function sourceCheckpointSeenAt(ref) {
+  return ref.replace("refs/heads/", "refs/remotes/origin/");
+}
+
+/** The commit the clone at `directory` holds for the remote's `ref`, or nothing. */
+async function sourceCheckpointSeen(ref, { directory, command, git }) {
+  const { stdout: listed } = await command(
+    "git",
+    ["for-each-ref", "--format=%(objectname)", sourceCheckpointSeenAt(ref)],
+    { cwd: directory, env: workerStageEnvironment(process.env, { git }) },
+  );
+  const commit = listed.trim();
+  return commit === "" ? undefined : commit;
+}
+
 /** What the tree holds beyond `HEAD`, committed from an index of its own and checked for what is held; nothing where the tree and `HEAD` are `base`'s. */
 async function sourceCheckpointCommitted({
   task,
@@ -411,6 +475,7 @@ async function sourceCheckpointCommitted({
   command,
   secrets,
   git,
+  signal,
 }) {
   const local = {
     cwd: directory,
@@ -451,7 +516,7 @@ async function sourceCheckpointCommitted({
       { ...local, env: { ...local.env, ...sourceCheckpointIdentity } },
     );
     const commit = committed.trim();
-    await sourceSecretRefused(directory, base, commit, secrets);
+    await sourceSecretRefused(directory, base, commit, secrets, signal);
     await sourceDescended(directory, base, commit, command);
     return commit;
   } finally {
@@ -468,9 +533,10 @@ async function sourceCheckpointCommitted({
  * rework runs on a result it never reached. What setup changed in the tree is
  * the checkpoint's to say, since the checkpoint carries it.
  *
- * A failure is raised with the workspace at `base`, so the attempt can run from
- * there: `read-tree` writes nothing unless it can write everything, and only
- * what follows it has anything to undo.
+ * A failure is raised with the workspace back at `base`, so the attempt can run
+ * from there: `read-tree` can stop partway, having written files no index
+ * knows of (`sourceBackAtBase`). A workspace that cannot be put back is raised
+ * as the setup step's failure instead, since nothing can vouch for that tree.
  */
 export async function sourceCheckpointRestored({
   task,
@@ -484,17 +550,8 @@ export async function sourceCheckpointRestored({
     env: workerStageEnvironment(process.env, { git }),
   };
   const ref = ticketCheckpoint(task);
-  const { stdout: listed } = await command(
-    "git",
-    [
-      "for-each-ref",
-      "--format=%(objectname)",
-      ref.replace("refs/heads/", "refs/remotes/origin/"),
-    ],
-    local,
-  );
-  const commit = listed.trim();
-  if (commit === "") return undefined;
+  const commit = await sourceCheckpointSeen(ref, { directory, command, git });
+  if (commit === undefined) return undefined;
   const { stdout: parent } = await command(
     "git",
     ["rev-parse", "--verify", `${commit}^`],
@@ -502,14 +559,33 @@ export async function sourceCheckpointRestored({
   );
   if (await sourceBaseMissing(directory, base, parent.trim(), command))
     return undefined;
-  await command("git", ["read-tree", "--reset", "-u", commit], local);
   try {
+    await command("git", ["read-tree", "--reset", "-u", commit], local);
     await command("git", ["reset", "--mixed", "--quiet", parent.trim()], local);
   } catch (failure) {
-    await command("git", ["reset", "--hard", "--quiet", base], local);
+    await runStep(runSetupFailed, () => sourceBackAtBase(base, local, command));
     throw failure;
   }
   return { ref, commit };
+}
+
+/**
+ * The workspace back at `base` after a restore that failed, whichever step it
+ * failed at: tracked files reset, and what no index knows of removed, which is
+ * only what the restore wrote because setup's own files are excluded. What
+ * setup changed in a tracked file goes with it. `git status` then says it
+ * worked, since a reset can warn of a file it could not remove and go on.
+ */
+async function sourceBackAtBase(base, local, command) {
+  await command("git", ["reset", "--hard", "--quiet", base], local);
+  await command("git", ["clean", "-d", "--force", "--quiet"], local);
+  const { stdout: left } = await command(
+    "git",
+    ["status", "--porcelain=v1"],
+    local,
+  );
+  if (left !== "")
+    throw new Error(`the workspace could not be put back at ${base}: ${left}`);
 }
 
 /**
@@ -703,11 +779,11 @@ async function sourceStaged(task, command, local) {
 }
 
 /** Refuses `commit` where it carries a held secret, naming the kind and the commit and never the value. */
-async function sourceSecretRefused(directory, base, commit, secrets) {
+async function sourceSecretRefused(directory, base, commit, secrets, signal) {
   const carried =
     secrets.length === 0
       ? undefined
-      : await sourceSecretCarried(directory, base, commit, secrets);
+      : await sourceSecretCarried(directory, base, commit, secrets, signal);
   if (carried !== undefined)
     throw new Error(
       `commit ${carried.commit} carries ${carried.kind} in ${carried.place}, so the attempt pushes nothing`,
