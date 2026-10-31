@@ -10,8 +10,12 @@
  * A HOLD SPENDS THE RUN'S OWN TIME. The run is resumed a margin after the
  * reset, so a clock that disagrees does not resume it into the same refusal,
  * and is held only where that leaves it a reserve to finish in before its
- * deadline. A launch that names no deadline is never held, since nothing could
- * say the wait fits.
+ * deadline, counted from whichever is later, the reset or now. A launch that
+ * names no deadline is never held, since nothing could say the wait fits.
+ *
+ * A WRITE CREDENTIAL LEFT ON DISK FORBIDS A HOLD. A hold's keep mints one, and
+ * a resumed agent can read what that left. Where it could not be removed the
+ * run ends.
  *
  * THE HOLDS OF ONE RUN ARE BOUNDED. A run refused again once resumed may hold
  * again, up to `runHoldsMax`.
@@ -39,16 +43,26 @@ function runHoldUntilMs(reset) {
 }
 
 /** Why a limit that stopped a run is not waited out, or nothing where it is. */
-function runHoldRefusal({ resumable, reset, session, deadlineMs, holds }) {
+function runHoldRefusal({
+  resumable,
+  reset,
+  session,
+  nowMs,
+  deadlineMs,
+  holds,
+  credentialLeft,
+}) {
   if (!resumable) return "this agent cannot resume a conversation";
   if (reset === undefined) return "the frames gave no reset time";
   if (typeof session !== "string" || session.length === 0)
     return "the result gave no session to resume";
   if (deadlineMs === undefined) return "this launch names no deadline";
-  if (runHoldUntilMs(reset) + runHoldReserveMs >= deadlineMs)
+  if (Math.max(nowMs, runHoldUntilMs(reset)) + runHoldReserveMs >= deadlineMs)
     return `the run's deadline at ${runHoldInstant(deadlineMs)} leaves no time to finish after the reset`;
   if (holds >= runHoldsMax)
     return `the run has already held ${String(holds)} times`;
+  if (credentialLeft === true)
+    return "the push's write credential could not be removed";
   return undefined;
 }
 
@@ -61,8 +75,10 @@ export function runHoldDecided({
   resumable,
   sightings,
   session,
+  nowMs,
   deadlineMs,
   holds,
+  credentialLeft,
 }) {
   if (!rateLimited(sightings)) return undefined;
   const { reset } = sightings;
@@ -70,8 +86,10 @@ export function runHoldDecided({
     resumable,
     reset,
     session,
+    nowMs,
     deadlineMs,
     holds,
+    credentialLeft,
   });
   return refused === undefined
     ? { untilMs: runHoldUntilMs(reset), window: reset.window }

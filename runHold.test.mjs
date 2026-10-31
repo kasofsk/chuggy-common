@@ -31,6 +31,7 @@ const stopped = {
   resumable: true,
   sightings: seenBy(limitFrames),
   session: limitSession,
+  nowMs: resumesAtMs - 1,
   deadlineMs: resumesAtMs + runHoldReserveMs + 1,
   holds: 0,
 };
@@ -66,6 +67,8 @@ test("a limit is not waited out where any condition of a hold fails, and it says
     [{ deadlineMs: undefined }, /no deadline/u],
     [{ deadlineMs: resumesAtMs + runHoldReserveMs }, /no time to finish/u],
     [{ holds: runHoldsMax }, /already held/u],
+    [{ nowMs: resumesAtMs + 1 }, /no time to finish/u],
+    [{ credentialLeft: true }, /write credential could not be removed/u],
     [{ sightings: seenBy([limitRefused]) }, /no reset time/u],
   ];
   for (const [changed, reason] of cases) {
