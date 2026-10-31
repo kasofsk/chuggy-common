@@ -357,11 +357,6 @@ test("the refusal names what this caller can lower, and says so where there is n
       /read_refusals is already asking for one, so this one cannot be answered\.$/,
     ],
     [
-      "list_tickets",
-      { phase: Array.from({ length: 4_096 }, () => "") },
-      /list_tickets refused its arguments and asked for nothing\.$/,
-    ],
-    [
       "read_thread",
       { session: "t-1", limit: 1 },
       /read_thread is already asking for one; move past it with before\.$/,
@@ -381,6 +376,23 @@ test("the refusal names what this caller can lower, and says so where there is n
     assert.equal(answer.isError, true, name);
     assert.match(textOf(answer), remedy, name);
   }
+
+  // Every roster array is capped, and zod stops at the cap, so a refusal too
+  // large to store takes a shape that is not.
+  const refused = await chuggyToolHandler(
+    {
+      name: "uncapped",
+      shape: (held) => ({ phase: held.array(held.string().min(1)) }),
+      call: () => "",
+    },
+    z,
+  )({ phase: Array.from({ length: 4_096 }, () => "") });
+
+  assert.equal(refused.isError, true);
+  assert.match(
+    textOf(refused),
+    /uncapped refused its arguments and asked for nothing\.$/,
+  );
 });
 
 /**
