@@ -1716,6 +1716,28 @@ test("a configuration that fits one answer is answered as the route answered it"
   assert.equal(textOf(answer), `HTTP 200\n${body}`);
 });
 
+test("a configuration whose route body is more than one answer holds, and whose document is not, is answered as its document whole", async () => {
+  const document = {
+    version: 2,
+    workloads: { review: { prompt: configurationPrompt(17_000) } },
+  };
+  const head = "HTTP 200\n";
+  assert.ok(
+    chuggyToolAnswerBytes(`${head}${configurationAnswered(document)}`) >
+      chuggyToolAnswerBytesMax,
+  );
+  assert.ok(
+    chuggyToolAnswerBytes(`${head}${JSON.stringify(document)}`) <=
+      chuggyToolAnswerBytesMax,
+  );
+  const { call } = configurationToolsOf(document);
+
+  const answer = await call("read_configuration", { revision: "r1" });
+
+  assert.equal(textOf(answer), `${head}${JSON.stringify(document)}`);
+  assert.deepEqual(configurationRead(answer), document);
+});
+
 test("a path the configuration does not hold is refused, naming what is there", async () => {
   const { call } = configurationToolsOf(catalogOverBounds);
   const refused = async (path) => {

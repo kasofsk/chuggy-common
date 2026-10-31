@@ -628,7 +628,8 @@ async function readTicketLandings(context, path) {
 /**
  * A read whose route's body is answered as `reshape` makes it, in place of
  * verbatim: `undefined` from `reshape` is a body that is not `what` as the
- * route answers it. A refusal is relayed as any read's is.
+ * route answers it. The body is drawn under `bytesMax`, an ordinary read's
+ * bound where none is named. A refusal is relayed as any read's is.
  */
 async function readReshaped(
   context,
@@ -1385,7 +1386,7 @@ export const chuggyProjectTools = [
   {
     name: "read_configuration",
     description:
-      "One configuration revision's canonical document, as a draft is authored against it. Call it for who does a ticket's work and what evaluates it. `canonical` is the stored document as JSON text, and its `worker.mode` is who does the work of a ticket released against it: the agent, and what that agent is started with, a model where the configuration names one. Its evaluation stages run in the order listed and a failed stage ends evaluation, while the evaluators of one stage run in parallel; in a catalog each evaluator of a plan stage names its own workload, so review lenses that should run side by side belong in one stage. A configuration larger than one answer is read by `path`, keys walking into the parsed `canonical`: the value there is answered whole where it fits; an object or an array that does not is answered as its outline, each entry's key with its child whole where that is short and otherwise the child's kind, entries and length in characters; a string that does not is answered cut to fit; and either says how much is left, which `offset` reads on from. With no `path`, a configuration that fits is answered as before and one that does not as the outline of its `canonical`. A `path` the document does not hold is refused, naming the keys where it stopped.",
+      "One configuration revision's canonical document, as a draft is authored against it. Call it for who does a ticket's work and what evaluates it. `canonical` is the stored document as JSON text, and its `worker.mode` is who does the work of a ticket released against it: the agent, and what that agent is started with, a model where the configuration names one. Its evaluation stages run in the order listed and a failed stage ends evaluation, while the evaluators of one stage run in parallel; in a catalog each evaluator of a plan stage names its own workload, so review lenses that should run side by side belong in one stage. A configuration larger than one answer is read by `path`, keys walking into the parsed `canonical`: the value there is answered whole where it fits; an object or an array that does not is answered as its outline, each entry's key with its child whole where that is short and otherwise the child's kind, entries and length in characters; a string that does not is answered cut to fit; and either says how much is left, which `offset` reads on from. With no `path`, the route's body is answered as it is where it fits; where it does not, the parsed `canonical` is answered whole where that fits and otherwise as its outline. A `path` the document does not hold is refused, naming the keys where it stopped.",
     shape: (z) => ({
       revision: revision(z),
       path: z
