@@ -47,18 +47,18 @@ const gitRefusals = [
 /**
  * GitHub failing on its own side: the line saying so, and a ref rejected for
  * that alone. Each is the whole line, so a hook's line quoting either is not
- * one.
+ * one. Git pads the status to the width of the repository's abbreviated hashes.
  */
 const gitRemoteFailureLine = /^remote: fatal error in commit_refs$/u;
 const gitRemoteFailureRejected =
-  /^! \[remote rejected\] \S+ -> \S+ \(failure\)$/u;
+  /^! \[remote rejected\] +\S+ -> \S+ \(failure\)$/u;
 
 /**
  * GitHub refusing a workflow file to an App, read off the remote's rejection
  * of a ref, so a repository or branch named for it is not one.
  */
 const gitWorkflowRefused =
-  /^! \[remote rejected\] \S+ -> \S+ \(refusing to allow a GitHub App to create or update workflow /u;
+  /^! \[remote rejected\] +\S+ -> \S+ \(refusing to allow a GitHub App to create or update workflow /u;
 
 /** What a workflow refusal needs, since GitHub names only the App's half. */
 const gitWorkflowRefusedNeeds =
