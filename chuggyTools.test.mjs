@@ -3347,7 +3347,11 @@ test("what a project tool sends is scrubbed of the session's secrets, and its op
   });
 });
 
-test("a draft filed or revised with a selection carries it to the route, and one without carries none", async () => {
+/**
+ * Files, depends and revises a draft once with `field` set to `value` and once
+ * without it, and holds that the route was sent it exactly where it was given.
+ */
+async function draftWritesCarry(field, value) {
   const { api, call } = toolsOf();
   const revision = {
     ticket: 4,
@@ -3362,16 +3366,20 @@ test("a draft filed or revised with a selection carries it to the route, and one
     ["file_dependent", dependent],
     ["revise_draft", revision],
   ]) {
-    await call(tool, { ...args, selection });
+    await call(tool, { ...args, [field]: value });
     await call(tool, args);
   }
 
   assert.equal(api.calls.length, 6);
   for (const [index, held] of api.calls.entries()) {
     const body = JSON.parse(held.init.body);
-    if (index % 2 === 0) assert.deepEqual(body.selection, selection, held.path);
-    else assert.equal("selection" in body, false, held.path);
+    if (index % 2 === 0) assert.deepEqual(body[field], value, held.path);
+    else assert.equal(field in body, false, held.path);
   }
+}
+
+test("a draft filed or revised with a selection carries it to the route, and one without carries none", async () => {
+  await draftWritesCarry("selection", selection);
 });
 
 test("a draft's defaults are initialized under the selection it will carry", async () => {
@@ -3382,6 +3390,54 @@ test("a draft's defaults are initialized under the selection it will carry", asy
   assert.equal(
     api.calls[0].path,
     "/api/v1/tenants/vteng/projects/chuggy/draft-initializations/r1?work=build-sonnet&evaluation=standard",
+  );
+});
+
+/** A catalog override changing one workload's model, which a draft carries to the route as it was given. */
+const overrides = {
+  workloads: {
+    build: {
+      worker: {
+        mode: {
+          type: "SingleAgent",
+          agent: "Codex",
+          arguments: [],
+          model: "gpt-5-codex",
+        },
+        setup: [],
+        files: [],
+      },
+    },
+  },
+};
+
+test("a draft filed or revised with overrides carries them to the route, and one without carries none", async () => {
+  await draftWritesCarry("overrides", overrides);
+});
+
+/** What a revision must send back is what read_draft answers, so the draft's read carries its overrides through. */
+test("read_draft answers the overrides the draft holds", async () => {
+  const body = JSON.stringify({ ticket: 4, authoringVersion: 2, overrides });
+  const { call } = toolsOf({}, () => ({ status: 200, body }));
+
+  const answer = await call("read_draft", { ticket: 4 });
+
+  assert.equal(textOf(answer), `HTTP 200\n${body}`);
+});
+
+/** The overrides are explained on their own parameter, which no tool description's cut reaches. */
+test("each draft tool's overrides parameter says what an override replaces and where to read it from", () => {
+  for (const name of ["create_draft", "file_dependent", "revise_draft"]) {
+    const tool = chuggyProjectTools.find((held) => held.name === name);
+    const description = tool?.shape(z).overrides?.description ?? "";
+    assert.match(description, /`workloads`|\{workloads\}/u, name);
+    assert.match(description, /whole `worker`/u, name);
+    assert.match(description, /read_configuration with a `path`/u, name);
+  }
+  assert.match(
+    chuggyProjectTools.find(({ name }) => name === "revise_draft")?.shape(z)
+      .overrides?.description ?? "",
+    /send back the `overrides` read_draft answered/u,
   );
 });
 
