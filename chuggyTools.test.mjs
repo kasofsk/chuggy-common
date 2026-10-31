@@ -660,6 +660,134 @@ test("a run event of the largest size, too heavy for one answer as the transcrip
   assert.equal(previews[0].bytes, Buffer.byteLength(line));
 });
 
+/**
+ * The events of a run's first batch: the init event with the runtime's lists
+ * beside what it says of the run, thinking under its signature, and rate-limit
+ * events between.
+ */
+const transcriptShapedEvents = [
+  {
+    type: "system",
+    subtype: "init",
+    uuid: "i-1",
+    session_id: "s-1",
+    cwd: "/work",
+    model: "claude-opus-5-5",
+    tools: ["Bash", "Edit", "mcp__chuggy__read_run_transcript"],
+    slash_commands: Array.from(
+      { length: 60 },
+      (_, at) => `command-${String(at)}`,
+    ),
+    skills: Array.from({ length: 30 }, (_, at) => `skill-${String(at)}`),
+    plugins: [{ name: "plugin", path: "/plugins/plugin" }],
+  },
+  {
+    type: "rate_limit_event",
+    uuid: "l-1",
+    rate_limit_info: { status: "allowed" },
+  },
+  {
+    type: "assistant",
+    uuid: "t-1",
+    message: {
+      role: "assistant",
+      content: [
+        {
+          type: "thinking",
+          thinking: "edit source",
+          signature: "E".repeat(800),
+        },
+        { type: "tool_use", id: "c-1", name: "Edit", input: {} },
+      ],
+    },
+  },
+  {
+    type: "rate_limit_event",
+    uuid: "l-2",
+    rate_limit_info: { status: "allowed" },
+  },
+];
+
+test("each transcript tool answers an entry as what it says of the session and counts what it leaves out", async () => {
+  const pages = {
+    read_run_transcript: [
+      { execution: "e-1", attempt: "a-1" },
+      runPageOf([runBatchOf(1, transcriptShapedEvents)]),
+    ],
+    read_lead_transcript: [
+      {},
+      JSON.stringify({ stream: "lead-1", entries: transcriptShapedEvents }),
+    ],
+    read_thread_transcript: [
+      { session: "t-1" },
+      JSON.stringify({ stream: "t-1", entries: transcriptShapedEvents }),
+    ],
+  };
+
+  for (const [name, [args, body]] of Object.entries(pages)) {
+    const { call } = toolsOf({}, () => ({ status: 200, body }));
+
+    const answer = JSON.parse(textOf(await call(name, args)));
+
+    assert.deepEqual(
+      answer.entries,
+      [
+        {
+          type: "system",
+          subtype: "init",
+          uuid: "i-1",
+          cwd: "/work",
+          model: "claude-opus-5-5",
+          tools: ["Bash", "Edit", "mcp__chuggy__read_run_transcript"],
+        },
+        {
+          type: "assistant",
+          uuid: "t-1",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "edit source" },
+              { type: "tool_use", id: "c-1", name: "Edit", input: {} },
+            ],
+          },
+        },
+      ],
+      name,
+    );
+    assert.deepEqual(answer.omitted, { rate_limit_event: 2 }, name);
+    assert.equal(answer.next, undefined, name);
+  }
+});
+
+/**
+ * What a reader of a transcript is told of its cursor: what each half counts,
+ * where a stream starts, and how it knows it has read to the end.
+ */
+test("the transcript reads say what their cursor counts, where a stream starts and where it ends", () => {
+  const described = (tool) =>
+    chuggyProjectTools.find(({ name }) => name === tool).description;
+  const claims = [
+    /`after` counts the stream's store batches, not its entries/,
+    /`entry` counts the entries of that page already answered, those left out included/,
+    /A stream starts with neither: a read at any other `after` starts past what earlier batches hold/,
+    /without its `signature`/,
+    /the init entry reduced to what identifies it and its `model`, `cwd` and `tools` names/,
+    /left out and counted by its `type` under `omitted`/,
+  ];
+  const ends = {
+    read_run_transcript: /An answer with no `next` has read all the run wrote/,
+    read_lead_transcript:
+      /An answer with no `next` has read to the stream's end/,
+    read_thread_transcript:
+      /An answer with no `next` has read to the stream's end/,
+  };
+
+  for (const [tool, end] of Object.entries(ends)) {
+    for (const claim of claims) assert.match(described(tool), claim, tool);
+    assert.match(described(tool), end, tool);
+  }
+});
+
 test("a run transcript page at its draw bound is read, and one past it is refused", async () => {
   const page = runPageOf([runBatchOf(1, [runEventOf("r-1", "x", 8)])]);
   const at = `${page}${" ".repeat(
