@@ -515,6 +515,6 @@ async function sourceDescended(directory, base, commit, command) {
   );
   if (missing.trim() !== "")
     throw new Error(
-      `commit ${commit} does not descend from ${base}, the commit this attempt started from: the history below it was rewritten, so the attempt pushes nothing. Add commits on top of ${base} instead, merging the target in rather than rebasing onto it.`,
+      `commit ${commit} does not descend from ${base}, the commit this attempt started from, so the attempt pushes nothing. A rebase does this, and so does checking out a different commit. Add commits on top of ${base} instead, merging the target in rather than rebasing onto it.`,
     );
 }
