@@ -711,8 +711,8 @@ export function runEvidenceRecorder(task, bearer, scrub, services = {}) {
     sightings: () => state.sightings,
     /** The line saying the run is held, written to the transcript and answered for the log. */
     held(hold) {
-      const line = runHeldLine(hold);
-      append(state.scrub(line));
+      const line = state.scrub(runHeldLine(hold));
+      append(line);
       return line;
     },
     /**

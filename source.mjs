@@ -421,34 +421,27 @@ export async function checkpointAndPushSource({
 }
 
 /**
- * The ticket's checkpoint deleted from the remote, once a candidate carries what
- * it held: a checkpoint left standing could be restored into a rework of that
- * candidate, handing it work a later attempt threw away. `{ref}`, or nothing
- * where the clone sees no checkpoint, which reaches no remote at all. Made from
- * a repository of its own, as every push is.
+ * `checkpoint`, as `sourceCheckpointSeen` answers it, deleted from the remote,
+ * once a candidate carries what it held: left standing it could be restored into
+ * a rework of that candidate, handing it work a later attempt threw away. Made
+ * from a repository of its own, as every push is, with `environment` as it is,
+ * since by now the bearer that could mint another may be dead.
  */
 export async function sourceCheckpointDeleted({
-  task,
+  checkpoint: { ref, commit },
   repository,
   directory,
   command,
   environment,
-  refresh,
-  git = [],
 }) {
-  const ref = ticketCheckpoint(task);
-  const seen = await sourceCheckpointSeen(ref, { directory, command, git });
-  if (seen === undefined) return undefined;
   await sourcePushed({
     repository,
     refspec: `:${ref}`,
-    commit: seen,
+    commit,
     directory,
     command,
     environment,
-    refresh,
   });
-  return { ref };
 }
 
 /** Where a clone holds the remote's `ref`. */
@@ -456,15 +449,24 @@ function sourceCheckpointSeenAt(ref) {
   return ref.replace("refs/heads/", "refs/remotes/origin/");
 }
 
-/** The commit the clone at `directory` holds for the remote's `ref`, or nothing. */
-async function sourceCheckpointSeen(ref, { directory, command, git }) {
+/**
+ * The ticket's checkpoint as the clone at `directory` holds it, `{ref, commit}`,
+ * or nothing, which takes no remote to say.
+ */
+export async function sourceCheckpointSeen({
+  task,
+  directory,
+  command,
+  git = [],
+}) {
+  const ref = ticketCheckpoint(task);
   const { stdout: listed } = await command(
     "git",
     ["for-each-ref", "--format=%(objectname)", sourceCheckpointSeenAt(ref)],
     { cwd: directory, env: workerStageEnvironment(process.env, { git }) },
   );
   const commit = listed.trim();
-  return commit === "" ? undefined : commit;
+  return commit === "" ? undefined : { ref, commit };
 }
 
 /** What the tree holds beyond `HEAD`, committed from an index of its own and checked for what is held; nothing where the tree and `HEAD` are `base`'s. */
@@ -549,9 +551,9 @@ export async function sourceCheckpointRestored({
     cwd: directory,
     env: workerStageEnvironment(process.env, { git }),
   };
-  const ref = ticketCheckpoint(task);
-  const commit = await sourceCheckpointSeen(ref, { directory, command, git });
-  if (commit === undefined) return undefined;
+  const seen = await sourceCheckpointSeen({ task, directory, command, git });
+  if (seen === undefined) return undefined;
+  const { commit } = seen;
   const { stdout: parent } = await command(
     "git",
     ["rev-parse", "--verify", `${commit}^`],
@@ -566,7 +568,7 @@ export async function sourceCheckpointRestored({
     await runStep(runSetupFailed, () => sourceBackAtBase(base, local, command));
     throw failure;
   }
-  return { ref, commit };
+  return seen;
 }
 
 /**

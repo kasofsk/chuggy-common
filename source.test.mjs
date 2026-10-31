@@ -43,6 +43,7 @@ import {
   resultDocument,
   sourceCheckpointDeleted,
   sourceCheckpointRestored,
+  sourceCheckpointSeen,
   sourcePushPlacingVariables,
   sourceRestoredBriefed,
   sourceSecretReader,
@@ -2166,13 +2167,11 @@ test("a restore that fails before it writes leaves what setup left", async () =>
 });
 
 /** The checkpoint `directory`'s own clone can see, deleted from `remote`. */
-function deletedFrom({ directory, remote }, command = git) {
-  return sourceCheckpointDeleted({
+function seenIn({ directory }, command = git) {
+  return sourceCheckpointSeen({
     task: checkpointTask,
-    repository: remote,
     directory,
     command,
-    environment: { PATH: process.env.PATH ?? "" },
   });
 }
 
@@ -2184,7 +2183,15 @@ test("a checkpoint is deleted from its remote by the clone that kept it", async 
     const kept = await checkpointFrom(checkout);
     assert.match(await remoteRefs(remote), new RegExp(`${kept.ref}$`, "mu"));
 
-    assert.deepEqual(await deletedFrom(checkout), { ref: kept.ref });
+    const checkpoint = await seenIn(checkout);
+    assert.deepEqual(checkpoint, kept);
+    await sourceCheckpointDeleted({
+      checkpoint,
+      repository: remote,
+      directory,
+      command: git,
+      environment: { PATH: process.env.PATH ?? "" },
+    });
 
     assert.doesNotMatch(await remoteRefs(remote), new RegExp(kept.ref, "u"));
   });
@@ -2199,7 +2206,7 @@ test("a clone that sees no checkpoint pushes nothing", async () => {
       return git(program, args, options);
     };
 
-    assert.equal(await deletedFrom(checkout, command), undefined);
+    assert.equal(await seenIn(checkout, command), undefined);
 
     assert.deepEqual(verbs, ["for-each-ref"]);
   });

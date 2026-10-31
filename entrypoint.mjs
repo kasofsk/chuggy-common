@@ -23,7 +23,8 @@
  * restored the attempt runs from its base, and fails where the workspace cannot
  * be put back there. It is restored once the setup has run, so half-done work
  * cannot fail a setup that passes without it, and nothing it left untracked is
- * taken for what setup left. A pass deletes it, having carried its work on.
+ * taken for what setup left. A pass deletes it once its report has landed, since
+ * until then the run can still be lost and the next attempt go on from it.
  *
  * A RUN THE ACCOUNT'S LIMIT STOPPED WAITS IT OUT WHERE IT CAN, in the slot it
  * holds, and carries on in the same conversation (`runHold.mjs`). Its work is
@@ -170,6 +171,7 @@ import { runConfigurationSnapshot } from "./snapshot.mjs";
 import {
   checkpointAndPushSource,
   sourceCheckpointDeleted,
+  sourceCheckpointSeen,
   commitAndPushSource,
   resultDocument,
   sourceCheckpointRestored,
@@ -281,9 +283,11 @@ async function workerChangeBase(input, directory) {
  * One of the image's programs run to its end, git or a setup line: handed what
  * the image's own programs are where `options` names no environment of its own.
  */
+const commandBufferMax = 16 * 1024 * 1024;
+
 async function command(executable, args, options = {}) {
   return executeFile(executable, args, {
-    maxBuffer: 16 * 1024 * 1024,
+    maxBuffer: commandBufferMax,
     env: workerStageEnvironment(process.env),
     ...options,
   });
@@ -457,7 +461,6 @@ async function captureConfiguration(context, argv, init) {
 }
 
 async function readAgentStream(context, child, argv, stream) {
-  let resultEvent;
   const lines = createInterface({ input: child.stdout });
   for await (const line of lines) {
     process.stdout.write(`${line}\n`);
@@ -473,12 +476,11 @@ async function readAgentStream(context, child, argv, stream) {
       stream.captured = true;
       await captureConfiguration(context, argv, event);
     }
-    if (context.agent.resultEvent(event)) resultEvent = event;
+    if (context.agent.resultEvent(event)) stream.result = event;
     const observed = context.agent.observed(event);
     if (observed !== undefined) context.evidence.observed(observed);
     context.evidence.record(line, event);
   }
-  return resultEvent;
 }
 
 /**
@@ -537,16 +539,27 @@ async function runAgentProcess(context, argv, environment, stream) {
       resolve([exitCode, exitSignal]),
     );
   });
+  stream.result = undefined;
   try {
-    const resultEvent = await readAgentStream(context, child, argv, stream);
+    await readAgentStream(context, child, argv, stream);
     const [code, signal] = await exited;
-    return { resultEvent, code, signal };
+    return { resultEvent: stream.result, code, signal };
   } catch (failure) {
     child.kill("SIGKILL");
     child.stdout.destroy();
     await exited.catch(() => undefined);
+    const { sentence } = context.agent.ended?.(stream.result) ?? {};
+    failure.message = runEndedText(
+      failure.message,
+      runAgentSentence(context, sentence),
+    );
     throw failure;
   }
+}
+
+/** What a runtime said of how it ended, scrubbed, where it said anything. */
+function runAgentSentence(context, sentence) {
+  return typeof sentence === "string" ? context.scrub(sentence) : undefined;
 }
 
 /**
@@ -598,7 +611,7 @@ function runAgentEnded(
       code === 0
         ? missing.message
         : `${agent.runtime} exited ${code ?? `after signal ${signal ?? "unknown"}`}`,
-      typeof sentence === "string" ? context.scrub(sentence) : undefined,
+      runAgentSentence(context, sentence),
       decided,
     ),
   );
@@ -662,7 +675,7 @@ async function runAgent(context) {
       holds,
       credentialLeft,
     });
-    await runAgentHeld(context, held, context.clock);
+    await runAgentHeld(context, held, context.clock ?? workerClock);
     next = context.agent.resumeInvocation(task, session);
   }
 }
@@ -709,7 +722,6 @@ async function workSource(context, workspace, verdict) {
         workCheckpointed(context, workspace),
       );
     }
-    await workCheckpointCleared(context, workspace);
     return { source };
   }
   try {
@@ -744,11 +756,17 @@ const workAsideReportMs = workerPlaneAwayMillisecondsMax;
 /** What the directory a push aside's credential is written in is named by, in the minted directory. */
 const workAsidePrefix = "chuggy-aside-";
 
-/** How long a push aside may take from `nowMs`, which at the run's end may be none. */
+/**
+ * How long a push aside may take from `nowMs`, which at the run's end may be
+ * none: in whole milliseconds, the only kind a timer takes, while a deadline
+ * counted from a process's uptime is a fraction.
+ */
 function workAsideBoundMs(capMs, nowMs, deadlineMs) {
   return deadlineMs === undefined
     ? capMs
-    : Math.max(0, Math.min(capMs, deadlineMs - nowMs - workAsideReportMs));
+    : Math.floor(
+        Math.max(0, Math.min(capMs, deadlineMs - nowMs - workAsideReportMs)),
+      );
 }
 
 /**
@@ -756,7 +774,8 @@ function workAsideBoundMs(capMs, nowMs, deadlineMs) {
  * child is in a process group of its own, which is killed whole, because a
  * killed `git push` leaves its transport and a remote's hook running. It is
  * spawned here because `execFile` makes no group. Windows has no groups, so
- * there the child alone is killed.
+ * there the child alone is killed. What it says is bounded as `command` bounds
+ * it, and past that it is stopped and fails as `command` does.
  */
 export function commandStopped(signal) {
   const alone = process.platform === "win32";
@@ -769,11 +788,6 @@ export function commandStopped(signal) {
         detached: !alone,
         stdio: ["ignore", "pipe", "pipe"],
       });
-      const said = { stdout: "", stderr: "" };
-      for (const stream of ["stdout", "stderr"])
-        child[stream].setEncoding("utf8").on("data", (text) => {
-          said[stream] += text;
-        });
       const stopped = () => {
         try {
           process.kill(alone ? child.pid : -child.pid, "SIGKILL");
@@ -781,6 +795,18 @@ export function commandStopped(signal) {
           // Nothing of it is left, or it never began.
         }
       };
+      const said = { stdout: "", stderr: "" };
+      for (const stream of ["stdout", "stderr"])
+        child[stream].setEncoding("utf8").on("data", (text) => {
+          said[stream] += text;
+          if (said[stream].length <= commandBufferMax) return;
+          stopped();
+          reject(
+            Object.assign(new Error(`${stream} maxBuffer length exceeded`), {
+              code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+            }),
+          );
+        });
       signal.addEventListener("abort", stopped, { once: true });
       child.once("error", reject);
       child.once("close", (code) => {
@@ -800,16 +826,65 @@ export function commandStopped(signal) {
     });
 }
 
+/** What `failure` said, scrubbed. */
+function workFailureSaid(context, failure) {
+  return context.scrub(
+    failure instanceof Error ? failure.message : String(failure),
+  );
+}
+
 /**
- * A push that is not the run's result: `push` handed the `command`, `signal` and
- * `refresh` to make it with. It answers `{done}`, `{failure}`, scrubbed, and
- * `credentialLeft` where its write credential could not be removed, and raises
+ * `work`, handed the `command` and `signal` that stop it, as something aside from
+ * the run's result. It answers `{done}` or `{failure}`, scrubbed, and raises
  * nothing, so whatever goes wrong never reaches how the run ended.
  *
  * ONE BOUND HOLDS ALL OF IT. Retries are inside it, its git children are stopped
  * when it lands, and a mint the plane has not answered is simply left, so no
  * remote can delay the run's end past it or end the run as timed out in its
  * place. Where the run's deadline is known it lands early enough to report.
+ */
+async function workWithinBound(context, work) {
+  let boundMs;
+  let signal;
+  try {
+    boundMs = workAsideBoundMs(
+      context.asideCapMs ?? workAsideCapMs,
+      (context.clock ?? workerClock).now(),
+      context.runDeadlineMs,
+    );
+    signal = globalThis.AbortSignal.timeout(boundMs);
+    return {
+      done: await chatAbortable(
+        signal,
+        work({ command: context.command ?? commandStopped(signal), signal }),
+      ),
+    };
+  } catch (failure) {
+    return {
+      failure: signal?.aborted
+        ? `it was stopped after ${String(boundMs)} ms`
+        : workFailureSaid(context, failure),
+    };
+  }
+}
+
+/** Whether `apart`'s write credential stayed behind, which is logged. It raises nothing. */
+async function workApartLeft(context, apart) {
+  try {
+    await apart?.discard();
+    return false;
+  } catch (failure) {
+    process.stderr.write(
+      `a push's write credential could not be removed: ${workFailureSaid(context, failure)}\n`,
+    );
+    return true;
+  }
+}
+
+/**
+ * A push that is not the run's result, within its bound: `push` handed the
+ * `command`, `signal` and `refresh` to make it with. It answers as
+ * `workWithinBound` does, with `credentialLeft` from `workApartLeft`.
  *
  * ITS WRITE CREDENTIAL IS ITS OWN. A hold pushes while the attempt's agent has
  * yet to be resumed, so what it mints is written apart from the attempt's read
@@ -817,41 +892,19 @@ export function commandStopped(signal) {
  * that finds no directory to write in, which is why it is a directory.
  */
 async function workAside(context, workspace, push) {
-  const boundMs = workAsideBoundMs(
-    context.asideCapMs ?? workAsideCapMs,
-    (context.clock ?? workerClock).now(),
-    context.runDeadlineMs,
-  );
-  const signal = globalThis.AbortSignal.timeout(boundMs);
-  const said = (failure) =>
-    context.scrub(failure instanceof Error ? failure.message : String(failure));
-  const ended = {};
-  let apart;
-  try {
-    apart = await workspace.refreshApart?.();
-    signal.throwIfAborted();
-    ended.done = await chatAbortable(
-      signal,
-      push({
-        command: context.command ?? commandStopped(signal),
-        signal,
-        ...(apart === undefined ? {} : { refresh: apart.refresh }),
-      }),
-    );
-  } catch (failure) {
-    ended.failure = signal.aborted
-      ? `it was stopped after ${String(boundMs)} ms`
-      : said(failure);
-  }
-  try {
-    await apart?.discard();
-  } catch (failure) {
-    ended.credentialLeft = true;
-    process.stderr.write(
-      `a push's write credential could not be removed: ${said(failure)}\n`,
-    );
-  }
-  return ended;
+  const taken = {};
+  const ended = await workWithinBound(context, async (pushing) => {
+    taken.apart = await workspace.refreshApart?.();
+    pushing.signal.throwIfAborted();
+    return push({
+      ...pushing,
+      ...(taken.apart === undefined ? {} : { refresh: taken.apart.refresh }),
+    });
+  });
+  return {
+    ...ended,
+    credentialLeft: await workApartLeft(context, taken.apart),
+  };
 }
 
 /**
@@ -885,25 +938,58 @@ async function workCheckpointed(context, workspace) {
 }
 
 /**
- * The ticket's checkpoint deleted, after the push that carried its work on. What
- * becomes of it is logged and nothing else: it touches neither the pass nor its
- * report, and a checkpoint left standing only risks being restored.
+ * The ticket's checkpoint readied to go once a pass is reported: `clear` deletes
+ * it, and `discard` removes what deleting it took. Until the report has landed
+ * the run can still be lost, and the next attempt goes on from the checkpoint, so
+ * only the credential is taken before it, since the bearer may be dead after it.
+ * A clone that sees none readies nothing. What becomes of the delete is logged
+ * and nothing else: neither raises, and it touches neither the pass nor its
+ * report, since a checkpoint left standing only risks being restored.
  */
-async function workCheckpointCleared(context, workspace) {
-  const { done, failure } = await workAside(context, workspace, (pushing) =>
-    sourceCheckpointDeleted({
-      task: context.task,
-      ...workspace,
-      ...pushing,
-      git: context.git,
-    }),
-  );
-  if (failure !== undefined)
+async function workCheckpointClearing(context, workspace) {
+  if (context.task.taskKind !== "Work") return undefined;
+  const logged = (failure) =>
     process.stderr.write(
       `The ticket's checkpoint could not be deleted: ${failure}\n`,
     );
-  else if (done !== undefined)
-    process.stderr.write(`The ticket's checkpoint ${done.ref} is deleted.\n`);
+  const taken = {};
+  const { done: ready, failure: unready } = await workWithinBound(
+    context,
+    async ({ command: stopping, signal }) => {
+      const checkpoint = await sourceCheckpointSeen({
+        task: context.task,
+        directory: workspace.directory,
+        command: stopping,
+        git: context.git,
+      });
+      if (checkpoint === undefined) return undefined;
+      taken.apart = await workspace.refreshApart?.();
+      signal.throwIfAborted();
+      const environment = await taken.apart?.refresh();
+      return { checkpoint, environment: environment ?? workspace.environment };
+    },
+  );
+  if (unready !== undefined) logged(unready);
+  return {
+    clear: async () => {
+      if (ready === undefined) return;
+      const { failure } = await workWithinBound(
+        context,
+        ({ command: stopping }) =>
+          sourceCheckpointDeleted({
+            ...workspace,
+            ...ready,
+            command: stopping,
+          }),
+      );
+      if (failure !== undefined) logged(failure);
+      else
+        process.stderr.write(
+          `The ticket's checkpoint ${ready.checkpoint.ref} is deleted.\n`,
+        );
+    },
+    discard: () => workApartLeft(context, taken.apart),
+  };
 }
 
 /**
@@ -930,9 +1016,7 @@ async function workCheckpointRestored(context, workspace) {
   } catch (failure) {
     if (failure instanceof RunStepFailure) throw failure;
     process.stderr.write(
-      `the checkpoint could not be restored, so this attempt starts from its base: ${context.scrub(
-        failure instanceof Error ? failure.message : String(failure),
-      )}\n`,
+      `the checkpoint could not be restored, so this attempt starts from its base: ${workFailureSaid(context, failure)}\n`,
     );
     return undefined;
   }
@@ -1731,13 +1815,22 @@ export async function publishWorkerResult(
     ...(await summaryDiagnostics(context, summaryPath, result.summary)),
   ];
   await context.stopLease();
-  await report(context, {
-    verdict: result.verdict,
-    report: reportSummary(result.summary, context.scrub, kept),
-    handoffs: [],
-    ...(source === undefined ? {} : { source }),
-    diagnostics,
-  });
+  const clearing =
+    result.verdict === "Pass"
+      ? await workCheckpointClearing(context, workspace)
+      : undefined;
+  try {
+    await report(context, {
+      verdict: result.verdict,
+      report: reportSummary(result.summary, context.scrub, kept),
+      handoffs: [],
+      ...(source === undefined ? {} : { source }),
+      diagnostics,
+    });
+    await clearing?.clear();
+  } finally {
+    await clearing?.discard();
+  }
 }
 
 /** The first line of an error text cut to fit the upload, saying how much of it was dropped before the end that follows. */
