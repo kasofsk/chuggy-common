@@ -34,6 +34,11 @@ const workflowRefused = ` ! [remote rejected] 8d84c8eb6de6098ddbe8b3e6bbb049f5a0
 const workflowNeeds =
   "In chuggy, the repository's Workflow files setting must be On, and the App must hold Workflows.";
 
+/** A rejection as git prints it for a repository whose abbreviated hashes run longer. */
+function statusPadded(stderr) {
+  return stderr.replace("[remote rejected] ", "[remote rejected]   ");
+}
+
 /** What the remote answers when it refuses, each as git reports it. */
 const refused = {
   "a denied credential": `remote: Permission to acme/widgets.git denied to bot.\nfatal: unable to access '${remote}': The requested URL returned error: 403\n`,
@@ -65,6 +70,8 @@ const transient = {
   "a broken transfer": `error: RPC failed; curl 56 GnuTLS recv error (-9): Error decoding the received TLS packet.\nfatal: early EOF\n`,
   "a dropped sideband": `fetch-pack: unexpected disconnect while reading sideband packet\nfatal: early EOF\nfatal: fetch-pack: invalid index-pack output\n`,
   "GitHub's own failure": commitRefsFailed,
+  "GitHub's own failure, git padding the status":
+    statusPadded(commitRefsFailed),
 };
 
 /** What git writes when the remote found no repository, each as git reports it. */
@@ -245,6 +252,10 @@ test("a workflow refusal is named by GitHub's line and then what it needs", () =
   assert.equal(
     gitFailureLine(gitFailed(workflowRefused)),
     `${workflowRefused.trim()} ${workflowNeeds}`,
+  );
+  assert.equal(
+    gitFailureLine(gitFailed(statusPadded(workflowRefused))),
+    `${statusPadded(workflowRefused).trim()} ${workflowNeeds}`,
   );
 });
 
