@@ -165,6 +165,19 @@ function alive(pid) {
   }
 }
 
+/** What a job's watcher stops it at is what the job is told, so it never plans past it. */
+test("a job's envelope names when it is stopped: the sooner of its assignment's deadline and the runner's cap", async (t) => {
+  for (const [deadlineSecs, told] of [
+    [600, 600],
+    [9000, 7200],
+  ]) {
+    const { backend, seen } = await harness(t, "sleep");
+    await backend.place(assignment({ deadlineSecs }), "Job");
+    const envelope = JSON.parse((await seen()).env.CHUG_WORKER_TASK);
+    assert.equal(envelope.timeoutSecsMax, told);
+  }
+});
+
 test("a job is the core run in a directory of its own, told its places and handed the owner's environment over the runner's", async (t) => {
   const { backend, settings, seen } = await harness(t, "sleep");
   assert.deepEqual(await backend.place(assignment(), "Job"), {
@@ -182,7 +195,7 @@ test("a job is the core run in a directory of its own, told its places and hande
     callbackUrl,
     bearer,
     workspace: join(directory, "workspace"),
-    timeoutSecsMax: 7200,
+    timeoutSecsMax: 3600,
     outputBytesMax: 1024 * 1024,
     providerCredentialFile: settings.tokenFile,
   });
