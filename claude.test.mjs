@@ -42,6 +42,13 @@ test("a Claude job never moves a command to the background", () => {
   );
 });
 
+/** Catches a job's agent killed at Claude Code's own Bash timeout before a repository's checks end. */
+test("a Claude job waits on a command past Claude Code's own Bash timeout", () => {
+  const { environment } = claudeAgent.prepareCredential("token");
+  assert.equal(environment.BASH_DEFAULT_TIMEOUT_MS, "1800000");
+  assert.equal(environment.BASH_MAX_TIMEOUT_MS, "3000000");
+});
+
 /** Catches a run's Claude Code replacing itself, which an image's environment no longer prevents. */
 test("a Claude run never updates its Claude Code", () => {
   assert.equal(
@@ -398,6 +405,8 @@ test("a named kind is run as a host's, with a cloud provider's telemetry left of
     assert.equal(environment.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST, "1");
     assert.equal(environment.DISABLE_TELEMETRY, telemetry, setting.kind);
     assert.equal(environment.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
+    assert.equal(environment.BASH_DEFAULT_TIMEOUT_MS, "1800000");
+    assert.equal(environment.BASH_MAX_TIMEOUT_MS, "3000000");
     assert.equal(environment.DISABLE_AUTOUPDATER, "1");
   }
 });
