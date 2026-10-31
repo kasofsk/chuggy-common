@@ -3449,6 +3449,27 @@ test("each draft tool's selection parameter says what a selection is", () => {
   }
 });
 
+test("each draft tool's selection parameter names the revision a ticket follows", () => {
+  for (const name of ["create_draft", "file_dependent", "revise_draft"]) {
+    const tool = chuggyProjectTools.find((held) => held.name === name);
+    const described = tool?.shape(z).selection?.description ?? "";
+    assert.match(described, /`configuration` is "Pinned" or "Latest"/u, name);
+    assert.match(described, /`defaults\.configuration`, or Pinned/u, name);
+    assert.match(described, /leaves out part of its plan does not move/u, name);
+    assert.match(described, /refused there/u, name);
+  }
+});
+
+test("read_ticket says what a following ticket's `following` answers", () => {
+  const described = chuggyProjectTools.find(
+    ({ name }) => name === "read_ticket",
+  ).description;
+  assert.match(
+    described,
+    /carries `following`: its `verdict`, one of Current, Moves, Held or Trimmed, and for Held the `code`/u,
+  );
+});
+
 /** What every project tool is driven with where a suite drives them all. */
 const projectToolArguments = {
   list_tickets: {},
