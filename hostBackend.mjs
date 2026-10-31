@@ -456,6 +456,17 @@ async function hostSwept(state) {
 }
 
 /**
+ * How long a job has: the sooner of its assignment's deadline and the runner's
+ * cap, which is what its watcher stops it at and what its envelope tells it.
+ *
+ * @param {HostBackendSettings} settings
+ * @param {WorkerPoolAssignment} assignment
+ */
+function hostJobDeadlineSecs(settings, assignment) {
+  return Math.min(assignment.deadlineSecs, settings.timeoutSecsMax);
+}
+
+/**
  * A job's own directory, made with every place in it, and the envelope that
  * names them and the credential file it reads; or why the assignment makes
  * none, its directory gone.
@@ -475,7 +486,7 @@ async function hostJobDirectory(state, assignment, credentialFile) {
     const envelope = jobEnvelope(
       assignment,
       {
-        timeoutSecsMax: settings.timeoutSecsMax,
+        timeoutSecsMax: hostJobDeadlineSecs(settings, assignment),
         outputBytesMax: settings.outputBytesMax,
       },
       {
@@ -616,10 +627,7 @@ async function hostPlaced(state, assignment, kind) {
   const name = hostJobName(assignment.assignment);
   const started = await hostJobSpawned(state, name, made, credential.agent);
   if (started === undefined) return { placed: "Unavailable" };
-  const deadlineSecs = Math.min(
-    assignment.deadlineSecs,
-    settings.timeoutSecsMax,
-  );
+  const deadlineSecs = hostJobDeadlineSecs(settings, assignment);
   const startedMs = (seams.nowMs ?? Date.now)();
   /** @type {HostJob} */
   const job = {

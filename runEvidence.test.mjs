@@ -31,7 +31,11 @@ import {
   runTurn,
   truncatedEvent,
 } from "./runEvidence.mjs";
-import { observeRateLimit, rateLimitSightings } from "./rateLimit.mjs";
+import {
+  observeRateLimit,
+  rateLimitSightings,
+  rateLimited,
+} from "./rateLimit.mjs";
 
 /** The sightings a run that saw exactly these frames, in this order, ends with. */
 function seenBy(...events) {
@@ -1042,4 +1046,215 @@ test("the totals a run ends with are posted once", async () => {
   const totals = calls.filter(({ path }) => path === "/v1/run/totals");
   assert.equal(totals.length, 1);
   assert.equal(JSON.parse(totals[0].init.body).costUsdMicros, 500_000);
+});
+
+/** `event` as the stream carried it. */
+function framed(recorder, event) {
+  recorder.record(JSON.stringify(event), event);
+}
+
+/** The totals a recorder posted when it finished. */
+async function postedTotals(recorder, calls) {
+  await recorder.finish();
+  const posted = calls.find(({ path }) => path === "/v1/run/totals");
+  return JSON.parse(posted.init.body);
+}
+
+/** A process's result as the runtime wrote it: `figures` over nothing spent. */
+function processResult(figures) {
+  return { type: "result", subtype: "success", ...figures };
+}
+
+/** What the plane holds of one model's use in a process's `modelUsage`. */
+function modelUse(inputTokens, costUSD) {
+  return { "claude-opus-5-5": { inputTokens, outputTokens: 1, costUSD } };
+}
+
+/**
+ * The figures of two processes of one conversation, as a real resumed run wrote
+ * them: its usage, turns and wall time counted from the process's start, and
+ * its cost, API time and model rows carried on from the session's. Catches a
+ * run charged only its last process, which is what `observed` overwriting the
+ * first would do, and a run charged its first process's cost twice.
+ */
+test("a resumed run's totals are the sum of what each process counted alone, and the last of what the session carried", async () => {
+  const { recorder, calls } = harness();
+  recorder.observed(
+    processResult({
+      usage: {
+        input_tokens: 10,
+        output_tokens: 20,
+        cache_creation_input_tokens: 30,
+        cache_read_input_tokens: 40,
+      },
+      num_turns: 28,
+      duration_ms: 1_000,
+      duration_api_ms: 1_734,
+      total_cost_usd: 1.2,
+      modelUsage: modelUse(10, 1.2),
+      permission_denials: [{}],
+      stop_reason: "stop_sequence",
+    }),
+  );
+
+  recorder.resumed();
+  recorder.observed(
+    processResult({
+      usage: {
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_creation_input_tokens: 3,
+        cache_read_input_tokens: 4,
+      },
+      num_turns: 2,
+      duration_ms: 500,
+      duration_api_ms: 3_188,
+      total_cost_usd: 2.5,
+      modelUsage: modelUse(20, 2.5),
+      permission_denials: [{}, {}],
+      stop_reason: "end_turn",
+    }),
+  );
+
+  const totals = await postedTotals(recorder, calls);
+  assert.equal(totals.tokensInput, 11);
+  assert.equal(totals.tokensOutput, 22);
+  assert.equal(totals.tokensCacheCreation, 33);
+  assert.equal(totals.tokensCacheRead, 44);
+  assert.equal(totals.turns, 30);
+  assert.equal(totals.durationMs, 1_500);
+  assert.equal(totals.permissionDenials, 3);
+  assert.equal(totals.durationApiMs, 3_188);
+  assert.equal(totals.costUsdMicros, 2_500_000);
+  assert.deepEqual(
+    totals.models.map(({ tokensInput }) => tokensInput),
+    [20],
+  );
+  assert.equal(totals.stopReason, "end_turn");
+});
+
+/**
+ * A process that died unaccounted leaves only the turns it streamed. Catches
+ * the first process's turns counted again in what the second folds to, and the
+ * cost and model rows the first was charged being lost to a total of nothing.
+ */
+test("a resumed process that ended unaccounted adds its turns to what was already accounted for", async () => {
+  const { recorder, calls } = harness();
+  framed(recorder, assistantEvent("claude-opus-5-5", { input_tokens: 7 }));
+  recorder.observed(
+    processResult({
+      usage: { input_tokens: 7, output_tokens: 1 },
+      num_turns: 1,
+      duration_ms: 100,
+      duration_api_ms: 90,
+      total_cost_usd: 1,
+      modelUsage: modelUse(7, 1),
+    }),
+  );
+
+  recorder.resumed();
+  framed(recorder, assistantEvent("claude-opus-5-5", { input_tokens: 5 }));
+
+  const totals = await postedTotals(recorder, calls);
+  assert.equal(totals.tokensInput, 12);
+  assert.equal(totals.turns, 2);
+  assert.equal(totals.costUsdMicros, 1_000_000);
+  assert.equal(totals.durationApiMs, 90);
+  assert.deepEqual(
+    totals.models.map(({ tokensInput, costUsdMicros }) => [
+      tokensInput,
+      costUsdMicros,
+    ]),
+    [[12, 1_000_000]],
+  );
+});
+
+test("a run that was never resumed posts the totals it always did", async () => {
+  const { recorder, calls } = harness();
+  const result = processResult({
+    usage: { input_tokens: 3, output_tokens: 4 },
+    num_turns: 2,
+    total_cost_usd: 0.5,
+  });
+  recorder.observed(result);
+
+  assert.deepEqual(
+    await postedTotals(recorder, calls),
+    JSON.parse(JSON.stringify(runTotals(result, []))),
+  );
+});
+
+/**
+ * Catches a process charged a limit the one before it saw. A rejection is
+ * sticky within a process, so without this a run that came back from its hold
+ * and then failed for its own reasons would be held again, and end labelled as
+ * though the provider had refused it.
+ */
+test("a resumed process starts with nothing seen of the limit", () => {
+  const { recorder } = harness();
+  framed(recorder, { type: "assistant", error: "rate_limit", message: {} });
+  assert.ok(rateLimited(recorder.sightings()));
+
+  recorder.resumed();
+
+  assert.ok(!rateLimited(recorder.sightings()));
+});
+
+/** Catches a turn series whose ordinals start over, which the plane would read as the first process's turns sent again. */
+test("a resumed process's turns go on from the last ordinal", async () => {
+  const { recorder, calls } = harness();
+  framed(recorder, assistantEvent("claude-opus-5-5", { input_tokens: 1 }));
+
+  recorder.resumed();
+  framed(recorder, assistantEvent("claude-opus-5-5", { input_tokens: 1 }));
+  await recorder.finish();
+
+  const sent = calls
+    .filter(({ path }) => path === "/v1/run/turns")
+    .flatMap(({ init }) => JSON.parse(init.body).turns);
+  assert.deepEqual(
+    sent.map(({ ordinal }) => ordinal),
+    [1, 2],
+  );
+});
+
+test("a hold is a line of the transcript, saying until when and which window", async () => {
+  const { recorder, calls } = harness();
+
+  const line = recorder.held({
+    until: "2026-10-30T18:01:00.000Z",
+    window: "five_hour",
+  });
+  await recorder.finish();
+
+  assert.deepEqual(JSON.parse(line), {
+    type: "chuggy_run_held",
+    until: "2026-10-30T18:01:00.000Z",
+    window: "five_hour",
+  });
+  assert.ok(
+    transcriptBatches(calls).some(({ init }) =>
+      Buffer.from(init.body).toString("utf8").includes(line),
+    ),
+  );
+});
+
+/** Catches a resume the limit stopped at once emptying the rows of what the run spent. */
+test("a resumed process whose result names no model leaves the rows before it", async () => {
+  const { recorder, calls } = harness();
+  recorder.observed(
+    processResult({ total_cost_usd: 1.2, modelUsage: modelUse(10, 1.2) }),
+  );
+  recorder.resumed();
+  recorder.observed(processResult({ num_turns: 1, total_cost_usd: 1.2 }));
+
+  const totals = await postedTotals(recorder, calls);
+  assert.equal(totals.costUsdMicros, 1_200_000);
+  assert.deepEqual(
+    totals.models.map(({ tokensInput, costUsdMicros }) => ({
+      tokensInput,
+      costUsdMicros,
+    })),
+    [{ tokensInput: 10, costUsdMicros: 1_200_000 }],
+  );
 });

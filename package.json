@@ -80,6 +80,7 @@
     "repository.mjs",
     "result.mjs",
     "runEvidence.mjs",
+    "runHold.mjs",
     "runnerReport.mjs",
     "runnerUpdate.mjs",
     "runtimeScratch.mjs",

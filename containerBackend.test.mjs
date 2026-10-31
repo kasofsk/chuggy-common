@@ -273,7 +273,7 @@ test("a job's env file carries the envelope and the environment, and is gone onc
     callbackUrl: "https://chuggy.example/worker",
     bearer: "attempt-bearer-secret",
     workspace: "/workspace",
-    timeoutSecsMax: 7200,
+    timeoutSecsMax: 3600,
     outputBytesMax: 1024 * 1024,
     providerCredentialFile: "/var/run/chuggy/credentials/claude-code",
   });
@@ -1560,9 +1560,31 @@ test("a session's container is run as a job's is, labelled a session, its envelo
   assert.deepEqual(session.envelope, {
     ...job.envelope,
     bearer: "session-bearer-secret",
-    timeoutSecsMax: 3600,
   });
-  assert.equal(job.envelope.timeoutSecsMax, 7200);
+});
+
+/**
+ * The core tells from its envelope whether waiting out a limit fits before it
+ * is stopped, so a figure past when the container is stopped would have it wait
+ * for a resume that never comes.
+ */
+test("a job's envelope names when it is stopped: the sooner of its assignment's deadline and the runner's cap", async (t) => {
+  const { backend, state } = await harness(t);
+  state.images.add(image);
+  await backend.place(assignment({ deadlineSecs: 600 }), "Job");
+  await backend.place(
+    assignment({ assignment: "asg-2", deadlineSecs: 9000 }),
+    "Job",
+  );
+  await backend.place(
+    assignment({ assignment: "ses-1", deadlineSecs: 9000 }),
+    "Session",
+  );
+  await backend.settled();
+
+  assert.equal(ranWith(state, "asg-1").envelope.timeoutSecsMax, 600);
+  assert.equal(ranWith(state, "asg-2").envelope.timeoutSecsMax, 7200);
+  assert.equal(ranWith(state, "ses-1").envelope.timeoutSecsMax, 9000);
 });
 
 /**

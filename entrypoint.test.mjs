@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { Buffer } from "node:buffer";
+import { Buffer, constants } from "node:buffer";
 import { spawn } from "node:child_process";
 import {
   chmod,
@@ -17,6 +17,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { setTimeout as wait } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL, URL } from "node:url";
 import { TextDecoder } from "node:util";
 
@@ -77,7 +78,20 @@ import {
 } from "./claudeCredential.fixture.mjs";
 import { pausedClock } from "./clock.fixture.mjs";
 import {
+  limitFrames,
+  limitRefused,
+  limitRejected,
+  limitResetsAtSecs,
+  limitResult,
+  limitSentence,
+  limitSession,
+  revokedSentence,
+} from "./rateLimit.fixture.mjs";
+import { runHoldMarginMs, runHoldReserveMs, runHoldsMax } from "./runHold.mjs";
+import {
   cloneRepository,
+  commandStopped,
+  workFailureSaidCharsMax,
   envelopeLaunch,
   envelopeTask,
   prepareWorker,
@@ -96,6 +110,7 @@ import {
   envelope,
   fetchedAnswer,
   poolHeldSessionAnswer,
+  pushed,
 } from "./envelope.fixture.mjs";
 import {
   forgeGitIsolated,
@@ -105,6 +120,7 @@ import {
 import { keepWorkerLease } from "./lease.mjs";
 import { overPlane, planeFetch, planes } from "./plane.fixture.mjs";
 import { agentResultSchema } from "./result.mjs";
+import { jobRepositoryDirectory } from "./job.mjs";
 import { workerCredentialPath } from "./planeCredential.mjs";
 import { gitRemotePauseMs, gitRemoteTriesMax } from "./gitRemote.mjs";
 import {
@@ -116,12 +132,17 @@ import {
   RunStepFailure,
   credentialScrub,
   runCloneFailed,
+  runCommitFailed,
   runEvidenceRecorder,
   runPushFailed,
   runSetupFailed,
 } from "./runEvidence.mjs";
 import { facts } from "./sessionHarness.fixture.mjs";
-import { commitAndPushSource, ticketBranch } from "./source.mjs";
+import {
+  commitAndPushSource,
+  ticketBranch,
+  ticketCheckpoint,
+} from "./source.mjs";
 import { workerPlaneAwayMillisecondsMax, workerRequest } from "./transport.mjs";
 
 const task = { workerPlane: { url: "http://worker-plane.test:3001" } };
@@ -2791,7 +2812,7 @@ const agentWorker = {
  * from, and for the push where `pushed` answers it: what the push would have
  * run, and what the report carried.
  */
-async function workPublished(worker, run, pushed) {
+async function workPublished(worker, run, pushed, aside = {}) {
   const runs = [];
   const { calls, request } = planeCalls();
   await publishWorkerResult(
@@ -2801,8 +2822,12 @@ async function workPublished(worker, run, pushed) {
       evidence: evidenceFor(request),
       scrub: (text) => text,
       stopLease: async () => calls.push({ path: "lease/stopped" }),
-      request,
+      request: async (asking, bearer, path, ...asked) => {
+        if (path.endsWith("/report")) await aside.reporting?.();
+        return request(asking, bearer, path, ...asked);
+      },
       held: () => [],
+      ...aside.context,
       command: async (executable, args, options) => {
         runs.push({ executable, args, options });
         if (args[0] === "init")
@@ -2822,6 +2847,7 @@ async function workPublished(worker, run, pushed) {
       directory: "/workspace/repository",
       environment: { CHUG_WORKER_GIT_CREDENTIAL_FILE: "/minted/at-clone" },
       refresh: async () => pushCredential,
+      ...aside.workspace,
     },
     run,
   );
@@ -2972,6 +2998,7 @@ async function finishedFrom(
       held: run.held,
       stopLease: async () => undefined,
       request,
+      ...run.context,
     },
     {
       repositoryId: "repository-1",
@@ -2979,6 +3006,7 @@ async function finishedFrom(
       base,
       directory,
       environment: process.env,
+      ...run.workspace,
     },
     {
       output: {},
@@ -3049,7 +3077,7 @@ test("a passing work attempt pushes no commit carrying any secret it holds", asy
           refused.message,
           new RegExp(
             `^commit [0-9a-f]{40} carries ${held.kind} in a file, so the attempt pushes nothing$`,
-            "u",
+            "mu",
           ),
         );
         assert.ok(!refused.message.includes(held.value));
@@ -3126,7 +3154,7 @@ test("a passing work attempt that rewrote the history below its base fails and p
     });
 
     assert.equal(
-      refused.message,
+      refused.message.split("\n")[0],
       `commit ${amended} does not descend from ${checkout.base}, the commit this attempt started from, so the attempt pushes nothing. A rebase does this, and so does checking out a different commit. Add commits on top of ${checkout.base} instead, merging the target in rather than rebasing onto it.`,
     );
     assert.equal(await remoteRefs(checkout.remote), "");
@@ -3213,7 +3241,7 @@ test("a work attempt whose commit carries its Claude credential fails and pushes
 
       assert.match(
         failed.message,
-        /^commit [0-9a-f]{40} carries a credential the launcher mounted in a file, so the attempt pushes nothing$/u,
+        /^commit [0-9a-f]{40} carries a credential the launcher mounted in a file, so the attempt pushes nothing$/mu,
       );
       assert.ok(!failed.message.includes(secret));
       assert.equal(await remoteRefs(remote), "");
@@ -4031,7 +4059,7 @@ test("a work attempt whose commit carries a read of another repository pushes no
   );
   assert.match(
     failed.message,
-    /^commit [0-9a-f]{40} carries a read the plane minted for a repository in a file, so the attempt pushes nothing$/u,
+    /^commit [0-9a-f]{40} carries a read the plane minted for a repository in a file, so the attempt pushes nothing$/mu,
   );
   assert.ok(!failed.message.includes(plane.reads[0]));
   assert.doesNotMatch(
@@ -4459,4 +4487,2401 @@ test("an attempt whose held credentials the plane refuses, or is away for past t
     );
     assert.deepEqual(await readdir(minted), [], String(status));
   }
+});
+
+/** The verdict frame of a run that finished, in the conversation the limit left. */
+function verdictFrame(verdict = "Pass") {
+  return {
+    type: "result",
+    subtype: "success",
+    session_id: limitSession,
+    num_turns: 2,
+    total_cost_usd: 2.5,
+    usage: { input_tokens: 1, output_tokens: 2 },
+    structured_output: { verdict, summary: "ended" },
+  };
+}
+
+/** A process that wrote `file` in the tree and was stopped by the limit. */
+function limitRun(file = "half.txt") {
+  return { work: `echo half > ${file}`, frames: limitFrames, exit: 1 };
+}
+
+/** A process that wrote `file` in the tree and gave `verdict`. */
+function verdictRun(file = "done.txt", verdict = "Pass") {
+  return { work: `echo done > ${file}`, frames: [verdictFrame(verdict)] };
+}
+
+/** A process that wrote `file` and ended the way the real revoked token did. */
+function revokedRun(file = "half.txt") {
+  return {
+    work: `echo half > ${file}`,
+    frames: [
+      {
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        result: revokedSentence,
+        session_id: limitSession,
+      },
+    ],
+    exit: 1,
+  };
+}
+
+/**
+ * A stand-in for the runtime: an executable that, each time it is started,
+ * records its pid and argv, runs that start's `work` in the workspace, writes
+ * that start's `frames`, stays alive where told to `linger`, and exits as told.
+ * A start past the last of `runs` fails, so a run started once too often does
+ * not pass for one that was not.
+ */
+async function standInRuntime(t, runs) {
+  const root = await suiteDirectory(t, "chuggy-stand-in-");
+  const executable = join(root, "claude");
+  const started = join(root, "started");
+  await writeFile(started, "");
+  await writeFile(join(root, "runs.json"), JSON.stringify(runs));
+  await writeFile(
+    executable,
+    `#!${process.execPath}
+const { execSync, spawn } = require("node:child_process");
+const { appendFileSync, readFileSync } = require("node:fs");
+const root = ${JSON.stringify(root)};
+const log = readFileSync(root + "/started", "utf8");
+const at = log === "" ? 0 : log.trimEnd().split("\\n").length;
+appendFileSync(
+  root + "/started",
+  JSON.stringify({ pid: process.pid, argv: process.argv.slice(2) }) + "\\n",
+);
+const run = JSON.parse(readFileSync(root + "/runs.json", "utf8"))[at];
+if (run.work !== undefined) execSync(run.work, { stdio: "ignore" });
+if (run.holder !== undefined)
+  spawn("sh", ["-c", run.holder], { stdio: ["ignore", "inherit", "ignore"] }).unref();
+for (const frame of run.frames)
+  process.stdout.write(
+    (typeof frame === "string" ? frame : JSON.stringify(frame)) + "\\n",
+  );
+if (run.linger === true) setTimeout(() => undefined, 300000);
+else process.exitCode = run.exit ?? 0;
+`,
+  );
+  await chmod(executable, 0o755);
+  return {
+    directory: root,
+    executable,
+    starts: async () =>
+      (await readFile(started, "utf8"))
+        .split("\n")
+        .filter((line) => line !== "")
+        .map((line) => JSON.parse(line)),
+  };
+}
+
+/** A plane serving one attempt of `answer` at `base` of `remote`. */
+function standInPlane(
+  answer,
+  remote,
+  base,
+  reported = { status: 202, body: { action: "stop" } },
+) {
+  return servedPlane((route, asked) => {
+    switch (route) {
+      case "task":
+        return { status: 200, body: workTaskAnswerSchema.parse(answer) };
+      case "input":
+        return inputAnswer(remote, base);
+      case "credential":
+        return {
+          status: 200,
+          body: {
+            ...minted,
+            password:
+              asked?.body?.repository === undefined ? pushToken : readToken,
+            expiresAtMs: 1_900_000_000_000,
+          },
+        };
+      case "runTurns":
+        return { status: 200, body: { turnsRecorded: 0 } };
+      case "report":
+        return reported;
+      default:
+        return { status: 204 };
+    }
+  });
+}
+
+/** A work task whose agent reads its credential, as a real one does, over `fields`. */
+function agentAnswer(fields = {}) {
+  return {
+    ...fetchedAnswer,
+    ...fields,
+    authority: {
+      ...fetchedAnswer.authority,
+      credentials: ["forge", claudeAgent.credential],
+    },
+  };
+}
+
+/** When a run the limit stopped before it reopens is at. */
+const limitStoppedMs = limitResetsAtSecs * 1_000 - 1_200_000;
+
+/** How long that run waits, up to a margin past the reset. */
+const limitWaitMs = 1_200_000 + runHoldMarginMs;
+
+/** Time enough for that wait and the reserve. */
+const limitFitsSecs = 7_200;
+
+/** How long the paused clock says this process had already run. */
+const limitUptimeSecs = 600;
+
+/**
+ * `run` in a home and a temporary directory of its own, where an agent's
+ * prepared shell lands, so no attempt finds another's and none writes in the
+ * home of whoever is running the suite.
+ */
+async function withOwnDirectories(t, run) {
+  const directory = await suiteDirectory(t, "chuggy-own-");
+  const saved = { HOME: process.env["HOME"], TMPDIR: process.env["TMPDIR"] };
+  process.env["HOME"] = directory;
+  process.env["TMPDIR"] = directory;
+  try {
+    return await run();
+  } finally {
+    for (const [name, value] of Object.entries(saved))
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+  }
+}
+
+/**
+ * One attempt cloned from `checkout`'s remote for real, on a paused clock,
+ * running `runs` through the real Claude agent with only its executable a
+ * stand-in, and an envelope bound of `timeoutSecsMax`. What it failed with, if
+ * it did, comes back as `failure`.
+ */
+async function standInAttempt(
+  t,
+  { remote, base },
+  runs,
+  { answer = agentAnswer(), timeoutSecsMax = limitFitsSecs, ...seams } = {},
+) {
+  const root = await suiteDirectory(t, "chuggy-attempt-");
+  const providerCredentialFile = join(root, "claude-code");
+  await writeFile(providerCredentialFile, `${secret}\n`);
+  const plane = await standInPlane(answer, remote, base, seams.reported);
+  t.after(() => plane.close());
+  const runtime = await standInRuntime(
+    t,
+    typeof runs === "function" ? runs(root) : runs,
+  );
+  const clock = pausedClock(limitStoppedMs);
+  const prepared = { times: 0 };
+  const agent = {
+    ...claudeAgent,
+    executable: runtime.executable,
+    prepareShell: (...handed) => {
+      prepared.times += 1;
+      return claudeAgent.prepareShell(...handed);
+    },
+    ...seams.agent,
+  };
+  const workspace = join(root, "workspace");
+  const served = {
+    ...envelope,
+    callbackUrl: plane.url,
+    providerCredentialFile,
+    workspace,
+    timeoutSecsMax,
+  };
+  const { task: answered } = await envelopeTask(served);
+  const failure = await withOwnDirectories(t, () =>
+    workerAttempt(envelopeLaunch(served, answered), {
+      minted: root,
+      write: seams.write ?? (async () => undefined),
+      ...(seams.request === undefined ? {} : { request: seams.request }),
+      agent,
+      ...(seams.asideCapMs === undefined
+        ? {}
+        : { asideCapMs: seams.asideCapMs }),
+      clock: {
+        now: seams.now?.(clock, plane) ?? clock.now,
+        wait: seams.wait?.(clock) ?? clock.wait,
+        uptimeSecs: () => seams.uptimeSecs ?? limitUptimeSecs,
+      },
+    }).then(
+      () => undefined,
+      (raised) => raised,
+    ),
+  );
+  return { failure, plane, runtime, clock, prepared, workspace };
+}
+
+/** The same remote with `base` as its main, as a real target is. */
+async function targetPushed({ remote, directory, base }) {
+  await git("git", ["push", remote, `${base}:refs/heads/main`], {
+    cwd: directory,
+  });
+}
+
+/** What the remote's `path` holds at `reference`, or nothing where it holds none. */
+async function remoteFile(remote, reference, path) {
+  return git("git", ["show", `${reference}:${path}`], { cwd: remote }).then(
+    ({ stdout }) => stdout,
+    () => undefined,
+  );
+}
+
+/** The bodies of every request `route` was asked, in order. */
+function planeBodies(plane, route) {
+  return plane.requests
+    .filter((request) => request.route === route)
+    .map(({ body }) => body);
+}
+
+/** The transcript as the plane was sent it. */
+function transcriptSent(plane) {
+  return planeBodies(plane, "runTranscript")
+    .map((body) => Buffer.from(body).toString("utf8"))
+    .join("");
+}
+
+const checkpointRef = ticketCheckpoint(fetchedAnswer);
+
+/** What the plane mints an attempt for what its task kind needs, and for a read. */
+const pushToken = "ghs_push0123456789abcdefghijklmnop";
+const readToken = "ghs_read0123456789abcdefghijklmnop";
+
+/**
+ * Catches a run that reached no verdict losing what it did, the error text
+ * naming no place to find it, and a keep that changes the failure into a step's
+ * label: a run with no verdict is reported with the label it always was.
+ */
+test("a work run that ends without a verdict leaves its work on the ticket's checkpoint, and its text says where", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+
+    const { failure } = await standInAttempt(t, checkout, [revokedRun()]);
+
+    assert.ok(!(failure instanceof RunStepFailure), String(failure));
+    const { stdout: commit } = await git("git", ["rev-parse", checkpointRef], {
+      cwd: checkout.remote,
+    });
+    assert.equal(
+      failure.message,
+      [
+        "Claude Code exited 1",
+        revokedSentence,
+        `The run's work is kept on ${checkpointRef} at ${commit.trim()}.`,
+      ].join("\n"),
+    );
+    assert.equal(
+      await remoteFile(checkout.remote, checkpointRef, "half.txt"),
+      "half\n",
+    );
+    assert.ok(!(await remoteRefs(checkout.remote)).includes("/attempts/"));
+  });
+});
+
+test("a run that exited clean with no verdict leaves its work too, and says what the runtime said", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+
+    const { failure } = await standInAttempt(t, checkout, [
+      { ...revokedRun(), exit: 0 },
+    ]);
+
+    assert.match(
+      failure.message,
+      /^Claude Code returned no structured verdict$/mu,
+    );
+    assert.ok(failure.message.includes(revokedSentence));
+    assert.equal(
+      await remoteFile(checkout.remote, checkpointRef, "half.txt"),
+      "half\n",
+    );
+  });
+});
+
+/**
+ * A stream that cannot be read stops its process. Catches a checkpoint taken
+ * while an agent is still writing to the tree, and a process outliving its
+ * attempt.
+ */
+test(
+  "a run whose stream cannot be read is stopped before its work is kept",
+  { timeout: 30_000 },
+  async (t) => {
+    await inCheckout(async (checkout) => {
+      await targetPushed(checkout);
+
+      const { failure, runtime } = await standInAttempt(t, checkout, [
+        { work: "echo half > half.txt", frames: ["not a frame"], linger: true },
+      ]);
+
+      assert.match(failure.message, /emitted invalid streaming JSON/u);
+      assert.equal(
+        await remoteFile(checkout.remote, checkpointRef, "half.txt"),
+        "half\n",
+      );
+      const [{ pid }] = await runtime.starts();
+      assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+    });
+  },
+);
+
+/** `script` installed as the remote's `hook`, which is how a forge's own checks refuse a push. */
+async function remoteRefuses(remote, hook, script) {
+  const file = join(remote, "hooks", hook);
+  await writeFile(file, `#!/bin/sh\n${script}\n`);
+  await chmod(file, 0o755);
+}
+
+/** What a remote's hook runs to say `bytes` of nothing, in lines. */
+function remoteSays(bytes) {
+  return `head -c ${String(bytes)} /dev/zero | tr '\\0' x | fold -w 500 >&2`;
+}
+
+/** Catches a failure to keep that masks why the run ended, or moves its label to the push's. */
+test("a run whose work could not be kept still ends as it ended, and says so", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    await remoteRefuses(checkout.remote, "pre-receive", "exit 1");
+
+    const { failure } = await standInAttempt(t, checkout, [revokedRun()]);
+
+    assert.ok(!(failure instanceof RunStepFailure), String(failure));
+    assert.match(failure.message, /^Claude Code exited 1$/mu);
+    assert.ok(failure.message.includes(revokedSentence));
+    assert.match(failure.message, /^The run's work could not be kept: /mu);
+  });
+});
+
+test("a run that changed nothing keeps nothing, and its text says so", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+
+    const { failure } = await standInAttempt(t, checkout, [
+      { frames: [], exit: 1 },
+    ]);
+
+    assert.equal(
+      failure.message,
+      "Claude Code exited 1\nThe run changed nothing, so nothing is kept.",
+    );
+    assert.ok(!(await remoteRefs(checkout.remote)).includes("checkpoint"));
+  });
+});
+
+/**
+ * The next attempt is a fresh clone, so this is the whole of the claim. Catches
+ * a clone that never sees the branch, a briefing that does not say the tree
+ * holds someone else's work, and a candidate without what the first run did.
+ */
+test("the next work attempt starts from what the last left, and is told", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    await standInAttempt(t, checkout, [revokedRun("half.txt")]);
+    const seen = await suiteDirectory(t, "chuggy-seen-");
+    const next = verdictRun("done.txt");
+
+    const { failure, plane, runtime } = await standInAttempt(t, checkout, [
+      {
+        ...next,
+        work: `git status --porcelain=v1 > '${seen}/status'; git rev-parse HEAD > '${seen}/head'; ${next.work}`,
+      },
+    ]);
+
+    assert.equal(failure, undefined, String(failure));
+    const [{ argv }] = await runtime.starts();
+    assert.match(argv.at(-1), /## Unfinished work from an earlier attempt/u);
+    assert.equal(await readFile(join(seen, "status"), "utf8"), "?? half.txt\n");
+    assert.equal(
+      await readFile(join(seen, "head"), "utf8"),
+      `${checkout.base}\n`,
+    );
+    const [{ source }] = planeBodies(plane, "report");
+    assert.equal(
+      await remoteFile(checkout.remote, source.commit, "half.txt"),
+      "half\n",
+    );
+    assert.equal(
+      await remoteFile(checkout.remote, source.commit, "done.txt"),
+      "done\n",
+    );
+  });
+});
+
+test("an attempt with nothing to start from is told nothing of it", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+
+    const { runtime } = await standInAttempt(t, checkout, [verdictRun()]);
+
+    const [{ argv }] = await runtime.starts();
+    assert.ok(!argv.at(-1).includes("Unfinished work"));
+  });
+});
+
+/** A commit with no parent is no checkpoint this core made, and undoing it fails. */
+test("a checkpoint that cannot be restored leaves the attempt to run from its base", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { directory, remote } = checkout;
+    await targetPushed(checkout);
+    const { stdout: tree } = await git("git", ["rev-parse", "HEAD^{tree}"], {
+      cwd: directory,
+    });
+    const { stdout: orphan } = await git(
+      "git",
+      [...author, "commit-tree", tree.trim(), "-m", "no parent"],
+      { cwd: directory },
+    );
+    await git("git", ["push", remote, `${orphan.trim()}:${checkpointRef}`], {
+      cwd: directory,
+    });
+
+    const { failure, runtime } = await standInAttempt(t, checkout, [
+      verdictRun(),
+    ]);
+
+    assert.equal(failure, undefined, String(failure));
+    const [{ argv }] = await runtime.starts();
+    assert.ok(!argv.at(-1).includes("Unfinished work"));
+  });
+});
+
+/** An evaluator reads the candidate it was given, and has no work of its own to keep. */
+test("an evaluation neither restores a checkpoint nor leaves one", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    await standInAttempt(t, checkout, [revokedRun()]);
+    const { stdout: before } = await git("git", ["rev-parse", checkpointRef], {
+      cwd: checkout.remote,
+    });
+    const evaluation = agentAnswer({ taskKind: "Evaluation", stage: 1 });
+
+    const { failure, runtime } = await standInAttempt(
+      t,
+      checkout,
+      [revokedRun("evaluator.txt")],
+      { answer: evaluation },
+    );
+
+    assert.match(failure.message, /^Claude Code exited 1$/mu);
+    assert.ok(!failure.message.includes("kept"));
+    const [{ argv }] = await runtime.starts();
+    assert.ok(!argv.at(-1).includes("Unfinished work"));
+    const { stdout: after } = await git("git", ["rev-parse", checkpointRef], {
+      cwd: checkout.remote,
+    });
+    assert.equal(after, before);
+  });
+});
+
+/**
+ * The whole of a hold through the real path. Catches a run not held, a second
+ * `prepareClaudeShell`, which refuses a file that is already there, a resume
+ * with no session or with the briefing again, a wait for the wrong length, no
+ * line in the transcript, and work not kept before the wait, which is the point
+ * of keeping it then: the wait is when a deadline or a restart can land.
+ */
+test("a run the limit stopped waits it out, its work kept first, and carries on in its conversation", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const atWait = {};
+
+    const { failure, plane, runtime, clock, prepared } = await standInAttempt(
+      t,
+      checkout,
+      [limitRun("half.txt"), verdictRun("done.txt")],
+      {
+        wait: (clock) => async (milliseconds) => {
+          atWait.kept = await remoteFile(
+            checkout.remote,
+            checkpointRef,
+            "half.txt",
+          );
+          return clock.wait(milliseconds);
+        },
+      },
+    );
+
+    assert.equal(failure, undefined, String(failure));
+    assert.equal(atWait.kept, "half\n");
+    assert.deepEqual(clock.pauses, [limitWaitMs]);
+    assert.equal(prepared.times, 1);
+    const [first, second] = await runtime.starts();
+    assert.equal(first.argv.indexOf("--resume"), -1);
+    const flags = first.argv.slice(0, first.argv.indexOf("--"));
+    assert.deepEqual(second.argv.slice(0, flags.length), flags);
+    assert.deepEqual(second.argv.slice(flags.length, flags.length + 2), [
+      "--resume",
+      limitSession,
+    ]);
+    assert.match(second.argv.at(-1), /has reset/u);
+    const held = transcriptSent(plane)
+      .split("\n")
+      .filter((line) => line.includes("chuggy_run_held"))
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(held, [
+      {
+        type: "chuggy_run_held",
+        until: new Date(limitStoppedMs + limitWaitMs).toISOString(),
+        window: "five_hour",
+      },
+    ]);
+    const [{ verdict, source }] = planeBodies(plane, "report");
+    assert.equal(verdict, "Pass");
+    assert.equal(
+      await remoteFile(checkout.remote, source.commit, "half.txt"),
+      "half\n",
+    );
+    assert.equal(
+      await remoteFile(checkout.remote, source.commit, "done.txt"),
+      "done\n",
+    );
+  });
+});
+
+/** Catches a run charged only for the process that finished it, since each result overwrites the one before. */
+test("a held run's totals are of both its processes", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+
+    const { plane } = await standInAttempt(t, checkout, [
+      limitRun(),
+      verdictRun(),
+    ]);
+
+    const [totals] = planeBodies(plane, "runTotals");
+    assert.equal(totals.turns, limitResult.num_turns + 2);
+    assert.equal(totals.costUsdMicros, 2_500_000);
+  });
+});
+
+/** Catches a resumed process uploading its configuration again, which the plane refuses: `captured` lived for one read of the stream. */
+test("a held run's configuration is uploaded once", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const init = { type: "system", subtype: "init", session_id: limitSession };
+
+    const { failure, plane } = await standInAttempt(t, checkout, [
+      { ...limitRun(), frames: [init, ...limitFrames] },
+      { ...verdictRun(), frames: [init, verdictFrame()] },
+    ]);
+
+    assert.equal(failure, undefined, String(failure));
+    assert.equal(planeBodies(plane, "runConfiguration").length, 1);
+  });
+});
+
+/**
+ * A process past its hold that fails for a reason of its own is that failure.
+ * Catches `refused` staying sticky across the resume, which would hold it again
+ * for a limit that was over.
+ */
+test("a resumed process that fails for its own reason is not held for the limit it came back from", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+
+    const { failure, runtime, clock } = await standInAttempt(t, checkout, [
+      limitRun(),
+      revokedRun("second.txt"),
+    ]);
+
+    assert.equal((await runtime.starts()).length, 2);
+    assert.equal(clock.pauses.length, 1);
+    assert.match(failure.message, /^Claude Code exited 1$/mu);
+    assert.ok(!failure.message.includes("not held"));
+  });
+});
+
+/** Catches a run given up on after one hold, and an account refusing for ever keeping a slot for ever. */
+test("a run the limit keeps stopping is held a bounded number of times", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const runs = Array.from({ length: runHoldsMax + 1 }, () => limitRun());
+
+    const { failure, runtime, clock } = await standInAttempt(t, checkout, runs);
+
+    assert.equal((await runtime.starts()).length, runHoldsMax + 1);
+    assert.equal(clock.pauses.length, runHoldsMax);
+    assert.match(
+      failure.message,
+      /^The run was not held: the run has already held /mu,
+    );
+  });
+});
+
+/** A verdict is what the run was for: a frame that says the account was refused at some point changes nothing about it. */
+test("a run that gave its verdict is never held, whatever its frames said", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+
+    const { failure, plane, runtime, clock } = await standInAttempt(
+      t,
+      checkout,
+      [{ ...verdictRun(), frames: [...limitFrames, verdictFrame()] }],
+    );
+
+    assert.equal(failure, undefined, String(failure));
+    assert.deepEqual(clock.pauses, []);
+    assert.equal((await runtime.starts()).length, 1);
+    assert.equal(planeBodies(plane, "report")[0].verdict, "Pass");
+  });
+});
+
+test("a process that gave a verdict and exited 1 is not held either", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+
+    const { failure, clock } = await standInAttempt(t, checkout, [
+      { ...verdictRun(), frames: [...limitFrames, verdictFrame()], exit: 1 },
+    ]);
+
+    assert.deepEqual(clock.pauses, []);
+    assert.match(failure.message, /^Claude Code exited 1$/mu);
+  });
+});
+
+/**
+ * Each way a limit is not waited out, through the real path: nothing wrong with
+ * the rest of the text, and work still kept. Catches a run that holds into its
+ * own deadline, or holds on a session or a reset it was never given.
+ */
+test("a limit that cannot be waited out ends the run, saying the limit, its reset, why and where the work is", async (t) => {
+  const sessionless = { ...limitResult, session_id: undefined };
+  const resetless = {
+    ...limitRejected.rate_limit_info,
+    resetsAt: undefined,
+  };
+  const cases = [
+    {
+      why: /deadline .* leaves no time to finish after the reset/u,
+      options: { timeoutSecsMax: 1_800 },
+    },
+    {
+      why: /the result gave no session to resume/u,
+      frames: [limitRejected, limitRefused, sessionless],
+    },
+    {
+      why: /the frames gave no reset time/u,
+      frames: [
+        { ...limitRejected, rate_limit_info: resetless },
+        limitRefused,
+        limitResult,
+      ],
+      noReset: true,
+    },
+    {
+      why: /this agent cannot resume a conversation/u,
+      options: { agent: { resumeInvocation: undefined } },
+    },
+  ];
+  for (const { why, frames = limitFrames, options, noReset } of cases)
+    await inCheckout(async (checkout) => {
+      await targetPushed(checkout);
+
+      const { failure, runtime, clock } = await standInAttempt(
+        t,
+        checkout,
+        [{ ...limitRun(), frames }],
+        options,
+      );
+
+      assert.equal((await runtime.starts()).length, 1, String(why));
+      assert.deepEqual(clock.pauses, [], String(why));
+      assert.match(failure.message, /^Claude Code exited 1$/mu);
+      assert.ok(failure.message.includes(limitSentence), String(why));
+      assert.equal(
+        failure.message.includes(
+          `The five_hour limit resets at ${new Date(limitResetsAtSecs * 1_000).toISOString()}.`,
+        ),
+        noReset !== true,
+        String(why),
+      );
+      assert.match(failure.message, why);
+      assert.match(failure.message, /^The run's work is kept on /mu);
+    });
+});
+
+/**
+ * A pod launched for real at `checkout`, `carried` naming its task, its runtime
+ * the stand-in running `runs` and found on PATH as a host job finds it, in
+ * directories of its own.
+ */
+async function launchedStandIn(t, checkout, runs, carried) {
+  const root = await suiteDirectory(t, "chuggy-launched-");
+  await mkdir(join(root, "minted"));
+  const providerCredentialFile = join(root, "claude-code");
+  await writeFile(providerCredentialFile, `${secret}\n`);
+  const plane = await standInPlane(
+    agentAnswer(),
+    checkout.remote,
+    checkout.base,
+  );
+  t.after(() => plane.close());
+  const runtime = await standInRuntime(t, runs);
+  const ran = await launched(
+    {
+      ...(await carried({ root, plane, providerCredentialFile })),
+      CHUGGY_HOST_JOB: root,
+      HOME: root,
+      TMPDIR: root,
+      PATH: `${runtime.directory}:${process.env["PATH"] ?? ""}`,
+    },
+    root,
+  );
+  return { ran, plane, runtime };
+}
+
+/** What a pool's envelope sets in a launched pod's environment, over `fields`. */
+function envelopeCarried(fields = {}) {
+  return ({ root, plane, providerCredentialFile }) => ({
+    [workerTaskVariable]: JSON.stringify({
+      ...envelope,
+      callbackUrl: plane.url,
+      providerCredentialFile,
+      workspace: join(root, "workspace"),
+      ...fields,
+    }),
+  });
+}
+
+/** What a pushed pod's launcher sets in its environment instead. */
+async function documentCarried({ root, plane, providerCredentialFile }) {
+  const capabilityFile = join(root, "bearer");
+  await writeFile(capabilityFile, "the-bearer\n");
+  return {
+    [workerTaskVariable]: JSON.stringify({
+      ...pushed,
+      authority: {
+        ...pushed.authority,
+        credentials: ["forge", claudeAgent.credential],
+      },
+      workerPlane: { ...pushed.workerPlane, url: plane.url, capabilityFile },
+    }),
+    [workerCredentialFilesVariable]: JSON.stringify({
+      [claudeAgent.credential]: providerCredentialFile,
+    }),
+    [workerWorkspaceVariable]: join(root, "workspace"),
+  };
+}
+
+/**
+ * A pushed pod's document names no time at all, so nothing can say a wait fits.
+ * Launched for real, since nothing else reaches that carrier, and with a real
+ * clock, which is safe: a run wrongly held here would wait out a reset hours
+ * away and the test would time out rather than pass.
+ */
+test(
+  "a run launched from a task document is not held, having no deadline to hold against",
+  { timeout: 60_000 },
+  async (t) => {
+    await inCheckout(async (checkout) => {
+      await targetPushed(checkout);
+
+      const { ran, plane, runtime } = await launchedStandIn(
+        t,
+        checkout,
+        [limitRun()],
+        documentCarried,
+      );
+
+      assert.equal(ran.code, 1, ran.stderr);
+      assert.equal((await runtime.starts()).length, 1);
+      const [uploaded] = planeBodies(plane, "artifact");
+      assert.match(
+        Buffer.from(uploaded).toString("utf8"),
+        /^The run was not held: this launch names no deadline\.$/mu,
+      );
+    });
+  },
+);
+
+/**
+ * The boundary, to the second. Catches a deadline measured from the moment of
+ * the decision rather than from the process's start, which is when the pool's
+ * count began and would have a run hold past when it is stopped.
+ */
+test("a run's deadline is the envelope's, counted from when this process started", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const exactlySecs =
+      (limitWaitMs + runHoldReserveMs) / 1_000 + limitUptimeSecs;
+
+    const tooClose = await standInAttempt(t, checkout, [limitRun()], {
+      timeoutSecsMax: exactlySecs,
+    });
+    const fits = await standInAttempt(t, checkout, [limitRun(), verdictRun()], {
+      timeoutSecsMax: exactlySecs + 1,
+    });
+
+    assert.equal((await tooClose.runtime.starts()).length, 1);
+    assert.match(tooClose.failure.message, /no time to finish/u);
+    assert.equal(fits.failure, undefined, String(fits.failure));
+    assert.equal((await fits.runtime.starts()).length, 2);
+  });
+});
+
+/**
+ * Half-done work may well fail a setup that passes on the base: a lockfile out
+ * of step, a broken build step. Restored before setup, it would fail every
+ * attempt after it, for ever. Catches that.
+ */
+test("a setup that half-done work would fail still runs, since the work is restored after it", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const answer = agentAnswer({
+      worker: { ...fetchedAnswer.worker, setup: ["test ! -e half.txt"] },
+    });
+    await standInAttempt(t, checkout, [revokedRun("half.txt")], { answer });
+
+    const { failure, plane } = await standInAttempt(
+      t,
+      checkout,
+      [verdictRun("done.txt")],
+      { answer },
+    );
+
+    assert.equal(failure, undefined, String(failure));
+    const [{ source }] = planeBodies(plane, "report");
+    assert.equal(
+      await remoteFile(checkout.remote, source.commit, "half.txt"),
+      "half\n",
+    );
+  });
+});
+
+/** An evaluator is stopped by the same limit and has its own conversation to finish, and nothing to keep. */
+test("an evaluation the limit stopped is held too, leaving no checkpoint", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+
+    const { failure, runtime, clock } = await standInAttempt(
+      t,
+      checkout,
+      [limitRun("evaluator.txt"), { frames: [verdictFrame()] }],
+      { answer: agentAnswer({ taskKind: "Evaluation", stage: 1 }) },
+    );
+
+    assert.equal(failure, undefined, String(failure));
+    assert.equal((await runtime.starts()).length, 2);
+    assert.deepEqual(clock.pauses, [limitWaitMs]);
+    assert.ok(!(await remoteRefs(checkout.remote)).includes("checkpoint"));
+  });
+});
+
+/** The runtime's sentence is text an agent's session can put a credential in, and it leaves the pod. */
+test("what the runtime said goes through the scrub before it is reported", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const leaked = {
+      ...revokedRun(),
+      frames: [
+        { ...revokedRun().frames[0], result: `token ${secret} was revoked` },
+      ],
+    };
+
+    const { failure } = await standInAttempt(t, checkout, [leaked]);
+
+    assert.match(failure.message, /^token .* was revoked$/mu);
+    assert.ok(!failure.message.includes(secret));
+  });
+});
+
+/** A push refused by anything, for an attempt's branch alone. */
+const attemptPushRefused = 'case "$1" in */attempts/*) exit 1;; esac';
+
+/**
+ * A pass whose commit landed on `HEAD` is the case where a clean tree must not
+ * read as nothing. Catches that, the checkpoint masking the push's label, and
+ * the next attempt not finding the work in its tree.
+ */
+test("a pass whose push failed leaves its work on the checkpoint, its label its own, and the next attempt starts from it", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { remote } = checkout;
+    await targetPushed(checkout);
+    await remoteRefuses(remote, "update", attemptPushRefused);
+
+    const { failure, plane } = await standInAttempt(t, checkout, [
+      verdictRun("work.txt"),
+    ]);
+
+    assert.ok(failure instanceof RunStepFailure, String(failure));
+    assert.equal(failure.evidence, runPushFailed);
+    assert.match(failure.message, /^The run's work is kept on /mu);
+    assert.equal(planeBodies(plane, "report").length, 0);
+    assert.equal(await remoteFile(remote, checkpointRef, "work.txt"), "done\n");
+
+    await remoteRefuses(remote, "update", "exit 0");
+    const next = await standInAttempt(t, checkout, [verdictRun("more.txt")]);
+
+    assert.equal(next.failure, undefined, String(next.failure));
+    const [{ argv }] = await next.runtime.starts();
+    assert.match(argv.at(-1), /## Unfinished work from an earlier attempt/u);
+    const [{ source }] = planeBodies(next.plane, "report");
+    assert.equal(await remoteFile(remote, source.commit, "work.txt"), "done\n");
+    assert.equal(await remoteFile(remote, source.commit, "more.txt"), "done\n");
+  });
+});
+
+/** The project's hook is what refused the commit, and it does not get a say over keeping the work. */
+test("a pass whose commit failed leaves its work on the checkpoint, its label its own", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { remote } = checkout;
+    await targetPushed(checkout);
+    const hooks = await suiteDirectory(t, "chuggy-hooks-");
+    await writeFile(join(hooks, "pre-commit"), "#!/bin/sh\nexit 1\n");
+    await chmod(join(hooks, "pre-commit"), 0o755);
+    const answer = agentAnswer({
+      worker: {
+        ...fetchedAnswer.worker,
+        setup: [`git config core.hooksPath '${hooks}'`],
+      },
+    });
+
+    const { failure } = await standInAttempt(
+      t,
+      checkout,
+      [verdictRun("work.txt")],
+      { answer },
+    );
+
+    assert.ok(failure instanceof RunStepFailure, String(failure));
+    assert.equal(failure.evidence, runCommitFailed);
+    assert.match(failure.message, /^The run's work is kept on /mu);
+    assert.equal(await remoteFile(remote, checkpointRef, "work.txt"), "done\n");
+  });
+});
+
+test("a pass carrying a held secret keeps nothing, its refusal standing", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { remote } = checkout;
+    await targetPushed(checkout);
+
+    const { failure } = await standInAttempt(t, checkout, [
+      { work: `echo ${secret} > leak.txt`, frames: [verdictFrame()] },
+    ]);
+
+    assert.equal(failure.evidence, runCommitFailed);
+    assert.match(failure.message, /^The run's work could not be kept: /mu);
+    assert.ok(!failure.message.includes(secret));
+    assert.equal(await remoteFile(remote, "main", "leak.txt"), undefined);
+    assert.ok(!(await remoteRefs(remote)).includes("chuggy/tickets"));
+  });
+});
+
+/** What a forge answers a push that touches a workflow without the permission to. */
+const workflowsRefusal = `while read -r _ new _; do
+  if git log --format= --name-only "$new" --not --all | grep -q '^.github/workflows/'; then
+    echo "refusing to allow a GitHub App to create or update workflow without workflows permission" >&2
+    exit 1
+  fi
+done`;
+
+/**
+ * The checkpoint carries the same tree the candidate did, so the same forge
+ * refuses it. Catches paths stripped to get it through, which would hand the
+ * next attempt a tree that is not what the run left, and that refusal taking
+ * the place of the push failure the run is reported as.
+ */
+test("a pass whose push and checkpoint a forge both refuse ends as the push failed, nothing stripped", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { remote } = checkout;
+    await targetPushed(checkout);
+    await remoteRefuses(remote, "pre-receive", workflowsRefusal);
+
+    const { failure } = await standInAttempt(t, checkout, [
+      {
+        work: "mkdir -p .github/workflows && echo on > .github/workflows/ci.yml && echo done > work.txt",
+        frames: [verdictFrame()],
+      },
+    ]);
+
+    assert.equal(failure.evidence, runPushFailed);
+    assert.match(failure.message, /^The run's work could not be kept: /mu);
+    assert.match(failure.message, /refusing to allow a GitHub App/u);
+    assert.ok(!(await remoteRefs(remote)).includes("chuggy/tickets"));
+  });
+});
+
+/** A failed attempt's own branch is what a Fail leaves, and it is not a checkpoint: only a run with no result needs one. */
+test("a run that failed its task leaves its kept branch and no checkpoint", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+
+    const { failure } = await standInAttempt(t, checkout, [
+      verdictRun("work.txt", "Fail"),
+    ]);
+
+    assert.equal(failure, undefined, String(failure));
+    assert.ok(!(await remoteRefs(checkout.remote)).includes("checkpoint"));
+  });
+});
+
+/**
+ * The pod as a pool launches it, so the text and the label are the ones the
+ * plane is really sent, read off the requests. Uses the host job's way of
+ * finding its runtime, on PATH.
+ */
+test("the error text a real pod uploads carries what the runtime said and where the work is, under the label it always had", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+
+    const { ran, plane } = await launchedStandIn(
+      t,
+      checkout,
+      [revokedRun()],
+      envelopeCarried(),
+    );
+
+    assert.equal(ran.code, 1, ran.stderr);
+    const [uploaded] = planeBodies(plane, "artifact");
+    const { stdout: commit } = await git("git", ["rev-parse", checkpointRef], {
+      cwd: checkout.remote,
+    });
+    assert.equal(
+      Buffer.from(uploaded).toString("utf8"),
+      [
+        "Claude Code exited 1",
+        revokedSentence,
+        `The run's work is kept on ${checkpointRef} at ${commit.trim()}.`,
+        "",
+      ].join("\n"),
+    );
+    assert.equal(planeBodies(plane, "runEnded")[0].evidence, "RunFailed");
+  });
+});
+
+/**
+ * A hold through nothing but the real process: `main`, the real clock, the log.
+ * The window reopened a moment ago, so the wait is over as soon as it starts.
+ * Catches the default clock not being one a held run can wait on, which every
+ * suite above replaces, and a hold nothing in the pod's log says happened.
+ */
+test(
+  "a real pod held at a limit says so in its log and finishes",
+  { timeout: 60_000 },
+  async (t) => {
+    await inCheckout(async (checkout) => {
+      await targetPushed(checkout);
+      const reopenedSecs = Math.floor(Date.now() / 1_000) - 120;
+      const rejected = {
+        ...limitRejected,
+        rate_limit_info: {
+          ...limitRejected.rate_limit_info,
+          resetsAt: reopenedSecs,
+        },
+      };
+
+      const { ran, plane, runtime } = await launchedStandIn(
+        t,
+        checkout,
+        [
+          { ...limitRun(), frames: [rejected, limitRefused, limitResult] },
+          verdictRun(),
+        ],
+        envelopeCarried({ timeoutSecsMax: limitFitsSecs }),
+      );
+
+      assert.equal(ran.code, 0, ran.stderr);
+      assert.match(ran.stderr, /"type":"chuggy_run_held"/u);
+      assert.equal((await runtime.starts()).length, 2);
+      assert.equal(planeBodies(plane, "report")[0].verdict, "Pass");
+    });
+  },
+);
+
+/** An `update` hook line doing `script` for the checkpoint's ref alone. */
+function forCheckpoint(script) {
+  return `case "$1" in */checkpoint) ${script};; esac`;
+}
+
+/** A hook that writes to `file` for a while, so a suite can see it stop. */
+function beating(file) {
+  return `i=0; while [ "$i" -lt 100 ]; do echo beat >> '${file}'; sleep 0.05; i=$((i+1)); done`;
+}
+
+/**
+ * The run that resumes after a hold, leaving in `seen` each file under `root`
+ * holding the push's token, and beside it what the attempt's own file holds.
+ */
+function resumedLooking(root, seen) {
+  return {
+    ...verdictRun(),
+    work: `grep -rlF '${pushToken}' '${root}' > '${seen}' || true; cp '${root}/chuggy-git-credential' '${seen}.own'; echo done > done.txt`,
+  };
+}
+
+/** A real file write, recording each password it wrote. */
+function writtenFor(passwords) {
+  return async (file, password, options) => {
+    passwords.push(password);
+    await writeFile(file, password, options);
+  };
+}
+
+/** How a keep's push ended, each of which must leave a resumed agent nothing to read. */
+const keepEnds = [
+  ["was pushed", undefined, {}],
+  ["was refused", forCheckpoint("exit 1"), {}],
+  ["was stopped partway", forCheckpoint("sleep 3"), { asideCapMs: 1_500 }],
+];
+
+/**
+ * A hold's keep mints the write of a run that has an agent still to come, and
+ * this is the file that reads what it wrote. Catches the mint left where the
+ * attempt's read is, or anywhere else a resumed agent can reach, on any way a
+ * keep can end.
+ */
+for (const [how, hook, seams] of keepEnds)
+  test(`a resumed agent finds only its read on disk, where the keep before its hold ${how}`, async (t) => {
+    await inCheckout(async (checkout) => {
+      const { remote } = checkout;
+      await targetPushed(checkout);
+      if (hook !== undefined) await remoteRefuses(remote, "update", hook);
+      const seen = join(await suiteDirectory(t, "chuggy-seen-"), "holding");
+      const written = [];
+
+      const { failure, runtime } = await standInAttempt(
+        t,
+        checkout,
+        (root) => [limitRun(), resumedLooking(root, seen)],
+        { write: writtenFor(written), ...seams },
+      );
+
+      assert.equal(failure, undefined, String(failure));
+      assert.equal((await runtime.starts()).length, 2);
+      assert.deepEqual(written.slice(0, 2), [readToken, pushToken]);
+      assert.equal(await readFile(seen, "utf8"), "");
+      assert.equal(await readFile(`${seen}.own`, "utf8"), readToken);
+    });
+  });
+
+/**
+ * Fails closed. Catches a resume that goes ahead past a credential nothing could
+ * remove, and the run's end pushing a second time.
+ */
+test(
+  "a write credential that cannot be removed ends the run rather than resume it",
+  { skip: process.getuid?.() === 0 },
+  async (t) => {
+    await inCheckout(async (checkout) => {
+      await targetPushed(checkout);
+      const locked = [];
+      const write = async (file, password, options) => {
+        await writeFile(file, password, options);
+        if (password !== pushToken) return;
+        locked.push(dirname(file));
+        await chmod(dirname(file), 0o555);
+      };
+
+      const { failure, plane, runtime } = await standInAttempt(
+        t,
+        checkout,
+        [limitRun(), verdictRun()],
+        { write },
+      );
+      await Promise.all(locked.map((directory) => chmod(directory, 0o755)));
+
+      assert.equal((await runtime.starts()).length, 1);
+      assert.match(
+        failure.message,
+        /^The run was not held: the push's write credential could not be removed\.$/mu,
+      );
+      assert.match(failure.message, /^The run's work is kept on /mu);
+      assert.equal(credentialAsks(plane).filter((r) => !r).length, 1);
+    });
+  },
+);
+
+/**
+ * A remote that stalls must not move the run's end to the pool's deadline, where
+ * it would read as timed out. Catches a bound that merely stops waiting, which
+ * leaves the push and the remote's hook running, and one that replaces the
+ * run's own failure.
+ */
+test("a keep past its bound is stopped, git and all, and the run ends as it ended", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { remote } = checkout;
+    await targetPushed(checkout);
+    const beat = join(remote, "beat");
+    await remoteRefuses(remote, "pre-receive", beating(beat));
+    const began = Date.now();
+
+    const { failure } = await standInAttempt(t, checkout, [revokedRun()], {
+      asideCapMs: 1_000,
+    });
+
+    assert.ok(Date.now() - began < 4_000, "the keep ran on past its bound");
+    assert.ok(!(failure instanceof RunStepFailure), String(failure));
+    assert.match(failure.message, /^Claude Code exited 1$/mu);
+    assert.match(
+      failure.message,
+      /^The run's work could not be kept: it was stopped after 1000 ms$/mu,
+    );
+    const stopped = (await stat(beat)).size;
+    await wait(400);
+    assert.equal((await stat(beat)).size, stopped, "the remote's hook ran on");
+  });
+});
+
+/** Catches a keep that runs into the time the run needs to report what became of it. */
+test("a keep ends soon enough before the run's deadline to report", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { remote } = checkout;
+    await targetPushed(checkout);
+    await remoteRefuses(remote, "pre-receive", beating(join(remote, "beat")));
+    const leftMs = 1_000;
+
+    const { failure } = await standInAttempt(t, checkout, [revokedRun()], {
+      timeoutSecsMax:
+        (workerPlaneAwayMillisecondsMax + leftMs) / 1_000 + limitUptimeSecs,
+    });
+
+    assert.match(
+      failure.message,
+      new RegExp(`could not be kept: it was stopped after ${leftMs} ms$`, "mu"),
+    );
+  });
+});
+
+/** Catches a bound past the deadline read as one to wait for, or as an error of its own. */
+test("a run with no time left to keep anything ends as it ended", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+
+    const { failure } = await standInAttempt(t, checkout, [revokedRun()], {
+      timeoutSecsMax: limitUptimeSecs + 1,
+    });
+
+    assert.match(failure.message, /^Claude Code exited 1$/mu);
+    assert.match(
+      failure.message,
+      /could not be kept: it was stopped after 0 /u,
+    );
+    assert.ok(!(await remoteRefs(checkout.remote)).includes("checkpoint"));
+  });
+});
+
+/**
+ * The directory is what makes a mint answered late harmless: it has nowhere left
+ * to write. Catches a keep that waits for a plane that has gone quiet, and a
+ * late answer leaving a write token behind.
+ */
+test("a mint answered after its keep was stopped writes nothing", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    let answer;
+    const answered = new Promise((settled) => {
+      answer = settled;
+    });
+    const request = async (task, bearer, path, init, transport) => {
+      if (path === workerCredentialPath && init?.body === undefined)
+        await answered;
+      return workerRequest(task, bearer, path, init, transport);
+    };
+    const writes = [];
+    const write = (file, password, options) => {
+      const writing = writeFile(file, password, options);
+      if (password === pushToken) writes.push(writing);
+      return writing;
+    };
+
+    const { failure, workspace } = await standInAttempt(
+      t,
+      checkout,
+      [revokedRun()],
+      { request, write, asideCapMs: 2_000 },
+    );
+
+    assert.match(failure.message, /could not be kept: it was stopped after/u);
+    answer();
+    for (let polls = 0; writes.length === 0 && polls < 3_000; polls += 1)
+      await wait(10);
+    assert.equal(writes.length, 1, "the late mint's answer was never written");
+    await assert.rejects(writes[0], { code: "ENOENT" });
+    assert.deepEqual(
+      (await readdir(dirname(workspace))).filter((name) =>
+        name.startsWith("chuggy-aside-"),
+      ),
+      [],
+    );
+  });
+});
+
+/**
+ * A keep slow enough to spend the reserve leaves nothing a hold can finish in.
+ * Catches the hold taken on the first reading, and the run's end pushing that
+ * keep a second time.
+ */
+test("a keep that spends the reserve ends the run rather than hold it", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const spent = (clock, plane) => () =>
+      clock.now() +
+      (credentialAsks(plane).includes(undefined) ? limitFitsSecs * 1_000 : 0);
+
+    const { failure, plane, runtime } = await standInAttempt(
+      t,
+      checkout,
+      [limitRun(), verdictRun()],
+      { now: spent },
+    );
+
+    assert.equal((await runtime.starts()).length, 1);
+    assert.match(
+      failure.message,
+      /^The run was not held: .*no time to finish/mu,
+    );
+    assert.match(failure.message, /^The run's work is kept on /mu);
+    assert.equal(credentialAsks(plane).filter((r) => !r).length, 1);
+  });
+});
+
+/** A hook logging each ref a push updates, as the new value it was sent and the ref. */
+function updatesLogged(file) {
+  return `while read -r _ new ref; do echo "$new $ref" >> '${file}'; done`;
+}
+
+/** Each update `updatesLogged` wrote to `file`. */
+async function updatesIn(file) {
+  const logged = await readFile(file, "utf8");
+  return logged
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => line.split(" "));
+}
+
+/**
+ * Catches a checkpoint left where a rework could be handed it, a delete before
+ * the push that carries its work on, which could lose the work, and either
+ * touching what the pass reports.
+ */
+test("a pass deletes the checkpoint it carried on, after its candidate is pushed", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { remote } = checkout;
+    await targetPushed(checkout);
+    await standInAttempt(t, checkout, [revokedRun()]);
+    assert.ok((await remoteRefs(remote)).includes(checkpointRef));
+    const updates = join(remote, "updates");
+    await remoteRefuses(remote, "pre-receive", updatesLogged(updates));
+
+    const { failure, plane } = await standInAttempt(t, checkout, [
+      verdictRun(),
+    ]);
+
+    assert.equal(failure, undefined, String(failure));
+    assert.ok(!(await remoteRefs(remote)).includes(checkpointRef));
+    const [{ verdict, source }] = planeBodies(plane, "report");
+    assert.equal(verdict, "Pass");
+    const [candidate, deleted, ...more] = await updatesIn(updates);
+    assert.deepEqual(candidate, [source.commit, source.ref]);
+    assert.equal(deleted[1], checkpointRef);
+    assert.match(deleted[0], /^0+$/u);
+    assert.deepEqual(more, []);
+  });
+});
+
+/** A checkpoint is only what a run left: a ticket with none must cost a pass nothing. */
+test("a pass of a ticket with no checkpoint reaches no remote for one and says nothing of one", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { remote } = checkout;
+    await targetPushed(checkout);
+    const updates = join(remote, "updates");
+    await remoteRefuses(remote, "pre-receive", updatesLogged(updates));
+    const logged = [];
+    t.mock.method(process.stderr, "write", (text) => logged.push(text));
+
+    const { failure, plane } = await standInAttempt(t, checkout, [
+      verdictRun(),
+    ]);
+
+    assert.equal(failure, undefined, String(failure));
+    assert.equal((await updatesIn(updates)).length, 1);
+    assert.equal(credentialAsks(plane).filter((r) => !r).length, 1);
+    assert.doesNotMatch(logged.join(""), /The ticket's checkpoint/u);
+  });
+});
+
+/** That a run passed and says so, whatever became of its checkpoint. */
+function passStands(failure, plane) {
+  assert.equal(failure, undefined, String(failure));
+  const [{ verdict, source }] = planeBodies(plane, "report");
+  assert.equal(verdict, "Pass");
+  assert.notEqual(source, undefined);
+  assert.equal(planeBodies(plane, "runEnded").length, 0);
+}
+
+/** A delete is the checkpoint's concern alone, and a pass is never harmed by it. */
+test("a pass whose checkpoint cannot be deleted stands, and the refusal is logged", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { remote } = checkout;
+    await targetPushed(checkout);
+    await standInAttempt(t, checkout, [revokedRun()]);
+    await remoteRefuses(remote, "update", forCheckpoint("exit 1"));
+    const logged = [];
+    t.mock.method(process.stderr, "write", (text) => logged.push(text));
+
+    const { failure, plane } = await standInAttempt(t, checkout, [
+      verdictRun(),
+    ]);
+
+    passStands(failure, plane);
+    assert.ok((await remoteRefs(remote)).includes(checkpointRef));
+    assert.ok(
+      logged.some((line) =>
+        line.startsWith("The ticket's checkpoint could not be deleted: "),
+      ),
+    );
+  });
+});
+
+/** Catches a delete that a stalled remote can hold a pass up behind. */
+test("a pass whose checkpoint's delete stalls stands once its bound lands", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { remote } = checkout;
+    await targetPushed(checkout);
+    await standInAttempt(t, checkout, [revokedRun()]);
+    await remoteRefuses(remote, "update", forCheckpoint("sleep 3"));
+    const began = Date.now();
+
+    const { failure, plane } = await standInAttempt(
+      t,
+      checkout,
+      [verdictRun()],
+      { asideCapMs: 300 },
+    );
+
+    assert.ok(Date.now() - began < 2_500, "the delete held the pass up");
+    passStands(failure, plane);
+  });
+});
+
+/** A hold's keep leaves a checkpoint no clone saw. Catches it outliving the pass that followed. */
+test("a pass deletes the checkpoint its own hold left", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+
+    const { failure, plane } = await standInAttempt(t, checkout, [
+      limitRun(),
+      verdictRun(),
+    ]);
+
+    passStands(failure, plane);
+    assert.ok(!(await remoteRefs(checkout.remote)).includes(checkpointRef));
+  });
+});
+
+/** A Fail carries nothing on, so what it started from is still the way back to the work. */
+test("a failing attempt leaves the checkpoint it started from", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    await standInAttempt(t, checkout, [revokedRun()]);
+
+    await standInAttempt(t, checkout, [verdictRun("done.txt", "Fail")]);
+
+    assert.ok((await remoteRefs(checkout.remote)).includes(checkpointRef));
+  });
+});
+
+/**
+ * An attempt that restored a checkpoint and threw part of it away, then a rework
+ * of what it passed, whose base is that checkpoint's parent. Catches the rework
+ * being handed the work back.
+ */
+test("a rework is not handed what an earlier attempt threw away", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { remote } = checkout;
+    await targetPushed(checkout);
+    const commitAndLeave =
+      "echo one > committed.txt && git add committed.txt && " +
+      "git -c user.name=s -c user.email=s@chuggy.invalid commit -qm one && " +
+      "echo no > rejected.txt";
+    await standInAttempt(t, checkout, [
+      { ...revokedRun(), work: commitAndLeave },
+    ]);
+    const passed = await standInAttempt(t, checkout, [
+      { ...verdictRun(), work: "rm rejected.txt" },
+    ]);
+    const [{ source }] = planeBodies(passed.plane, "report");
+
+    const rework = await standInAttempt(
+      t,
+      { ...checkout, base: source.commit },
+      [verdictRun()],
+    );
+
+    const [{ argv }] = await rework.runtime.starts();
+    assert.ok(!argv.at(-1).includes("Unfinished work"));
+    const [{ source: reworked }] = planeBodies(rework.plane, "report");
+    assert.equal(
+      await remoteFile(remote, reworked.commit, "rejected.txt"),
+      undefined,
+    );
+  });
+});
+
+/** `base` with a directory `ro` tracked, the agent's setup leaving it read-only. */
+async function readOnlyBase(checkout) {
+  const { directory, remote } = checkout;
+  await mkdir(join(directory, "ro"));
+  await writeFile(join(directory, "ro", "a"), "a\n");
+  await git("git", ["add", "ro"], { cwd: directory });
+  await git("git", [...author, "commit", "-qm", "ro"], { cwd: directory });
+  const base = await headOf(directory);
+  const carried = { remote, directory, base };
+  await targetPushed(carried);
+  return carried;
+}
+
+/** The first attempt at `carried`, its stop leaving a checkpoint holding `work`. */
+function stoppedWith(t, carried, work) {
+  return standInAttempt(t, carried, [{ ...revokedRun(), work }]);
+}
+
+/**
+ * The real way a restore stops partway: git has already written what it could
+ * reach, in no index. Catches any of that left in a tree the attempt is told is
+ * its base.
+ */
+test(
+  "a restore git stops partway leaves the attempt at its base, what it wrote gone",
+  { skip: process.getuid?.() === 0 },
+  async (t) => {
+    await inCheckout(async (checkout) => {
+      const carried = await readOnlyBase(checkout);
+      await stoppedWith(
+        t,
+        carried,
+        "echo aa > ro/a; echo b > ro/b; echo z > aaa-new.txt; echo y > zzz-new.txt",
+      );
+      const seen = await suiteDirectory(t, "chuggy-seen-");
+
+      const { failure, runtime } = await standInAttempt(
+        t,
+        carried,
+        [
+          {
+            ...verdictRun("done.txt", "Fail"),
+            work: `chmod 755 ro; git status --porcelain=v1 > '${seen}/status'; ls > '${seen}/listed'; git rev-parse HEAD > '${seen}/head'`,
+          },
+        ],
+        {
+          answer: agentAnswer({
+            worker: { ...fetchedAnswer.worker, setup: ["chmod 555 ro"] },
+          }),
+        },
+      );
+
+      assert.equal(failure, undefined, String(failure));
+      assert.equal(await readFile(join(seen, "status"), "utf8"), "");
+      assert.equal(
+        await readFile(join(seen, "listed"), "utf8"),
+        "README.md\nro\n",
+      );
+      assert.equal(
+        (await readFile(join(seen, "head"), "utf8")).trim(),
+        carried.base,
+      );
+      const [{ argv }] = await runtime.starts();
+      assert.ok(!argv.at(-1).includes("Unfinished work"));
+    });
+  },
+);
+
+/** Catches an attempt run on a tree nothing can vouch for, or one failed under any other label. */
+test(
+  "a workspace that cannot be put back after a failed restore fails the attempt as setup",
+  { skip: process.getuid?.() === 0 },
+  async (t) => {
+    await inCheckout(async (checkout) => {
+      const carried = await readOnlyBase(checkout);
+      await stoppedWith(t, carried, "echo aa > ro/a");
+
+      const { failure, runtime, workspace } = await standInAttempt(
+        t,
+        carried,
+        [verdictRun()],
+        {
+          answer: agentAnswer({
+            worker: {
+              ...fetchedAnswer.worker,
+              setup: ["echo setup > ro/a; chmod 555 ro"],
+            },
+          }),
+        },
+      );
+      await chmod(join(jobRepositoryDirectory(workspace), "ro"), 0o755);
+
+      assert.ok(failure instanceof RunStepFailure, String(failure));
+      assert.equal(failure.evidence, runSetupFailed);
+      assert.equal((await runtime.starts()).length, 0);
+    });
+  },
+);
+
+/** The line saying a keep failed is uploaded, so what a remote echoed must not get out through it. */
+test("a keep's failure is scrubbed of what a remote said", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { remote } = checkout;
+    await targetPushed(checkout);
+    await remoteRefuses(remote, "pre-receive", `echo ${secret} >&2; exit 1`);
+
+    const { failure } = await standInAttempt(t, checkout, [revokedRun()]);
+
+    assert.match(failure.message, /^The run's work could not be kept: /mu);
+    assert.ok(!failure.message.includes(secret));
+  });
+});
+
+/** The line saying a restore failed names what git could not write, which a held secret can be. */
+test(
+  "a restore's failure is scrubbed of what git said",
+  { skip: process.getuid?.() === 0 },
+  async (t) => {
+    await inCheckout(async (checkout) => {
+      const carried = await readOnlyBase(checkout);
+      const { directory, remote, base } = carried;
+      await writeFile(join(directory, "ro", secret), "named\n");
+      await git("git", ["add", "ro"], { cwd: directory });
+      await git("git", [...author, "commit", "-qm", "checkpoint"], {
+        cwd: directory,
+      });
+      await git("git", ["push", "-q", remote, `HEAD:${checkpointRef}`], {
+        cwd: directory,
+      });
+      await git("git", ["reset", "-q", "--hard", base], { cwd: directory });
+      const logged = [];
+      t.mock.method(process.stderr, "write", (text) => logged.push(text));
+
+      await standInAttempt(
+        t,
+        carried,
+        [{ ...verdictRun("done.txt", "Fail"), work: "chmod 755 ro" }],
+        {
+          answer: agentAnswer({
+            worker: { ...fetchedAnswer.worker, setup: ["chmod 555 ro"] },
+          }),
+        },
+      );
+
+      const said = logged.filter((line) =>
+        line.startsWith("the checkpoint could not be restored"),
+      );
+      assert.equal(said.length, 1);
+      assert.ok(!said[0].includes(secret));
+    });
+  },
+);
+
+/**
+ * A push cut off can still have landed, so a clone that only trusted a push it
+ * saw finish would leave this checkpoint behind for a rework to be handed.
+ */
+test("a pass deletes a checkpoint whose own push was cut off after it landed", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { remote } = checkout;
+    await targetPushed(checkout);
+    await remoteRefuses(
+      remote,
+      "post-receive",
+      `read -r _ new ref; case "$ref:$new" in *checkpoint:*[!0]*) ${remoteSays(20_000_000)};; esac`,
+    );
+    const logged = [];
+    t.mock.method(process.stderr, "write", (text) => logged.push(text));
+
+    const { failure, plane } = await standInAttempt(t, checkout, [
+      limitRun(),
+      verdictRun(),
+    ]);
+
+    passStands(failure, plane);
+    assert.match(logged.join(""), /could not be kept: stderr maxBuffer/u);
+    assert.ok(!(await remoteRefs(remote)).includes(checkpointRef));
+  });
+});
+
+/**
+ * A bound can land before there is anything to race it against. Catches a push
+ * begun then, whose failure nothing reads, which would end the process before it
+ * reported, on a pass or anywhere else.
+ */
+/** A credential taken slowly enough for a bound of `asideCapMs: 1` to land first, saying when it is minted. */
+function apartLate(minted) {
+  return {
+    context: { asideCapMs: 1 },
+    workspace: {
+      refreshApart: async () => {
+        await wait(50);
+        return {
+          refresh: async () => {
+            minted.push("minted");
+            return process.env;
+          },
+          discard: async () => {},
+        };
+      },
+    },
+  };
+}
+
+test("a delete whose bound landed before it began takes no credential and pushes nothing", async (t) => {
+  const logged = [];
+  t.mock.method(process.stderr, "write", (text) => logged.push(text));
+  const minted = [];
+
+  const { runs, reported } = await workPublished(
+    commandedWorker,
+    commandedRun(0),
+    undefined,
+    apartLate(minted),
+  );
+
+  await wait(100);
+  assert.equal(reported.verdict, "Pass");
+  assert.deepEqual(minted, []);
+  assert.equal(runs.filter(({ args }) => args.includes("push")).length, 1);
+  assert.ok(
+    logged.some((line) =>
+      line.includes(
+        "checkpoint could not be deleted: it was stopped after 1 ms",
+      ),
+    ),
+  );
+});
+
+/**
+ * `git` heeds no signal, so what stops this keep is its own check and nothing
+ * after it. Catches a keep that goes on to a mint once its bound has landed.
+ */
+test("a keep whose bound landed before it began takes no credential", async (t) => {
+  t.mock.method(process.stderr, "write", () => true);
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    await remoteRefuses(checkout.remote, "update", attemptPushRefused);
+    await writeFile(join(checkout.directory, "work"), "the work\n");
+    const minted = [];
+    const { context, workspace } = apartLate(minted);
+
+    const { refused } = await finishedFrom(
+      checkout,
+      {
+        scrub: (text) => text,
+        held: () => [],
+        context: { ...context, command: git },
+        workspace,
+      },
+      "bearer",
+    );
+
+    assert.equal(refused.evidence, runPushFailed);
+    assert.match(
+      refused.message,
+      /^The run's work could not be kept: it was stopped after 1 ms$/mu,
+    );
+    await wait(500);
+    assert.deepEqual(minted, []);
+    assert.ok(!(await remoteRefs(checkout.remote)).includes(checkpointRef));
+  });
+});
+
+test("a delete pushes with the credential it took before the report", async () => {
+  const taken = { CHUG_WORKER_GIT_CREDENTIAL_FILE: "/minted/for-the-delete" };
+
+  const { runs } = await workPublished(
+    commandedWorker,
+    commandedRun(0),
+    undefined,
+    {
+      workspace: {
+        refreshApart: async () => ({
+          refresh: async () => taken,
+          discard: async () => {},
+        }),
+      },
+    },
+  );
+
+  const [, deleted] = runs.filter(({ args }) => args.includes("push"));
+  assert.equal(
+    deleted.options.env.CHUG_WORKER_GIT_CREDENTIAL_FILE,
+    taken.CHUG_WORKER_GIT_CREDENTIAL_FILE,
+  );
+});
+
+/** Catches a keep answered from the one before the hold, which leaves out the rest. */
+test("a keep after a hold keeps what the resumed agent did as well", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { remote } = checkout;
+    await targetPushed(checkout);
+
+    const { failure, runtime } = await standInAttempt(t, checkout, [
+      limitRun("first.txt"),
+      revokedRun("second.txt"),
+    ]);
+
+    assert.equal((await runtime.starts()).length, 2);
+    assert.match(failure.message, /^The run's work is kept on /mu);
+    const { stdout } = await git(
+      "git",
+      ["ls-tree", "--name-only", checkpointRef],
+      { cwd: remote },
+    );
+    assert.deepEqual(
+      stdout.split("\n").filter((name) => name.endsWith(".txt")),
+      ["first.txt", "second.txt"],
+    );
+  });
+});
+
+/**
+ * `git` on the path, for the secret check alone: it waits, then leaves `marker`.
+ * Nothing kills the check's own child but what it was told to stop by.
+ */
+async function secretCheckStalls(t, directory, marker) {
+  const { PATH } = process.env;
+  await writeFile(
+    join(directory, "git"),
+    `#!/bin/sh
+case " $* " in
+  *" --no-object-names "*) sleep 1; echo outlived > '${marker}' ;;
+esac
+PATH='${PATH}' exec git "$@"
+`,
+    { mode: 0o755 },
+  );
+  process.env.PATH = `${directory}:${PATH}`;
+  t.after(() => {
+    process.env.PATH = PATH;
+  });
+}
+
+test("a keep past its bound stops its secret check too", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const shim = await suiteDirectory(t, "chuggy-shim-");
+    const marker = join(shim, "outlived");
+    await secretCheckStalls(t, shim, marker);
+
+    const { failure } = await standInAttempt(t, checkout, [revokedRun()], {
+      asideCapMs: 200,
+    });
+
+    assert.match(failure.message, /could not be kept: it was stopped after/u);
+    await wait(1_200);
+    await assert.rejects(stat(marker), { code: "ENOENT" });
+  });
+});
+
+test("a command whose signal has gone begins nothing, and one that finished is never killed", async (t) => {
+  const directory = await suiteDirectory(t, "chuggy-stopped-");
+  const marker = join(directory, "began");
+  const kill = t.mock.method(process, "kill", () => true);
+  const running = new globalThis.AbortController();
+
+  const { stdout } = await commandStopped(running.signal)("git", ["--version"]);
+  running.abort();
+
+  assert.match(stdout, /^git version/u);
+  assert.equal(kill.mock.callCount(), 0);
+  await assert.rejects(commandStopped(running.signal)("touch", [marker]), {
+    name: "AbortError",
+  });
+  await assert.rejects(stat(marker), { code: "ENOENT" });
+});
+
+test("a command that cannot begin is a failure the caller is handed", async () => {
+  await assert.rejects(
+    commandStopped(new globalThis.AbortController().signal)("/no/such/git", []),
+    { code: "ENOENT" },
+  );
+});
+
+/** Where the deadline sets a keep's bound, on an uptime as fractional as a real pod's. */
+const nearDeadline = { timeoutSecsMax: 1_000, uptimeSecs: 1.2345678 };
+
+test("a pass near its deadline is reported, its uptime a fraction", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    await standInAttempt(t, checkout, [revokedRun()]);
+
+    const { failure, plane } = await standInAttempt(
+      t,
+      checkout,
+      [verdictRun()],
+      nearDeadline,
+    );
+
+    passStands(failure, plane);
+    assert.ok(!(await remoteRefs(checkout.remote)).includes(checkpointRef));
+  });
+});
+
+test("a failed run near its deadline keeps its work, its uptime a fraction", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+
+    const { failure } = await standInAttempt(
+      t,
+      checkout,
+      [revokedRun()],
+      nearDeadline,
+    );
+
+    assert.match(failure.message, /^Claude Code exited 1$/mu);
+    assert.match(failure.message, /^The run's work is kept on /mu);
+  });
+});
+
+test("a pass whose push failed near its deadline keeps its label, its uptime a fraction", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    await remoteRefuses(checkout.remote, "update", attemptPushRefused);
+
+    const { failure } = await standInAttempt(
+      t,
+      checkout,
+      [verdictRun()],
+      nearDeadline,
+    );
+
+    assert.equal(failure.evidence, runPushFailed);
+    assert.match(failure.message, /^The run's work is kept on /mu);
+  });
+});
+
+/** Catches a bound only the stand-in's whole uptime could reach: a real one is a fraction. */
+test("a launched pass near its deadline reports its pass", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+
+    const { ran, plane } = await launchedStandIn(
+      t,
+      checkout,
+      [verdictRun()],
+      envelopeCarried({ timeoutSecsMax: nearDeadline.timeoutSecsMax }),
+    );
+
+    assert.equal(ran.code, 0, ran.stderr);
+    assert.equal(planeBodies(plane, "report")[0].verdict, "Pass");
+  });
+});
+
+/**
+ * With no deadline to clamp it, a cap reaches the timer as it is. Catches a
+ * refusal there escaping the bound and ending a pass that has already pushed.
+ */
+test("a bound no timer takes is a delete that failed and a pass that stands", async (t) => {
+  const logged = [];
+  t.mock.method(process.stderr, "write", (text) => logged.push(text));
+
+  const { runs, reported } = await workPublished(
+    commandedWorker,
+    commandedRun(0),
+    undefined,
+    { context: { asideCapMs: -1 } },
+  );
+
+  assert.equal(reported.verdict, "Pass");
+  assert.equal(runs.filter(({ args }) => args.includes("push")).length, 1);
+  assert.match(logged.join(""), /could not be deleted: .*out of range/u);
+});
+
+/** The directories push credentials were written in that a run left behind. */
+async function asidesLeft({ workspace }) {
+  return (await readdir(dirname(workspace))).filter((name) =>
+    name.startsWith("chuggy-aside-"),
+  );
+}
+
+test("a pass whose report is refused leaves its checkpoint to the next attempt", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { remote } = checkout;
+    await targetPushed(checkout);
+    await standInAttempt(t, checkout, [revokedRun()]);
+
+    const refused = await standInAttempt(t, checkout, [verdictRun()], {
+      reported: { status: 400, body: { action: "stop" } },
+    });
+
+    assert.match(String(refused.failure), /answered 400/u);
+    assert.ok((await remoteRefs(remote)).includes(checkpointRef));
+    assert.deepEqual(await asidesLeft(refused), []);
+
+    const next = await standInAttempt(t, checkout, [verdictRun("more.txt")], {
+      answer: agentAnswer({ attempt: `${fetchedAnswer.attempt}-next` }),
+    });
+
+    assert.equal(next.failure, undefined, String(next.failure));
+    const [{ argv }] = await next.runtime.starts();
+    assert.match(argv.at(-1), /## Unfinished work from an earlier attempt/u);
+    assert.ok(!(await remoteRefs(remote)).includes(checkpointRef));
+  });
+});
+
+test("a pass takes its delete's credential before its report and deletes after it", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    await standInAttempt(t, checkout, [revokedRun()]);
+
+    const ended = await standInAttempt(t, checkout, [verdictRun()]);
+
+    const routes = ended.plane.requests.map(({ route }) => route);
+    assert.ok(routes.lastIndexOf("credential") < routes.indexOf("report"));
+    assert.ok(!(await remoteRefs(checkout.remote)).includes(checkpointRef));
+    assert.deepEqual(await asidesLeft(ended), []);
+  });
+});
+
+test("a delete's credential that cannot be had leaves the checkpoint and the pass", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    await standInAttempt(t, checkout, [revokedRun()]);
+    const logged = [];
+    t.mock.method(process.stderr, "write", (text) => logged.push(text));
+    const pushing = [];
+
+    const { failure, plane } = await standInAttempt(
+      t,
+      checkout,
+      [verdictRun()],
+      {
+        write: async (file, password, options) => {
+          if (password === pushToken && pushing.push(file) > 1)
+            throw new Error("no room to write");
+          await writeFile(file, password, options);
+        },
+      },
+    );
+
+    passStands(failure, plane);
+    assert.ok((await remoteRefs(checkout.remote)).includes(checkpointRef));
+    assert.ok(
+      logged.some((line) =>
+        line.includes("could not be deleted: no room to write"),
+      ),
+    );
+  });
+});
+
+test("a stream unreadable after its result still says what the runtime said, scrubbed", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const [frame] = revokedRun().frames;
+    const said = { ...frame, result: `${frame.result} ${secret}` };
+
+    const { failure } = await standInAttempt(t, checkout, [
+      { work: "echo half > half.txt", frames: [said, "not a frame"], exit: 1 },
+    ]);
+
+    assert.match(
+      failure.message,
+      /^Claude Code emitted invalid streaming JSON$/mu,
+    );
+    assert.match(failure.message, /OAuth access token has been revoked/u);
+    assert.ok(!failure.message.includes(secret));
+    assert.match(failure.message, /^The run's work is kept on /mu);
+  });
+});
+
+/** Catches a resumed process read by the frame the one before it ended on. */
+test("a resumed process whose stream breaks says nothing the last process said", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const sentence = "what the limited process said";
+    const [rejected, refused, result] = limitFrames;
+
+    const { failure } = await standInAttempt(t, checkout, [
+      {
+        frames: [rejected, refused, { ...result, result: sentence }],
+        exit: 1,
+      },
+      { frames: ["not a frame"], exit: 1 },
+    ]);
+
+    assert.match(failure.message, /emitted invalid streaming JSON/u);
+    assert.ok(!failure.message.includes(sentence), failure.message);
+  });
+});
+
+/** Catches a stopped runtime's end waiting on whatever it left holding its pipe. */
+test("a run whose stream breaks ends at once, whatever still holds its pipe", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const began = Date.now();
+
+    const { failure } = await standInAttempt(t, checkout, [
+      { holder: "sleep 6", frames: ["not a frame"], exit: 1 },
+    ]);
+
+    assert.match(failure.message, /emitted invalid streaming JSON/u);
+    assert.ok(Date.now() - began < 4_500, "the run waited on its pipe");
+  });
+});
+
+test("a held line goes through the scrub, in the transcript and in the log", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const logged = [];
+    t.mock.method(process.stderr, "write", (text) => logged.push(text));
+    const [rejected, ...rest] = limitFrames;
+    const named = {
+      ...rejected,
+      rate_limit_info: { ...rejected.rate_limit_info, rateLimitType: secret },
+    };
+
+    const { failure, plane } = await standInAttempt(t, checkout, [
+      { frames: [named, ...rest], exit: 1 },
+      verdictRun(),
+    ]);
+
+    passStands(failure, plane);
+    assert.ok(
+      logged.some((line) => line.includes("held")),
+      logged.join(""),
+    );
+    assert.ok(!logged.join("").includes(secret));
+    assert.ok(!transcriptSent(plane).includes(secret));
+  });
+});
+
+test("a command saying more than a buffer holds is stopped and fails as `command` does", async (t) => {
+  const directory = await suiteDirectory(t, "chuggy-stopped-");
+  const marker = join(directory, "outlived");
+
+  await assert.rejects(
+    commandStopped(new globalThis.AbortController().signal)("sh", [
+      "-c",
+      `head -c 20000000 /dev/zero; sleep 1; touch '${marker}'`,
+    ]),
+    { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" },
+  );
+
+  await wait(1_200);
+  await assert.rejects(stat(marker), { code: "ENOENT" });
+});
+
+/** Catches an evaluator deleting what a ticket's next work attempt goes on from. */
+test("an evaluation that passes leaves the ticket's checkpoint", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    await standInAttempt(t, checkout, [revokedRun()]);
+    const { stdout: before } = await git("git", ["rev-parse", checkpointRef], {
+      cwd: checkout.remote,
+    });
+
+    const { failure, plane } = await standInAttempt(
+      t,
+      checkout,
+      [verdictRun("evaluator.txt")],
+      { answer: agentAnswer({ taskKind: "Evaluation", stage: 1 }) },
+    );
+
+    assert.equal(failure, undefined, String(failure));
+    assert.equal(planeBodies(plane, "report")[0].verdict, "Pass");
+    const { stdout: after } = await git("git", ["rev-parse", checkpointRef], {
+      cwd: checkout.remote,
+    });
+    assert.equal(after, before);
+  });
+});
+
+/** A workspace whose push aside takes its credential from `refresh`. */
+function apartMinting(refresh, discard = async () => {}) {
+  return { refreshApart: async () => ({ refresh, discard }) };
+}
+
+/** Catches a mint the bound gave up on arming the delete while the report was out. */
+test("a mint answered after its bound deletes nothing", async (t) => {
+  const logged = [];
+  t.mock.method(process.stderr, "write", (text) => logged.push(text));
+  const refreshed = [];
+
+  const { runs, reported } = await workPublished(
+    commandedWorker,
+    commandedRun(0),
+    undefined,
+    {
+      context: { asideCapMs: 20 },
+      reporting: () => wait(150),
+      workspace: apartMinting(async () => {
+        await wait(60);
+        refreshed.push("minted");
+        return process.env;
+      }),
+    },
+  );
+
+  assert.equal(reported.verdict, "Pass");
+  assert.deepEqual(refreshed, ["minted"]);
+  assert.equal(runs.filter(({ args }) => args.includes("push")).length, 1);
+  assert.match(
+    logged.join(""),
+    /could not be deleted: it was stopped after 20 ms/u,
+  );
+});
+
+/**
+ * An upload past its size keeps only the end of an error text. Catches what a
+ * remote said pushing the run's own failure out of it, and the line saying why
+ * the push failed going with the rest of the flood.
+ */
+test("a flood from a remote leaves the run's failure in what is uploaded, and says why", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    await remoteRefuses(
+      checkout.remote,
+      "pre-receive",
+      `${remoteSays(6_000_000)}; exit 1`,
+    );
+
+    const { failure } = await standInAttempt(t, checkout, [revokedRun()]);
+
+    const uploaded = (await uploadedError(failure.message)).toString("utf8");
+    assert.match(uploaded, /^Claude Code exited 1$/mu);
+    assert.ok(uploaded.includes(revokedSentence));
+    assert.match(
+      uploaded,
+      /^The run's work could not be kept: ! \[remote rejected\]/mu,
+    );
+  });
+});
+
+/** Catches a cut made first, which leaves the start of a secret no scrub can match. */
+test("a failure is scrubbed before it is cut", async (t) => {
+  const logged = [];
+  t.mock.method(process.stderr, "write", (text) => logged.push(text));
+  const pushes = [];
+
+  await workPublished(
+    commandedWorker,
+    commandedRun(0),
+    async () => {
+      if (pushes.push("push") === 1) return { stdout: "" };
+      throw new Error(
+        `${"x".repeat(workFailureSaidCharsMax - 4)}${secret}xxxxxxxx`,
+      );
+    },
+    { context: { scrub: (text) => text.replaceAll(secret, "held") } },
+  );
+
+  assert.match(logged.join(""), /could not be deleted: x+held\n\(the rest/u);
+  assert.ok(!logged.join("").includes(secret.slice(0, 4)));
+});
+
+/**
+ * A mint for the delete can stall for its whole bound. Catches the lease stopped
+ * before it, when a plane that hears no beat can take a pass's lease away.
+ */
+test("the lease beats through a stalled mint for the delete and stops before the report", async () => {
+  const order = [];
+  let beat;
+  const stopLease = keepWorkerLease(task, "bearer", {
+    request: async () => order.push("beat"),
+    setInterval: (heartbeat) => {
+      beat = heartbeat;
+    },
+    clearInterval: () => {
+      beat = undefined;
+      order.push("lease stopped");
+    },
+  });
+
+  await workPublished(commandedWorker, commandedRun(0), undefined, {
+    context: { stopLease },
+    reporting: async () => order.push("report"),
+    workspace: apartMinting(async () => {
+      order.push("mint stalls");
+      beat?.();
+      await wait(20);
+      order.push("mint answers");
+      return process.env;
+    }),
+  });
+
+  assert.deepEqual(order, [
+    "mint stalls",
+    "beat",
+    "mint answers",
+    "lease stopped",
+    "report",
+  ]);
+});
+
+/** Catches a lease refused at its stop leaving behind what the delete took. */
+test("a lease refused at its stop still removes the delete's credential", async () => {
+  const discarded = [];
+
+  await assert.rejects(
+    workPublished(commandedWorker, commandedRun(0), undefined, {
+      context: {
+        stopLease: async () => {
+          throw new Error("the lease is gone");
+        },
+      },
+      workspace: apartMinting(
+        async () => process.env,
+        async () => discarded.push("credential"),
+      ),
+    }),
+    /the lease is gone/u,
+  );
+
+  assert.deepEqual(discarded, ["credential"]);
+});
+
+/**
+ * A writer the group's kill cannot reach says on past the bound, and a string
+ * holds only so much. Catches that being held, which ends the whole process with
+ * an error nothing catches, so this runs in a process of its own. The writer is
+ * done once it has said more than a string holds, so no clock is involved.
+ */
+test("what a writer outside the group says past the bound is dropped", async () => {
+  const writer = `require("node:child_process").spawn("sh", ["-c", "head -c ${String(constants.MAX_STRING_LENGTH + 1)} /dev/zero >&2"], { detached: true, stdio: ["ignore", "ignore", "inherit"] }).unref()`;
+  const entrypoint = new URL("./entrypoint.mjs", import.meta.url).href;
+
+  const { stdout } = await git(process.execPath, [
+    "--input-type=module",
+    "--eval",
+    `import { commandStopped } from ${JSON.stringify(entrypoint)};
+     const failed = await commandStopped(new AbortController().signal)(
+       process.execPath,
+       ["--eval", ${JSON.stringify(writer)}],
+     ).catch((failure) => failure);
+     process.stdout.write(failed.code);`,
+  ]);
+
+  assert.equal(stdout, "ERR_CHILD_PROCESS_STDIO_MAXBUFFER");
+});
+
+/** Catches a hook left in the workspace refusing the keep, or the restore after it. */
+test("a hook setup installs refuses neither a keep nor the restore after it", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { remote } = checkout;
+    await targetPushed(checkout);
+    const hook = ".git/hooks/reference-transaction";
+    const worker = {
+      ...fetchedAnswer.worker,
+      setup: [`printf '#!/bin/sh\\nexit 1\\n' > ${hook} && chmod +x ${hook}`],
+    };
+
+    const kept = await standInAttempt(t, checkout, [revokedRun()], {
+      answer: agentAnswer({ worker }),
+    });
+
+    assert.match(kept.failure.message, /^The run's work is kept on /mu);
+    assert.ok((await remoteRefs(remote)).includes(checkpointRef));
+
+    const { runtime } = await standInAttempt(t, checkout, [revokedRun()], {
+      answer: agentAnswer({
+        attempt: `${fetchedAnswer.attempt}-next`,
+        worker,
+      }),
+    });
+
+    const [{ argv }] = await runtime.starts();
+    assert.match(argv.at(-1), /## Unfinished work from an earlier attempt/u);
+  });
 });

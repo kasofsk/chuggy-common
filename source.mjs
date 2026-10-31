@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { resultManifestSchemaVersion } from "@chuggy/worker-contract/workerDocuments";
@@ -12,7 +12,12 @@ import {
   workerTemporaryFile,
 } from "./checks.mjs";
 import { gitFailureLine, gitRemoteTried } from "./gitRemote.mjs";
-import { runCommitFailed, runPushFailed, runStep } from "./runEvidence.mjs";
+import {
+  runCommitFailed,
+  runPushFailed,
+  runSetupFailed,
+  runStep,
+} from "./runEvidence.mjs";
 
 /** Longer than any header `git cat-file --batch` writes: a name, a type and a size. */
 const sourceObjectHeaderBytesMax = 256;
@@ -29,6 +34,21 @@ const sourceObjectPlaces = new Map([
 
 /** What the directory a push is made from is named by, under the temporary directory. */
 const sourcePushPrefix = "chuggy-push-";
+
+/** What the directory a keep or a restore works in apart from the workspace is named by, there too. */
+const sourceCheckpointPrefix = "chuggy-checkpoint-";
+
+/** Who the commits this core makes are by. */
+const sourceAuthorName = "Chuggy Worker";
+const sourceAuthorEmail = "worker@chuggy.invalid";
+
+/** A checkpoint's name, in the variables git prefers to any configuration. */
+const sourceCheckpointIdentity = {
+  GIT_AUTHOR_NAME: sourceAuthorName,
+  GIT_AUTHOR_EMAIL: sourceAuthorEmail,
+  GIT_COMMITTER_NAME: sourceAuthorName,
+  GIT_COMMITTER_EMAIL: sourceAuthorEmail,
+};
 
 /** The object format a commit's name is in, read from how long the name is. */
 const sourceObjectFormats = new Map([
@@ -63,6 +83,11 @@ export const sourcePushPlacingVariables = [
 export function ticketBranch(task) {
   const attempt = createHash("sha256").update(task.attempt).digest("hex");
   return `refs/heads/chuggy/tickets/${String(task.ticket)}/attempts/${attempt}`;
+}
+
+/** The branch a ticket's unfinished work is kept on, whichever attempt left it. */
+export function ticketCheckpoint(task) {
+  return `refs/heads/chuggy/tickets/${String(task.ticket)}/checkpoint`;
 }
 
 export function resultDocument(manifest) {
@@ -173,12 +198,13 @@ function sourceGitExited(child) {
  * found. Replacement refs are ignored, as the push ignores them, so what is
  * read is what would be sent.
  */
-async function sourceSecretCarried(directory, base, head, secrets) {
+async function sourceSecretCarried(directory, base, head, secrets, signal) {
   const git = (args, input) =>
     spawn("git", ["--no-replace-objects", ...args], {
       cwd: directory,
       env: workerStageEnvironment(process.env),
       stdio: [input, "pipe", "pipe"],
+      signal,
     });
   const listing = git(
     [
@@ -327,7 +353,309 @@ export async function commitAndPushSource({
   return { repository: repositoryId, ref, commit, base };
 }
 
-/** Where, in the directory a push is made from, its repository, its empty hooks directory, its empty global configuration and its empty home are. */
+/**
+ * The checkpoint of a run that left no result: everything its tree holds,
+ * committed on top of `HEAD` and pushed to `ticketCheckpoint`, where it replaces
+ * the last. `{ref, commit}`, or nothing where there is nothing to keep. A `HEAD`
+ * past `base` is something to keep with a clean tree, as a pass whose push failed
+ * leaves it: its work is in commits no remote holds.
+ *
+ * IT IS NOT THE ATTEMPT'S BRANCH. A checkpoint may be taken while the run goes
+ * on, and that branch's push is not forced, so one there would refuse the pass
+ * that follows it. Nothing reads this branch as a candidate; the next attempt
+ * reads it as where to start (`sourceCheckpointRestored`).
+ *
+ * THE WORKSPACE IS LEFT AS IT WAS. The commit is built from a copy of the index,
+ * so `HEAD`, the index and the repository's configuration do not move and a run
+ * resumed after it finds its tree and history as it left them. No hook of the
+ * project's runs, so none can refuse half-done work
+ * (`sourceWithoutHooks`). What is provisioned is left out, and the push is
+ * checked and made as a candidate's is, but for being forced
+ * (`commitAndPushSource`). One that does not descend
+ * from `base` is refused like a candidate that does not: no attempt can start
+ * from it, and being forced it would replace a checkpoint one can.
+ *
+ * THE CLONE SEES IT BEFORE IT IS PUSHED, as it sees one an earlier attempt left,
+ * since a push cut off may still have landed (`sourceCheckpointDeleted`).
+ *
+ * `signal` stops the secret check; the rest stops as `command` does.
+ */
+export async function checkpointAndPushSource({
+  task,
+  repository,
+  base,
+  directory,
+  command,
+  environment,
+  refresh,
+  secrets,
+  git = [],
+  pause,
+  signal,
+}) {
+  const ref = ticketCheckpoint(task);
+  const commit = await sourceCheckpointCommitted({
+    task,
+    ref,
+    base,
+    directory,
+    command,
+    secrets,
+    git,
+    signal,
+  });
+  if (commit === undefined) return undefined;
+  await sourcePushed({
+    repository,
+    refspec: `+${commit}:${ref}`,
+    commit,
+    directory,
+    command,
+    environment,
+    refresh,
+    pause,
+  });
+  return { ref, commit };
+}
+
+/**
+ * `checkpoint`, as `sourceCheckpointSeen` answers it, deleted from the remote,
+ * once a candidate carries what it held: left standing it could be restored into
+ * a rework of that candidate, handing it work a later attempt threw away. Made
+ * from a repository of its own, as every push is, with `environment` as it is,
+ * since by now the bearer that could mint another may be dead.
+ */
+export async function sourceCheckpointDeleted({
+  checkpoint: { ref, commit },
+  repository,
+  directory,
+  command,
+  environment,
+}) {
+  await sourcePushed({
+    repository,
+    refspec: `:${ref}`,
+    commit,
+    directory,
+    command,
+    environment,
+  });
+}
+
+/** Where a clone holds the remote's `ref`. */
+function sourceCheckpointSeenAt(ref) {
+  return ref.replace("refs/heads/", "refs/remotes/origin/");
+}
+
+/**
+ * The ticket's checkpoint as the clone at `directory` holds it, `{ref, commit}`,
+ * or nothing, which takes no remote to say.
+ */
+export async function sourceCheckpointSeen({
+  task,
+  directory,
+  command,
+  git = [],
+}) {
+  const ref = ticketCheckpoint(task);
+  const { stdout: listed } = await command(
+    "git",
+    ["for-each-ref", "--format=%(objectname)", sourceCheckpointSeenAt(ref)],
+    { cwd: directory, env: workerStageEnvironment(process.env, { git }) },
+  );
+  const commit = listed.trim();
+  return commit === "" ? undefined : { ref, commit };
+}
+
+/**
+ * `work`, handed `command` with no hook or filesystem monitor of the project's
+ * in the git it runs, and a directory of its own that goes with it. The hooks a
+ * run leaves are for a candidate: one that refuses a ref's update would lose the
+ * work a keep is there to save, or the start a restore is there to give.
+ */
+async function sourceWithoutHooks(command, work) {
+  const made = resolve(
+    await mkdtemp(workerTemporaryFile(sourceCheckpointPrefix)),
+  );
+  try {
+    const { hooks } = sourcePushPlaces(made);
+    await mkdir(hooks);
+    return await work(
+      (executable, args, options) =>
+        command(
+          executable,
+          [
+            "-c",
+            `core.hooksPath=${hooks}`,
+            "-c",
+            "core.fsmonitor=false",
+            ...args,
+          ],
+          options,
+        ),
+      made,
+    );
+  } finally {
+    await rm(made, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * What the tree holds beyond `HEAD`, committed from an index of its own, checked
+ * for what is held, and held in the clone as where `ref` is seen; nothing where
+ * the tree and `HEAD` are `base`'s.
+ */
+async function sourceCheckpointCommitted({
+  task,
+  ref,
+  base,
+  directory,
+  command,
+  secrets,
+  git,
+  signal,
+}) {
+  const local = {
+    cwd: directory,
+    env: workerStageEnvironment(process.env, { git }),
+  };
+  const { stdout: index } = await command(
+    "git",
+    ["rev-parse", "--git-path", "index"],
+    local,
+  );
+  const { stdout: head } = await command(
+    "git",
+    ["rev-parse", "HEAD", "HEAD^{tree}"],
+    local,
+  );
+  const [parent, tree] = head.trim().split("\n");
+  return sourceWithoutHooks(command, async (hookless, made) => {
+    const kept = join(made, "index");
+    await copyFile(resolve(directory, index.trim()), kept);
+    const staged = await sourceStaged(task, hookless, {
+      ...local,
+      env: { ...local.env, GIT_INDEX_FILE: kept },
+    });
+    if (staged === tree && parent === base) return undefined;
+    const { stdout: committed } = await command(
+      "git",
+      [
+        "commit-tree",
+        staged,
+        "-p",
+        parent,
+        "-m",
+        `ticket ${String(task.ticket)} attempt ${task.attempt} checkpoint`,
+      ],
+      { ...local, env: { ...local.env, ...sourceCheckpointIdentity } },
+    );
+    const commit = committed.trim();
+    await sourceSecretRefused(directory, base, commit, secrets, signal);
+    await sourceDescended(directory, base, commit, command);
+    await hookless(
+      "git",
+      ["update-ref", sourceCheckpointSeenAt(ref), commit],
+      local,
+    );
+    return commit;
+  });
+}
+
+/**
+ * The workspace put where an earlier attempt's checkpoint left it, with the
+ * checkpoint's own commit undone: `HEAD` at its parent, so what was committed
+ * reads as commits, and the rest in the tree and unstaged, as unfinished work.
+ * `{ref, commit}`, or nothing where there is no such branch in the clone or its
+ * parent does not descend from `base`, as an old checkpoint does not once a
+ * rework runs on a result it never reached. What setup changed in the tree is
+ * the checkpoint's to say, since the checkpoint carries it. No hook of the
+ * project's runs (`sourceWithoutHooks`).
+ *
+ * A failure is raised with the workspace back at `base`, so the attempt can run
+ * from there: `read-tree` can stop partway, having written files no index
+ * knows of (`sourceBackAtBase`). A workspace that cannot be put back is raised
+ * as the setup step's failure instead, since nothing can vouch for that tree.
+ */
+export async function sourceCheckpointRestored({
+  task,
+  base,
+  directory,
+  command,
+  git = [],
+}) {
+  const local = {
+    cwd: directory,
+    env: workerStageEnvironment(process.env, { git }),
+  };
+  const seen = await sourceCheckpointSeen({ task, directory, command, git });
+  if (seen === undefined) return undefined;
+  const { commit } = seen;
+  const { stdout: parent } = await command(
+    "git",
+    ["rev-parse", "--verify", `${commit}^`],
+    local,
+  );
+  if (await sourceBaseMissing(directory, base, parent.trim(), command))
+    return undefined;
+  await sourceWithoutHooks(command, async (hookless) => {
+    try {
+      await hookless("git", ["read-tree", "--reset", "-u", commit], local);
+      await hookless(
+        "git",
+        ["reset", "--mixed", "--quiet", parent.trim()],
+        local,
+      );
+    } catch (failure) {
+      await runStep(runSetupFailed, () =>
+        sourceBackAtBase(base, local, hookless),
+      );
+      throw failure;
+    }
+  });
+  return seen;
+}
+
+/**
+ * The workspace back at `base` after a restore that failed, whichever step it
+ * failed at: tracked files reset, and what no index knows of removed, which is
+ * only what the restore wrote because setup's own files are excluded. What
+ * setup changed in a tracked file goes with it. `git status` then says it
+ * worked, since a reset can warn of a file it could not remove and go on.
+ */
+async function sourceBackAtBase(base, local, command) {
+  await command("git", ["reset", "--hard", "--quiet", base], local);
+  await command("git", ["clean", "-d", "--force", "--quiet"], local);
+  const { stdout: left } = await command(
+    "git",
+    ["status", "--porcelain=v1"],
+    local,
+  );
+  if (left !== "")
+    throw new Error(`the workspace could not be put back at ${base}: ${left}`);
+}
+
+/**
+ * `task` as its agent is handed it after `sourceCheckpointRestored`: its
+ * briefing ending in a section saying what is in the tree, or as it was where
+ * nothing was restored.
+ */
+export function sourceRestoredBriefed(task, restored) {
+  if (restored === undefined) return task;
+  const section = [
+    "## Unfinished work from an earlier attempt",
+    "An earlier attempt at this ticket was stopped before it finished. Its commits are in this checkout's history, and what it had not committed is in the tree as unstaged changes. Check that work, then continue from it rather than starting over.",
+  ].join("\n");
+  return {
+    ...task,
+    briefing: {
+      ...task.briefing,
+      text: `${task.briefing.text}\n\n${section}`,
+    },
+  };
+}
+
+/** Where, in a directory the core made, a push's repository, the empty hooks directory, the empty global configuration and the empty home are. */
 function sourcePushPlaces(made) {
   return {
     repository: join(made, "repository"),
@@ -457,25 +785,16 @@ async function sourceCommitted({
     cwd: directory,
     env: workerStageEnvironment(process.env, { git }),
   };
-  await command("git", ["config", "user.name", "Chuggy Worker"], local);
-  await command(
-    "git",
-    ["config", "user.email", "worker@chuggy.invalid"],
-    local,
-  );
-  await command("git", ["add", "--all"], local);
-  const provisioned = (task.worker?.files ?? []).map((file) => file.path);
-  if (provisioned.length > 0) {
-    await command("git", ["reset", "--", ...provisioned], local);
-  }
-  const { stdout: staged } = await command("git", ["write-tree"], local);
+  await command("git", ["config", "user.name", sourceAuthorName], local);
+  await command("git", ["config", "user.email", sourceAuthorEmail], local);
+  const staged = await sourceStaged(task, command, local);
   const { stdout: head } = await command(
     "git",
     ["rev-parse", "HEAD", "HEAD^{tree}"],
     local,
   );
   const [authored, tree] = head.trim().split("\n");
-  const unchanged = staged.trim() === tree;
+  const unchanged = staged === tree;
   if (unchanged && authored === base && !candidate) return undefined;
   if (!unchanged || authored === base)
     await command(
@@ -490,30 +809,47 @@ async function sourceCommitted({
     );
   const { stdout } = await command("git", ["rev-parse", "HEAD"], local);
   const commit = stdout.trim();
-  const carried =
-    secrets.length === 0
-      ? undefined
-      : await sourceSecretCarried(directory, base, commit, secrets);
-  if (carried !== undefined)
-    throw new Error(
-      `commit ${carried.commit} carries ${carried.kind} in ${carried.place}, so the attempt pushes nothing`,
-    );
+  await sourceSecretRefused(directory, base, commit, secrets);
   if (candidate) await sourceDescended(directory, base, commit, command);
   return commit;
 }
 
-/**
- * Refuses `commit` where `base` is not among its ancestors, saying what the
- * next attempt does instead. Replacement refs are ignored, as the push ignores
- * them.
- */
-async function sourceDescended(directory, base, commit, command) {
+/** Everything in the tree staged in the index `local` names, but what the attempt's block provisioned, and the tree that makes. */
+async function sourceStaged(task, command, local) {
+  await command("git", ["add", "--all"], local);
+  const provisioned = (task.worker?.files ?? []).map((file) => file.path);
+  if (provisioned.length > 0) {
+    await command("git", ["reset", "--", ...provisioned], local);
+  }
+  const { stdout } = await command("git", ["write-tree"], local);
+  return stdout.trim();
+}
+
+/** Refuses `commit` where it carries a held secret, naming the kind and the commit and never the value. */
+async function sourceSecretRefused(directory, base, commit, secrets, signal) {
+  const carried =
+    secrets.length === 0
+      ? undefined
+      : await sourceSecretCarried(directory, base, commit, secrets, signal);
+  if (carried !== undefined)
+    throw new Error(
+      `commit ${carried.commit} carries ${carried.kind} in ${carried.place}, so the attempt pushes nothing`,
+    );
+}
+
+/** Whether `base` is not among `commit`'s ancestors. Replacement refs are ignored, as the push ignores them. */
+async function sourceBaseMissing(directory, base, commit, command) {
   const { stdout: missing } = await command(
     "git",
     ["--no-replace-objects", "rev-list", "--max-count=1", base, `^${commit}`],
     { cwd: directory, env: workerStageEnvironment(process.env) },
   );
-  if (missing.trim() !== "")
+  return missing.trim() !== "";
+}
+
+/** Refuses `commit` where `base` is not among its ancestors, saying what the next attempt does instead. */
+async function sourceDescended(directory, base, commit, command) {
+  if (await sourceBaseMissing(directory, base, commit, command))
     throw new Error(
       `commit ${commit} does not descend from ${base}, the commit this attempt started from, so the attempt pushes nothing. A rebase does this, and so does checking out a different commit. Add commits on top of ${base} instead, merging the target in rather than rebasing onto it.`,
     );

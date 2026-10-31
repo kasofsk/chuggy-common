@@ -2799,8 +2799,9 @@ function placementFailure(placement, failure) {
 }
 
 /**
- * The bounds a workload's envelope carries. A session's time is its
- * assignment's own, since the runner's cap is a job's.
+ * The bounds a workload's envelope carries. A job's time is the sooner of its
+ * assignment's and the runner's cap, and a session's is its assignment's own,
+ * since the runner's cap is a job's.
  *
  * @param {ContainerBackendSettings} settings
  * @param {WorkerPoolAssignment} assignment
@@ -2810,7 +2811,9 @@ function placementFailure(placement, failure) {
 function workloadBounds(settings, assignment, kind) {
   return {
     timeoutSecsMax:
-      kind === "Session" ? assignment.deadlineSecs : settings.timeoutSecsMax,
+      kind === "Session"
+        ? assignment.deadlineSecs
+        : Math.min(assignment.deadlineSecs, settings.timeoutSecsMax),
     outputBytesMax: settings.outputBytesMax,
   };
 }
@@ -2860,11 +2863,9 @@ async function placed(state, assignment, kind) {
       containerImageOf(settings.images ?? [], assignment)
     ),
     phase: "Placing",
-    deadlineEpochSecs:
-      Math.floor(placedMs / 1000) +
-      Math.min(assignment.deadlineSecs, bounds.timeoutSecsMax),
+    deadlineEpochSecs: Math.floor(placedMs / 1000) + bounds.timeoutSecsMax,
     memoryMib: assignment.memoryMib,
-    runSecs: Math.min(assignment.deadlineSecs, bounds.timeoutSecsMax),
+    runSecs: bounds.timeoutSecsMax,
     memory: undefined,
     holding: false,
     credential,
