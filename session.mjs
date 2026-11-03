@@ -571,6 +571,10 @@ function sessionTakesStops(facts) {
  * resumed into a pod with a checkout finds the transcript a pod without one
  * wrote. `sessionStore.test.mjs` and this module's suite both hold that.
  *
+ * `settings` CARRIES THE COMPACTION WINDOW A LEAD'S FACTS NAME, as flag-level
+ * settings that outrank the tree's own. `CLAUDE_CODE_AUTO_COMPACT_WINDOW` would
+ * override it, so this module never sets that variable.
+ *
  * `git` is the configuration every git the runtime starts is handed, which is
  * nothing where the session serves no reads, and `credential` is the runtime's
  * as `claudeCredentialPrepared` makes it.
@@ -618,6 +622,9 @@ export function sessionQueryOptions(
         ? { resume: facts.agentReference }
         : {}),
     ...(typeof model === "string" && model.length > 0 ? { model } : {}),
+    ...(facts.autoCompactWindow !== undefined
+      ? { settings: { autoCompactWindow: facts.autoCompactWindow } }
+      : {}),
     ...(sessionReportsLive(facts) ? { includePartialMessages: true } : {}),
   };
 }
