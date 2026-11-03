@@ -143,6 +143,10 @@ test("the text of a limit the frames gave no reset for does not make one up", ()
 
   assert.equal(
     runEndedText("Claude Code exited 1", undefined, decided),
-    "Claude Code exited 1\nThe run was not held: the frames gave no reset time.",
+    [
+      "Claude Code exited 1",
+      "When the limit resets is unknown.",
+      "The run was not held: the frames gave no reset time.",
+    ].join("\n"),
   );
 });

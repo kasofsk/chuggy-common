@@ -15,6 +15,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  fiveHourResetsAtSecs,
+  limitSnapshot,
+  ordinarySnapshot,
+  weeklyResetsAtSecs,
+  windowlessSnapshot,
+} from "./codexRollout.fixture.mjs";
+import {
+  observeCodexRollout,
   observeRateLimit,
   rateLimitSightings,
   rateLimited,
@@ -232,4 +240,130 @@ test("a window that is not a name is none, and the reset still stands", () => {
     resetsAtSecs: limitResetsAtSecs,
     window: undefined,
   });
+});
+
+/** The sightings `declared` alone folds to. */
+function seenInRollout(declared) {
+  return observeCodexRollout(rateLimitSightings(), {
+    snapshot: undefined,
+    errorInfo: undefined,
+    ...declared,
+  });
+}
+
+/** A window of `minutes` used to `percent`, reopening at `resetsAt`. */
+function codexWindow(percent, minutes, resetsAt) {
+  return {
+    used_percent: percent,
+    window_minutes: minutes,
+    resets_at: resetsAt,
+  };
+}
+
+/**
+ * Catches an ordinary snapshot priced as a hold, which would leave the retry
+ * budget unenforceable, and a limit missed where the refusal's headers carried
+ * no window.
+ */
+test("a Codex rollout is a hold on a reached type, a used-up window or a usage limit's error", () => {
+  const ordinary = seenInRollout({ snapshot: ordinarySnapshot });
+  const almost = seenInRollout({
+    snapshot: {
+      ...ordinarySnapshot,
+      primary: codexWindow(99.9, 300, fiveHourResetsAtSecs),
+    },
+  });
+  const otherError = seenInRollout({ errorInfo: "context_window_exceeded" });
+  assert.equal(rateLimited(ordinary), false);
+  assert.equal(rateLimited(almost), false);
+  assert.equal(rateLimited(otherError), false);
+  assert.equal(ordinary.reset, undefined);
+
+  for (const declared of [
+    { snapshot: limitSnapshot },
+    {
+      snapshot: {
+        ...ordinarySnapshot,
+        rate_limit_reached_type: "rate_limit_reached",
+      },
+    },
+    {
+      snapshot: {
+        ...ordinarySnapshot,
+        secondary: codexWindow(100.4, 10_080, weeklyResetsAtSecs),
+      },
+    },
+    { snapshot: windowlessSnapshot, errorInfo: "usage_limit_exceeded" },
+    { errorInfo: "usage_limit_exceeded" },
+  ])
+    assert.equal(
+      rateLimited(seenInRollout(declared)),
+      true,
+      JSON.stringify(declared),
+    );
+});
+
+test("a Codex limit reopens at the latest reset a used-up window names, under that window's name", () => {
+  const both = seenInRollout({ snapshot: limitSnapshot });
+  const swapped = seenInRollout({
+    snapshot: {
+      ...limitSnapshot,
+      primary: codexWindow(100, 10_080, weeklyResetsAtSecs),
+      secondary: codexWindow(100, 300, fiveHourResetsAtSecs),
+    },
+  });
+  const one = seenInRollout({
+    snapshot: {
+      ...limitSnapshot,
+      secondary: codexWindow(40, 10_080, weeklyResetsAtSecs),
+    },
+  });
+  const nullReset = seenInRollout({
+    snapshot: {
+      ...limitSnapshot,
+      secondary: codexWindow(100, 10_080, null),
+    },
+  });
+  for (const seen of [both, swapped])
+    assert.deepEqual(seen.reset, {
+      resetsAtSecs: weeklyResetsAtSecs,
+      window: "seven_day",
+    });
+  for (const seen of [one, nullReset])
+    assert.deepEqual(seen.reset, {
+      resetsAtSecs: fiveHourResetsAtSecs,
+      window: "five_hour",
+    });
+  assert.deepEqual(
+    seenInRollout({
+      snapshot: {
+        ...limitSnapshot,
+        secondary: codexWindow(0, 10_080, null),
+        primary: codexWindow(100, 45, fiveHourResetsAtSecs),
+      },
+    }).reset,
+    { resetsAtSecs: fiveHourResetsAtSecs, window: undefined },
+  );
+});
+
+/** Catches a reset made up where nothing declared one, or one no date can name taken. */
+test("a Codex limit with no used-up window naming a reset has no reset", () => {
+  for (const snapshot of [
+    windowlessSnapshot,
+    {
+      ...limitSnapshot,
+      primary: codexWindow(100, 300, null),
+      secondary: codexWindow(100, 10_080, null),
+    },
+    {
+      ...limitSnapshot,
+      primary: codexWindow(90, 300, fiveHourResetsAtSecs),
+      secondary: codexWindow(100, 10_080, 9_000_000_000_000),
+    },
+    undefined,
+  ]) {
+    const seen = seenInRollout({ snapshot, errorInfo: "usage_limit_exceeded" });
+    assert.equal(rateLimited(seen), true);
+    assert.equal(seen.reset, undefined, JSON.stringify(snapshot));
+  }
 });

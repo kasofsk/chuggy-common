@@ -1,3 +1,4 @@
+import { codexRolloutRead } from "./codexRollout.mjs";
 import { coreRuntime } from "./coreRuntime.mjs";
 import { agentResult } from "./result.mjs";
 import { execFile } from "node:child_process";
@@ -92,17 +93,23 @@ export async function prepareCodexShell(handed) {
  * the prompt whatever precedes it: an option a worker configures may take
  * every word after it, as `--image` does, and would otherwise take the
  * briefing as one of its values.
+ *
+ * The run is persisted, not `--ephemeral`, since its rollout is where Codex
+ * declares the limit that stopped it. That also lets Codex choose Daybreak,
+ * which `--ignore-user-config` leaves to any other layer of its configuration
+ * to turn on, so it is turned off here.
  */
 export function codexInvocation(task, run) {
   return [
     "exec",
     "--json",
-    "--ephemeral",
     "--ignore-user-config",
     "--ignore-rules",
     "--model",
     task.worker.mode.model,
     "--dangerously-bypass-approvals-and-sandbox",
+    "--config",
+    "daybreak=false",
     "--output-schema",
     run.resultSchema,
     ...run.shellArguments,
@@ -230,6 +237,32 @@ function codexObserved(event) {
   };
 }
 
+/**
+ * Folds one stream event into what the run said beyond its verdict: the thread
+ * `thread.started` names, and the message of the turn that failed.
+ */
+function codexFrame(folded = {}, event) {
+  if (event?.type === "thread.started" && typeof event.thread_id === "string")
+    return { ...folded, thread: event.thread_id };
+  if (event?.type === "turn.failed" && typeof event.error?.message === "string")
+    return { ...folded, sentence: event.error.message };
+  return folded;
+}
+
+/** What the stream said of how the run ended: Codex's own message, quoted and never read. */
+function codexEnded(_resultEvent, folded) {
+  return { sentence: folded?.sentence, session: undefined };
+}
+
+/** What the run's rollout, under the Codex home it was started with, declared of a limit. */
+function codexDeclared(folded, environment, warn) {
+  return codexRolloutRead({
+    home: environment.CODEX_HOME,
+    thread: folded?.thread,
+    warn,
+  });
+}
+
 export const codexAgent = {
   name: "Codex",
   runtime: "Codex",
@@ -237,6 +270,9 @@ export const codexAgent = {
   credential: "codex-auth",
   invocation: codexInvocation,
   result: codexResult,
+  frame: codexFrame,
+  ended: codexEnded,
+  declared: codexDeclared,
   prepareCredential: (auth) => prepareCodexCredential(auth),
   prepareShell: prepareCodexShell,
   prepareEnvironment: prepareCodexEnvironment,

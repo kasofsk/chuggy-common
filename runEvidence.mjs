@@ -38,6 +38,7 @@ import {
 } from "@chuggy/worker-contract/workerPlane";
 
 import {
+  observeCodexRollout,
   observeRateLimit,
   rateLimitSightings,
   rateLimited,
@@ -709,6 +710,10 @@ export function runEvidenceRecorder(task, bearer, scrub, services = {}) {
     },
     observed(result) {
       state.result = result;
+    },
+    /** What a Codex rollout declared, folded into the sightings and written nowhere. */
+    rolloutObserved(declared) {
+      observeCodexRollout(state.sightings, declared);
     },
     sightings: () => state.sightings,
     /** The line saying the run is held, written to the transcript and answered for the log. */

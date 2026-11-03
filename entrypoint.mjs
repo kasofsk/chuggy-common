@@ -477,6 +477,8 @@ async function readAgentStream(context, child, argv, stream) {
       await captureConfiguration(context, argv, event);
     }
     if (context.agent.resultEvent(event)) stream.result = event;
+    if (context.agent.frame !== undefined)
+      stream.frames = context.agent.frame(stream.frames, event);
     const observed = context.agent.observed(event);
     if (observed !== undefined) context.evidence.observed(observed);
     context.evidence.record(line, event);
@@ -523,9 +525,10 @@ async function runAgentEnvironment(context, shell) {
 }
 
 /**
- * One process of the agent, run to its end: its stream's last result and how it
- * exited. One whose stream cannot be read is killed before the failure is raised.
- * That is the process alone: anything it started can still be writing to the tree.
+ * One process of the agent, run to its end: its stream's last result, what the
+ * agent folded from its stream, and how it exited. One whose stream cannot be
+ * read is killed before the failure is raised. That is the process alone:
+ * anything it started can still be writing to the tree.
  */
 async function runAgentProcess(context, argv, environment, stream) {
   const child = spawn(context.agent.executable, argv, {
@@ -540,15 +543,17 @@ async function runAgentProcess(context, argv, environment, stream) {
     );
   });
   stream.result = undefined;
+  stream.frames = undefined;
   try {
     await readAgentStream(context, child, argv, stream);
     const [code, signal] = await exited;
-    return { resultEvent: stream.result, code, signal };
+    return { resultEvent: stream.result, frames: stream.frames, code, signal };
   } catch (failure) {
     child.kill("SIGKILL");
     child.stdout.destroy();
     await exited.catch(() => undefined);
-    const { sentence } = context.agent.ended?.(stream.result) ?? {};
+    const { sentence } =
+      context.agent.ended?.(stream.result, stream.frames) ?? {};
     failure.message = runEndedText(
       failure.message,
       runAgentSentence(context, sentence),
@@ -562,6 +567,32 @@ function runAgentSentence(context, sentence) {
   return typeof sentence === "string" ? context.scrub(sentence) : undefined;
 }
 
+/** The verdict `resultEvent` gave as `read`, or why it gave none as `missing`. */
+function runAgentRead(agent, resultEvent) {
+  try {
+    return { read: agent.result([resultEvent]) };
+  } catch (failure) {
+    return { missing: failure };
+  }
+}
+
+/**
+ * What a process that gave no verdict declared of a limit beyond its stream,
+ * folded into the run's sightings, where its agent declares any. It is read
+ * once its process has exited, so nothing is still writing it, and a process
+ * that gave a verdict is not read, since a verdict wins.
+ */
+async function runAgentDeclared(context, { resultEvent, frames }, environment) {
+  const { agent } = context;
+  if (agent.declared === undefined) return;
+  if (runAgentRead(agent, resultEvent).missing === undefined) return;
+  context.evidence.rolloutObserved(
+    await agent.declared(frames, environment, (text) =>
+      process.stderr.write(text),
+    ),
+  );
+}
+
 /**
  * What one process of the agent came to: `finished`, the run's account, where
  * it exited clean with a verdict; `held`, the limit to wait out and the session
@@ -573,17 +604,11 @@ function runAgentSentence(context, sentence) {
  */
 function runAgentEnded(
   context,
-  { resultEvent, code, signal },
+  { resultEvent, frames, code, signal },
   { holds, credentialLeft = false },
 ) {
   const { agent } = context;
-  let read;
-  let missing;
-  try {
-    read = agent.result([resultEvent]);
-  } catch (failure) {
-    missing = failure;
-  }
+  const { read, missing } = runAgentRead(agent, resultEvent);
   if (code === 0 && missing === undefined)
     return {
       finished: {
@@ -592,7 +617,7 @@ function runAgentEnded(
         summaryPath: agentSummaryPath,
       },
     };
-  const { sentence, session } = agent.ended?.(resultEvent) ?? {};
+  const { sentence, session } = agent.ended?.(resultEvent, frames) ?? {};
   const decided =
     missing === undefined
       ? undefined
@@ -668,6 +693,7 @@ async function runAgent(context) {
   const stream = { captured: false };
   for (let holds = 0, next = argv; ; holds += 1) {
     const exited = await runAgentProcess(context, next, environment, stream);
+    await runAgentDeclared(context, exited, environment);
     const ended = runAgentEnded(context, exited, { holds });
     if (ended.finished !== undefined) return ended.finished;
     const { credentialLeft } = await context.keep();

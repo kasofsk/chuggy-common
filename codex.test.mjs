@@ -46,18 +46,23 @@ const task = {
 /** What a run's argv is composed with beside the task, its shell prepared with nothing. */
 const run = { resultSchema: "/tmp/result.json", shellArguments: [] };
 
-test("a Codex invocation is ephemeral and constrained to the result schema", () => {
+/**
+ * Catches a run that leaves no rollout to read its limit from, and one that
+ * lets a layer of Codex's configuration other than the user's turn Daybreak on.
+ */
+test("a Codex invocation is persisted, keeps Daybreak off and is constrained to the result schema", () => {
   assert.deepEqual(
     codexInvocation(task, { ...run, shellArguments: ["--config", "shell"] }),
     [
       "exec",
       "--json",
-      "--ephemeral",
       "--ignore-user-config",
       "--ignore-rules",
       "--model",
       "gpt-5.3-codex",
       "--dangerously-bypass-approvals-and-sandbox",
+      "--config",
+      "daybreak=false",
       "--output-schema",
       "/tmp/result.json",
       "--config",
@@ -208,6 +213,54 @@ test("ticket configuration cannot replace worker-owned Codex arguments", () => {
       ),
     /reserves Codex argument --output-schema=/u,
   );
+});
+
+/** Catches a configuration that puts back the flag that leaves no rollout to read a limit from. */
+test("ticket configuration cannot make a Codex run ephemeral", () => {
+  for (const argument of ["--ephemeral", "--ephemeral=true"])
+    assert.throws(
+      () =>
+        codexInvocation(
+          {
+            ...task,
+            worker: { mode: { ...task.worker.mode, arguments: [argument] } },
+          },
+          run,
+        ),
+      /reserves Codex argument --ephemeral/u,
+    );
+});
+
+/**
+ * Catches a thread lost, so the rollout cannot be found, and Codex's message
+ * dropped from the text a person reads, which is the only place it says when
+ * the limit resets.
+ */
+test("a Codex stream says its thread and the message its failed turn ended with", () => {
+  const sentence =
+    "You've hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at Nov 5th, 2026 1:26 AM.";
+  const folded = [
+    {
+      type: "thread.started",
+      thread_id: "019a4f4e-1c2b-7d3e-8f40-a1b2c3d4e5f6",
+    },
+    { type: "turn.started" },
+    { type: "error", message: sentence },
+    { type: "turn.failed", error: { message: sentence } },
+  ].reduce(codexAgent.frame, undefined);
+
+  assert.deepEqual(folded, {
+    thread: "019a4f4e-1c2b-7d3e-8f40-a1b2c3d4e5f6",
+    sentence,
+  });
+  assert.deepEqual(codexAgent.ended(undefined, folded), {
+    sentence,
+    session: undefined,
+  });
+  assert.deepEqual(codexAgent.ended(undefined, undefined), {
+    sentence: undefined,
+    session: undefined,
+  });
 });
 
 test("ticket configuration cannot override the pinned Codex model through config", () => {
@@ -437,7 +490,7 @@ test("a Codex run is given the bundle in its own core's tree", async (t) => {
   const core = join(root, "lib", "chuggy");
   await mkdir(core, { recursive: true });
   await mkdir(join(root, "share"));
-  for (const name of ["codex.mjs", "coreRuntime.mjs"])
+  for (const name of ["codex.mjs", "codexRollout.mjs", "coreRuntime.mjs"])
     await copyFile(
       fileURLToPath(new URL(name, import.meta.url)),
       join(core, name),

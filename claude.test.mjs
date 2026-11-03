@@ -122,7 +122,6 @@ test("a resumed run is the same run in the conversation it left, told the limit 
 /** Which runtime may resume is what decides whether a limit can be waited out. */
 test("a Codex run has no conversation to resume, so no limit of its is waited out", () => {
   assert.equal(codexAgent.resumeInvocation, undefined);
-  assert.equal(codexAgent.ended, undefined);
 });
 
 test("a result frame says what the runtime said and which conversation it ended", () => {
