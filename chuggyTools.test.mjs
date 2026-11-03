@@ -3072,19 +3072,23 @@ test("a ticket's landings are described as the route answers them, and read_tick
   const described = (tool) =>
     chuggyProjectTools.find(({ name }) => name === tool).description;
   const claims = [
-    /the newest one answer holds, oldest first, and `truncated` where the ticket has older ones this answer leaves out/,
+    /the newest one answer holds, oldest first, `truncated` where it leaves older ones out/,
     /Each landing carries its `state`/,
-    /A Held landing carries `hold`: its `kind`, [^.]*, and `since`, when a hold of that kind began/,
+    /Unavailable \(it could not go through and escalated: as the newest, its ticket waits on a person; an older one stays after a resume\)/,
+    /`failureKind` where it failed, such as MergeConflict or QueueChecksFailed \(the merge queue removed its pull request twice for failed checks; its work went back to Work\)/,
+    /A Held landing carries `hold`, and an Unavailable one the `hold` it escalated from where one is recorded: its `kind`, [^.]*, and `since`, when a hold of that kind began/,
+    /`hold\.removal`, recorded where its pull request left its base's merge queue, is `reason`, the forge's own word such as `manual`, `failed_checks` or `checks_timed_out`, and `actor`, the login removing it, where named/,
     /An AwaitingMerge landing carries `wait`: its `reason`, [^.]*, and `checkedAt`, when the forge was last heard about its merge/,
+    /\(Blocked by the forge's rules, as where the queue will not take it yet; HeadMoved; or Queued, waiting its turn in the queue\)/,
     /`proposal` is the pull request [^.]*: its `url`, [^.]*its `mergeability`, and `mergeState`, the forge's own word for that, GitHub's `mergeable_state`/,
-    /its `status` as chuggy last read it, [^.]*so a Proposed landing's is the one it opened with and not followed afterwards/,
+    /its `status` as chuggy last read it, [^.]*so a Proposed landing's is the one it opened with/,
     /`conflict` is the paths its newest attempt conflicted on, `truncated` where they were cut/,
   ];
   for (const claim of claims)
     assert.match(described("read_ticket_landings"), claim);
   assert.match(
     described("read_ticket"),
-    /Where its work is landing or waits to land, read_ticket_landings says how/,
+    /Where its work is landing, waits to land or escalated at landing, read_ticket_landings says how/,
   );
 });
 
