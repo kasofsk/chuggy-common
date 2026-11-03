@@ -577,20 +577,20 @@ function runAgentRead(agent, resultEvent) {
 }
 
 /**
- * What a process that gave no verdict declared of a limit beyond its stream,
- * folded into the run's sightings, where its agent declares any. It is read
- * once its process has exited, so nothing is still writing it, and a process
- * that gave a verdict is not read, since a verdict wins.
+ * What a process declared beyond its stream, where its agent declares any: the
+ * account's usage, folded into the run's readings, and, for a process that
+ * gave no verdict, a limit, folded into its sightings, since a verdict wins. It
+ * is read once its process has exited, so nothing is still writing it.
  */
 async function runAgentDeclared(context, { resultEvent, frames }, environment) {
   const { agent } = context;
   if (agent.declared === undefined) return;
-  if (runAgentRead(agent, resultEvent).missing === undefined) return;
-  context.evidence.rolloutObserved(
-    await agent.declared(frames, environment, (text) =>
-      process.stderr.write(text),
-    ),
+  const declared = await agent.declared(frames, environment, (text) =>
+    process.stderr.write(text),
   );
+  context.evidence.rolloutUsageObserved(declared);
+  if (runAgentRead(agent, resultEvent).missing !== undefined)
+    context.evidence.rolloutObserved(declared);
 }
 
 /**
@@ -1338,7 +1338,8 @@ async function agentCredential(credentialFiles, agent) {
  * and the scrub over every secret this pod holds — the agent's own, the bearer,
  * and each file in `mounted`, which is every credential this pod's launcher
  * mounted whether or not the map names it. `held` answers those secrets with
- * their kinds, for the push to be checked against.
+ * their kinds, for the push to be checked against, and `clock` dates what the
+ * recorder reads of the account's usage.
  */
 export async function workerRun({
   task,
@@ -1346,6 +1347,7 @@ export async function workerRun({
   credentialFiles,
   mounted,
   agent,
+  clock = workerClock,
 }) {
   const prepared =
     agent === undefined
@@ -1361,7 +1363,9 @@ export async function workerRun({
     })),
   ]);
   activeScrub = scrub;
-  const evidence = runEvidenceRecorder(task, bearer, scrub);
+  const evidence = runEvidenceRecorder(task, bearer, scrub, {
+    now: () => clock.now(),
+  });
   activeEvidence = evidence;
   return {
     agentEnvironment: prepared.environment,
@@ -1815,6 +1819,7 @@ export async function workerAttempt(launch, seams = {}) {
     credentialFiles,
     mounted,
     agent,
+    clock,
   });
   await workerMintedWritable(minted);
   const stopLease = keepWorkerLease(task, bearer);

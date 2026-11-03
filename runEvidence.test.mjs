@@ -3,13 +3,23 @@ import { Buffer } from "node:buffer";
 import test from "node:test";
 import { setImmediate } from "node:timers";
 
-import { limitSnapshot } from "./codexRollout.fixture.mjs";
+import {
+  fiveHourResetsAtSecs,
+  limitSnapshot,
+  rolloutObservedAtSecs,
+  rolloutTimestamp,
+  weeklyResetsAtSecs,
+} from "./codexRollout.fixture.mjs";
 import {
   runEndedEvidences,
   runModelCharsMax,
   runTranscriptBatchBytesMax,
   runTranscriptBatchesMax,
   runTurnSeriesMax,
+  workerRunEndedSchema,
+  workerRunLimitSchema,
+  workerRunTotalsSchema,
+  workerRunUsageSchema,
 } from "@chuggy/worker-contract/workerPlane";
 
 import { drawnSecrets, drawnText, seeded } from "./credentialText.fixture.mjs";
@@ -23,6 +33,7 @@ import {
   runCloneFailed,
   runCommitFailed,
   runEvidenceRecorder,
+  runLimit,
   runPushFailed,
   runSetupFailed,
   runStep,
@@ -30,13 +41,16 @@ import {
   runTotals,
   runTranscriptEventBytesMax,
   runTurn,
+  runUsage,
   truncatedEvent,
 } from "./runEvidence.mjs";
 import {
   observeRateLimit,
+  rateLimitReadings,
   rateLimitSightings,
   rateLimited,
 } from "./rateLimit.mjs";
+import { limitRejected, limitResetsAtSecs } from "./rateLimit.fixture.mjs";
 
 /** The sightings a run that saw exactly these frames, in this order, ends with. */
 function seenBy(...events) {
@@ -45,6 +59,9 @@ function seenBy(...events) {
 
 const task = { workerPlane: { url: "http://worker-plane.test:3001" } };
 const secret = "sk-ant-oat01-0123456789abcdefghijklmnopqrstuvwxyz";
+
+/** When the harness's clock says a frame was seen, a moment past a whole second. */
+const observedAtMs = 1_793_250_000_750;
 
 function harness(options = {}) {
   const calls = [];
@@ -70,6 +87,7 @@ function harness(options = {}) {
       },
       clearInterval: () => undefined,
       warn: () => undefined,
+      now: options.now ?? (() => observedAtMs),
     },
   );
   return { recorder, calls, tick: () => ticked() };
@@ -928,6 +946,7 @@ test("the recorder folds the frames it ships, so the ending reads the whole run"
   const ended = calls.find(({ path }) => path === "/v1/run/ended");
   assert.deepEqual(JSON.parse(ended.init.body), {
     evidence: "RunRateLimited",
+    limit: { window: "five_hour", resetsAt: 1787823600 },
   });
 });
 
@@ -949,6 +968,7 @@ test("what a Codex rollout declared ends the run held and adds nothing to its tr
   const ended = calls.find(({ path }) => path === "/v1/run/ended");
   assert.deepEqual(JSON.parse(ended.init.body), {
     evidence: "RunRateLimited",
+    limit: { window: "seven_day", resetsAt: weeklyResetsAtSecs },
   });
 });
 
@@ -1279,4 +1299,188 @@ test("a resumed process whose result names no model leaves the rows before it", 
     })),
     [{ tokensInput: 10, costUsdMicros: 1_200_000 }],
   );
+});
+
+/** The second the harness's clock says each frame was seen in. */
+const observedAtSecs = Math.floor(observedAtMs / 1_000);
+
+/** What `limitRejected`'s windows read as, seen on the harness's clock. */
+const limitReadings = {
+  five_hour: {
+    utilization: 1,
+    resetsAt: limitResetsAtSecs,
+    observedAt: observedAtSecs,
+  },
+  seven_day: {
+    utilization: 0.5,
+    resetsAt: 1_793_764_800,
+    observedAt: observedAtSecs,
+  },
+};
+
+/** The end a recorder posted, held to the contract. */
+async function postedEnded(recorder, calls, step) {
+  await recorder.ended(step);
+  const posted = calls.find(({ path }) => path === "/v1/run/ended");
+  const body = JSON.parse(posted.init.body);
+  assert.ok(workerRunEndedSchema.safeParse(body).success, posted.init.body);
+  return body;
+}
+
+test("a run's totals carry the latest reading of each window it saw, inside the contract", async () => {
+  const { recorder, calls } = harness();
+  framed(recorder, limitRejected);
+  recorder.observed(processResult({ num_turns: 1 }));
+
+  const totals = await postedTotals(recorder, calls);
+  assert.ok(workerRunTotalsSchema.safeParse(totals).success);
+  assert.deepEqual(totals.usage, limitReadings);
+});
+
+/** Catches an empty `usage` sent, and a run's totals changed by readings it never saw. */
+test("a run that saw no reading posts no usage", async () => {
+  const { recorder, calls } = harness();
+  const result = processResult({ num_turns: 1 });
+  recorder.observed(result);
+  framed(recorder, {
+    type: "rate_limit_event",
+    rate_limit_info: { status: "allowed", utilization: 50 },
+  });
+
+  assert.deepEqual(
+    await postedTotals(recorder, calls),
+    JSON.parse(JSON.stringify(runTotals(result, []))),
+  );
+});
+
+/**
+ * Catches readings dropped with the sightings when a hold ends, which would
+ * leave the plane no reading of the window the run was held at.
+ */
+test("a run's readings survive its hold, and a later reading of a window replaces the earlier", async () => {
+  const { recorder, calls } = harness();
+  framed(recorder, limitRejected);
+  recorder.resumed();
+  assert.ok(!rateLimited(recorder.sightings()));
+  framed(recorder, {
+    type: "rate_limit_event",
+    rate_limit_info: {
+      status: "allowed",
+      unifiedWindows: {
+        five_hour: { utilization: 0.01, resetsAt: 1_793_314_800 },
+      },
+    },
+  });
+  recorder.observed(processResult({ num_turns: 1 }));
+
+  assert.deepEqual((await postedTotals(recorder, calls)).usage, {
+    five_hour: {
+      utilization: 0.01,
+      resetsAt: 1_793_314_800,
+      observedAt: observedAtSecs,
+    },
+    seven_day: limitReadings.seven_day,
+  });
+});
+
+/** Catches a Codex rollout's usage made into a refusal, which would end a run with a verdict rate-limited. */
+test("a Codex rollout's usage is read without being seen as a limit", async () => {
+  const { recorder, calls } = harness();
+  recorder.rolloutUsageObserved({
+    snapshot: limitSnapshot,
+    snapshotTimestamp: rolloutTimestamp,
+    errorInfo: "usage_limit_exceeded",
+  });
+
+  assert.ok(!rateLimited(recorder.sightings()));
+  assert.deepEqual((await postedTotals(recorder, calls)).usage, {
+    five_hour: {
+      utilization: 1,
+      resetsAt: fiveHourResetsAtSecs,
+      observedAt: rolloutObservedAtSecs,
+    },
+    seven_day: {
+      utilization: 1,
+      resetsAt: weeklyResetsAtSecs,
+      observedAt: rolloutObservedAtSecs,
+    },
+  });
+});
+
+test("usage is each window read, and nothing where none was", () => {
+  assert.equal(runUsage(rateLimitReadings()), undefined);
+  assert.equal(runUsage(undefined), undefined);
+  for (const readings of [
+    limitReadings,
+    { seven_day: limitReadings.seven_day },
+  ]) {
+    const usage = runUsage(readings);
+    assert.deepEqual(usage, readings);
+    assert.ok(workerRunUsageSchema.safeParse(usage).success);
+  }
+});
+
+/** Catches a field the contract would refuse sent, which would leave the attempt to the lease sweep. */
+test("a limit carries each field of its reset the contract takes, floored, and is nothing where it takes neither", () => {
+  for (const [reset, limit] of [
+    [
+      { resetsAtSecs: 1_793_296_800, window: "five_hour" },
+      { window: "five_hour", resetsAt: 1_793_296_800 },
+    ],
+    [
+      { resetsAtSecs: 1_793_296_800.75, window: "seven_day" },
+      { window: "seven_day", resetsAt: 1_793_296_800 },
+    ],
+    [
+      { resetsAtSecs: 1_793_296_800, window: "seven_day_opus" },
+      { resetsAt: 1_793_296_800 },
+    ],
+    [
+      { resetsAtSecs: 1_793_296_800, window: undefined },
+      { resetsAt: 1_793_296_800 },
+    ],
+    [{ resetsAtSecs: 0.5, window: "five_hour" }, { window: "five_hour" }],
+    [{ resetsAtSecs: 0.5, window: "overage" }, undefined],
+    [undefined, undefined],
+  ]) {
+    assert.deepEqual(runLimit(reset), limit, JSON.stringify(reset));
+    if (limit !== undefined)
+      assert.ok(workerRunLimitSchema.safeParse(limit).success);
+  }
+});
+
+test("a run ended rate-limited carries the limit that stopped it", async () => {
+  const { recorder, calls } = harness();
+  framed(recorder, limitRejected);
+
+  assert.deepEqual(await postedEnded(recorder, calls), {
+    evidence: "RunRateLimited",
+    limit: { window: "five_hour", resetsAt: limitResetsAtSecs },
+  });
+});
+
+test("a limit whose reset the contract takes no field of is left out of the end", async () => {
+  const { recorder, calls } = harness();
+  framed(recorder, {
+    type: "rate_limit_event",
+    rate_limit_info: {
+      status: "rejected",
+      resetsAt: 0.5,
+      rateLimitType: "seven_day_opus",
+    },
+  });
+
+  assert.deepEqual(await postedEnded(recorder, calls), {
+    evidence: "RunRateLimited",
+  });
+});
+
+/** Catches a limit sent beside a label it is not kept beside. */
+test("a run ended any other way carries no limit, whatever it saw", async () => {
+  const { recorder, calls } = harness();
+  framed(recorder, limitRejected);
+
+  assert.deepEqual(await postedEnded(recorder, calls, runPushFailed), {
+    evidence: "RunPushFailed",
+  });
 });

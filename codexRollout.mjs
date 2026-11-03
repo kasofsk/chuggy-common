@@ -1,7 +1,8 @@
 /**
- * What a Codex run persisted of the limit that stopped it: the fields of its
- * rollout `rateLimit.mjs` reads, which `codex exec --json` drops from the
- * stream.
+ * What a Codex run persisted of its account's usage and of a limit that
+ * stopped it: the fields of its rollout `rateLimit.mjs` reads, with the
+ * snapshot line's `timestamp`, which `codex exec --json` drops from the
+ * stream. It is read after every Codex run.
  *
  * THE FILE IS FOUND BY ITS THREAD ID, never by a date path built here. Codex
  * writes it as `sessions/YYYY/MM/DD/rollout-<timestamp>-<thread id>.jsonl`
@@ -113,14 +114,24 @@ function codexRolloutLines({ bytes, partial }) {
   return lines;
 }
 
+/** What a rollout that declared nothing declares. */
+function codexRolloutNone() {
+  return {
+    snapshot: undefined,
+    snapshotTimestamp: undefined,
+    errorInfo: undefined,
+  };
+}
+
 /**
  * What `lines` of a rollout declared: `snapshot`, the last `token_count`'s
- * `rate_limits` that carried one, and `errorInfo`, the last `task_complete`'s
+ * `rate_limits` that carried one, `snapshotTimestamp`, that line's
+ * `timestamp`, and `errorInfo`, the last `task_complete`'s
  * `error.codex_error_info`. A line that is not JSON, or is any other record, is
  * passed over.
  */
 export function codexRolloutDeclared(lines) {
-  const declared = { snapshot: undefined, errorInfo: undefined };
+  const declared = codexRolloutNone();
   for (const line of lines) {
     let record;
     try {
@@ -134,8 +145,10 @@ export function codexRolloutDeclared(lines) {
       payload?.type === "token_count" &&
       typeof payload.rate_limits === "object" &&
       payload.rate_limits !== null
-    )
+    ) {
       declared.snapshot = payload.rate_limits;
+      declared.snapshotTimestamp = record.timestamp;
+    }
     if (payload?.type === "task_complete")
       declared.errorInfo = payload.error?.codex_error_info;
   }
@@ -148,7 +161,7 @@ export function codexRolloutDeclared(lines) {
  * and nothing is declared.
  */
 export async function codexRolloutRead({ home, thread, warn }) {
-  const none = { snapshot: undefined, errorInfo: undefined };
+  const none = codexRolloutNone();
   if (typeof home !== "string" || home.length === 0) {
     warn("Codex's rollout was not read: the run named no Codex home\n");
     return none;

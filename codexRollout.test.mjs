@@ -17,6 +17,7 @@ import {
   rolloutLine,
   rolloutName,
   rolloutThread,
+  rolloutTimestamp,
   tokenCount,
   usageLimitComplete,
   windowlessSnapshot,
@@ -54,10 +55,10 @@ function oversizedLine() {
 
 /**
  * Catches a limit missed for a line before it that is not JSON or is another
- * record, an oversized line parsed, and an earlier snapshot read in place of
- * the last.
+ * record, an oversized line parsed, an earlier snapshot read in place of
+ * the last, and a later line's time read as the snapshot's.
  */
-test("a rollout declares its last snapshot and its turn's error, past what it cannot read", async (t) => {
+test("a rollout declares its last snapshot, when its line was written, and its turn's error, past what it cannot read", async (t) => {
   const { read, warned } = await rolloutHome(t, [
     rolloutLine(tokenCount(ordinarySnapshot)),
     "not a record",
@@ -65,11 +66,12 @@ test("a rollout declares its last snapshot and its turn's error, past what it ca
     rolloutLine({ type: "warning", message: "hello" }),
     rolloutLine(tokenCount(limitSnapshot)),
     oversizedLine(),
-    rolloutLine(usageLimitComplete),
+    rolloutLine(usageLimitComplete, "2026-11-02T21:20:00.000Z"),
   ]);
 
   assert.deepEqual(await read(), {
     snapshot: limitSnapshot,
+    snapshotTimestamp: rolloutTimestamp,
     errorInfo: "usage_limit_exceeded",
   });
   assert.deepEqual(warned, []);
@@ -83,6 +85,7 @@ test("a rollout's limit with no windows is still its turn's error", async (t) =>
 
   assert.deepEqual(await read(), {
     snapshot: windowlessSnapshot,
+    snapshotTimestamp: rolloutTimestamp,
     errorInfo: "usage_limit_exceeded",
   });
 });
@@ -90,12 +93,16 @@ test("a rollout's limit with no windows is still its turn's error", async (t) =>
 test("an ordinary rollout declares an ordinary snapshot and no error", () => {
   assert.deepEqual(
     codexRolloutDeclared([
-      rolloutLine(tokenCount(limitSnapshot)),
+      rolloutLine(tokenCount(limitSnapshot), "2026-11-02T21:13:00.000Z"),
       rolloutLine(tokenCount(ordinarySnapshot)),
-      rolloutLine(tokenCount(null)),
+      rolloutLine(tokenCount(null), "2026-11-02T21:15:00.000Z"),
       rolloutLine({ ...usageLimitComplete, error: undefined }),
     ]),
-    { snapshot: ordinarySnapshot, errorInfo: undefined },
+    {
+      snapshot: ordinarySnapshot,
+      snapshotTimestamp: rolloutTimestamp,
+      errorInfo: undefined,
+    },
   );
 });
 
@@ -112,7 +119,11 @@ test("a reverted thread's rollout is found by its thread", async (t) => {
 
 /** Catches a run failed, or a read beyond the run's own thread, where there is nothing to read. */
 test("a rollout that is not there is a warning and nothing declared", async (t) => {
-  const none = { snapshot: undefined, errorInfo: undefined };
+  const none = {
+    snapshot: undefined,
+    snapshotTimestamp: undefined,
+    errorInfo: undefined,
+  };
   const { read, warned } = await rolloutHome(t, [
     rolloutLine(usageLimitComplete),
   ]);
@@ -191,7 +202,7 @@ test("an unreadable rollout is a warning and nothing declared", async (t) => {
       thread: rolloutThread,
       warn: (text) => warned.push(text),
     }),
-    { snapshot: undefined, errorInfo: undefined },
+    { snapshot: undefined, snapshotTimestamp: undefined, errorInfo: undefined },
   );
   assert.equal(warned.length, 1);
   assert.match(warned[0], /could not be read/u);

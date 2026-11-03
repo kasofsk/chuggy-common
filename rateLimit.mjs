@@ -56,18 +56,35 @@
  *
  * The reset is the latest a full window names. The sentence Codex writes is
  * never parsed: its time is in its own process's zone and names none.
+ *
+ * READINGS ARE KEPT APART FROM REFUSALS. How much of each window the account
+ * has used is the plane's to act on before a refusal, so it is folded on its
+ * own: a hold does not clear it and a session does not carry it. Each window
+ * keeps the latest reading seen, and a reading the contract would refuse is
+ * dropped rather than sent. Claude's come from a rate-limit frame's
+ * `rate_limit_info.unifiedWindows`, which `sdk.d.ts` does not declare: it is
+ * read as a field, shape-checked, as fractions where one is the whole window.
+ * The declared top-level `utilization` is not read, since nothing establishes
+ * its scale. Codex's come from the last snapshot, each window named by its
+ * length, its `used_percent` scaled to a fraction and dated by its line's
+ * `timestamp`.
  */
+
+import {
+  runUsageInstantSecsMax,
+  runUsageUtilizationMax,
+  runUsageWindows,
+} from "@chuggy/worker-contract/workerPlane";
 
 const rateLimitEventType = "rate_limit_event";
 const rateLimitRejectedStatus = "rejected";
 const assistantMessageType = "assistant";
 const rateLimitErrorKind = "rate_limit";
 
-/** The last second a date can name, past which no reset is one. */
-const rateLimitResetsAtSecsMax = 8_640_000_000_000;
-
 const codexUsageLimitErrorInfo = "usage_limit_exceeded";
 const codexUsedPercentFull = 100;
+const codexTimestampPattern =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u;
 
 /** Codex's windows by their length in minutes, under the names Claude's frames give them. */
 const codexWindowNames = new Map([
@@ -96,7 +113,7 @@ function rateLimitResetsAtBounded(resetsAtSecs) {
   return (
     Number.isFinite(resetsAtSecs) &&
     resetsAtSecs > 0 &&
-    resetsAtSecs <= rateLimitResetsAtSecsMax
+    resetsAtSecs <= runUsageInstantSecsMax
   );
 }
 
@@ -161,4 +178,108 @@ export function rateLimited(sightings) {
   return (
     sightings?.refused === true || sightings?.status === rateLimitRejectedStatus
   );
+}
+
+/** The latest reading of each window, which until a frame gives one is none. */
+export function rateLimitReadings() {
+  return {};
+}
+
+/** A Unix second floored to a whole one the contract takes, or nothing where it is none. */
+export function rateLimitInstantSecs(secs) {
+  const whole = Number.isFinite(secs) ? Math.floor(secs) : 0;
+  return whole >= 1 && whole <= runUsageInstantSecsMax ? whole : undefined;
+}
+
+/** One window's reading, or nothing where any of it is outside what the contract takes. */
+function rateLimitReading(utilization, resetsAtSecs, observedAtSecs) {
+  const resetsAt = rateLimitInstantSecs(resetsAtSecs);
+  const observedAt = rateLimitInstantSecs(observedAtSecs);
+  if (
+    !Number.isFinite(utilization) ||
+    utilization < 0 ||
+    utilization > runUsageUtilizationMax ||
+    resetsAt === undefined ||
+    observedAt === undefined
+  )
+    return undefined;
+  return { utilization, resetsAt, observedAt };
+}
+
+/** `readings` with each window of `windows` that is a reading put in its place. */
+function rateLimitReadingsKept(readings, windows) {
+  for (const window of runUsageWindows) {
+    const reading = windows.get(window);
+    if (reading !== undefined) readings[window] = reading;
+  }
+  return readings;
+}
+
+/**
+ * Folds the readings a runtime frame carries in `unifiedWindows`, each seen at
+ * `observedAtMs`, into `readings`.
+ */
+export function observeRateLimitReadings(readings, event, observedAtMs) {
+  const windows = event?.rate_limit_info?.unifiedWindows;
+  if (
+    event?.type !== rateLimitEventType ||
+    windows === null ||
+    typeof windows !== "object"
+  )
+    return readings;
+  const read = new Map();
+  for (const window of runUsageWindows) {
+    const { utilization, resetsAt } = windows[window] ?? {};
+    if (typeof utilization !== "number" || typeof resetsAt !== "number")
+      continue;
+    const reading = rateLimitReading(
+      utilization,
+      resetsAt,
+      observedAtMs / 1_000,
+    );
+    if (reading !== undefined) read.set(window, reading);
+  }
+  return rateLimitReadingsKept(readings, read);
+}
+
+/** The Unix seconds a rollout line's UTC `timestamp` names, or nothing where it is no such instant. */
+function codexObservedAtSecs(timestamp) {
+  if (typeof timestamp !== "string" || !codexTimestampPattern.test(timestamp))
+    return undefined;
+  return Date.parse(timestamp) / 1_000;
+}
+
+/**
+ * Folds the readings of a Codex rollout's `snapshot`, its line dated
+ * `snapshotTimestamp`, into `readings`. Where both of its windows are one
+ * length, the one reopening later is kept.
+ */
+export function observeCodexReadings(
+  readings,
+  { snapshot, snapshotTimestamp },
+) {
+  const observedAtSecs = codexObservedAtSecs(snapshotTimestamp);
+  const read = new Map();
+  for (const window of [snapshot?.primary, snapshot?.secondary]) {
+    const name = codexWindowNames.get(window?.window_minutes);
+    const { used_percent: usedPercent, resets_at: resetsAt } = window ?? {};
+    if (
+      name === undefined ||
+      typeof usedPercent !== "number" ||
+      typeof resetsAt !== "number"
+    )
+      continue;
+    const reading = rateLimitReading(
+      usedPercent / codexUsedPercentFull,
+      resetsAt,
+      observedAtSecs,
+    );
+    const held = read.get(name);
+    if (
+      reading !== undefined &&
+      (held === undefined || reading.resetsAt > held.resetsAt)
+    )
+      read.set(name, reading);
+  }
+  return rateLimitReadingsKept(readings, read);
 }
