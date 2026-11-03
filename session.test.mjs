@@ -1052,7 +1052,7 @@ test("a session with no ProjectRead registers no read and disallows every one by
     assert.ok(disallowed.includes(tool), `${tool} was left ungoverned`);
 });
 
-test("the session's objectives ride on the preset prompt, recorded for the conversation", async () => {
+test("the session's objectives ride on the preset prompt, rendered for every query", async () => {
   const plane = planeOf([], leadFacts);
   const { seen, query } = queryOf(() => []);
 
@@ -1061,10 +1061,73 @@ test("the session's objectives ride on the preset prompt, recorded for the conve
   assert.deepEqual(seen.options.systemPrompt, {
     type: "preset",
     preset: "claude_code",
-    snapshot: true,
+    snapshot: false,
     append: leadFacts.systemPrompt,
   });
   assert.deepEqual(seen.options.settingSources, ["project"]);
+});
+
+/**
+ * The system prompt the pinned runtime sends on a resume: the last prompt
+ * snapshot the transcript holds, unless the query turned recording off, when it
+ * renders the preset with the query's own append. That is what driving the
+ * runtime over a stored stream showed; this suite does not drive it.
+ */
+function resumedSystemPrompt(entries, systemPrompt) {
+  const recorded = entries.findLast(
+    (entry) => entry.attachment?.type === "prompt_snapshot",
+  );
+  if (systemPrompt.snapshot !== false && recorded !== undefined)
+    return recorded.attachment.systemPrompt;
+  return [systemPrompt.append];
+}
+
+/**
+ * The live leads and threads already hold a snapshot the store clipped, and
+ * none of them is closed first. A resume over one runs under the append its
+ * launch passed, not under the note the store kept.
+ */
+test("a lead resumed over a clipped prompt snapshot runs under the append its launch passed", async () => {
+  const clipped = {
+    type: "attachment",
+    attachment: {
+      type: "prompt_snapshot",
+      systemPrompt: [
+        "[the session store dropped the 11 values here, 10456 bytes; part of a list reads as all of it, so run the tool again]",
+      ],
+      tools: [],
+    },
+    uuid: "9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a",
+    sessionId: "runtime-1",
+  };
+  const plane = planeOf([turnOne], {
+    ...leadFacts,
+    agentReference: "runtime-1",
+  });
+  const request = async (asking, held, path, ...rest) =>
+    path.startsWith("/v1/session/store/runtime-1?")
+      ? {
+          status: 200,
+          json: async () => ({
+            batches: [{ batch: 1, content: `${JSON.stringify(clipped)}\n` }],
+          }),
+        }
+      : plane.request(asking, held, path, ...rest);
+  let prompt;
+  const { query } = queryOf((_asked, _index, options) => [
+    async () => {
+      const loaded = await options.sessionStore.load({
+        sessionId: options.resume,
+      });
+      prompt = resumedSystemPrompt(loaded, options.systemPrompt);
+    },
+    { type: "system", subtype: "init", session_id: "runtime-1" },
+    result("success", { result: "ok" }),
+  ]);
+
+  await run({ request, query });
+
+  assert.deepEqual(prompt, [leadFacts.systemPrompt]);
 });
 
 test("a session row that carries no objectives still takes its turn", async () => {
@@ -1077,7 +1140,7 @@ test("a session row that carries no objectives still takes its turn", async () =
   assert.deepEqual(seen.options.systemPrompt, {
     type: "preset",
     preset: "claude_code",
-    snapshot: true,
+    snapshot: false,
   });
 });
 
@@ -1364,7 +1427,7 @@ test("a lead is served neither origination nor revocation, and each is disallowe
   }
 });
 
-test("a thread's own objectives ride on the preset prompt, recorded for the conversation", async () => {
+test("a thread's own objectives ride on the preset prompt, rendered for every query", async () => {
   const plane = planeOf([], threadFacts);
   const { seen, query } = queryOf(() => []);
 
@@ -1373,7 +1436,7 @@ test("a thread's own objectives ride on the preset prompt, recorded for the conv
   assert.deepEqual(seen.options.systemPrompt, {
     type: "preset",
     preset: "claude_code",
-    snapshot: true,
+    snapshot: false,
     append: threadFacts.systemPrompt,
   });
 });
@@ -1434,7 +1497,7 @@ test("a member's own session runs with no tree, the member tools alone and its o
   assert.deepEqual(seen.options.systemPrompt, {
     type: "preset",
     preset: "claude_code",
-    snapshot: true,
+    snapshot: false,
     append: memberFacts.systemPrompt,
   });
 });
