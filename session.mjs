@@ -514,12 +514,14 @@ function sessionForkFrom(facts) {
  * cannot reach means the runtime reports none loaded, with no warning and no
  * start it delayed.
  *
- * `snapshot: true` RECORDS THE RENDERED PROMPT FOR THE CONVERSATION instead of
- * re-rendering it every request. A prompt changed mid-session therefore takes
- * effect at the next compaction or in a new session, so an owner who edits the
- * North Star will not see a running lead change. Where the account has not been
- * enabled for recording the option is accepted and has no effect, so it is safe
- * to set now.
+ * `snapshot: false` RENDERS THE PROMPT FROM EACH QUERY'S OWN OPTIONS, which
+ * every pod start passes in full. It is said rather than omitted because
+ * omitting it is the runtime's default, and the default records the rendered
+ * prompt in the transcript and sends that record on every later request and
+ * every resume, whatever `append` the resume passes. A record carrying the
+ * session's tools can outweigh a store batch, and a pod resuming from the store
+ * would run under what the store kept of it. A record buys nothing here: chuggy
+ * replaces a lead whose prompt changed rather than resuming it.
  *
  * A SESSION WITH NO OBJECTIVES STILL TAKES ITS TURN. An older session row, or a
  * project whose settings the host has not pushed yet, carries no prompt; a lead
@@ -531,7 +533,7 @@ function sessionSystemPrompt(facts) {
   return {
     type: "preset",
     preset: "claude_code",
-    snapshot: true,
+    snapshot: false,
     ...(typeof append === "string" && append.length > 0 ? { append } : {}),
   };
 }
