@@ -1081,6 +1081,28 @@ test("a session row that carries no objectives still takes its turn", async () =
   });
 });
 
+test("a lead whose facts name a compaction window runs under it as a flag-level setting", async () => {
+  const plane = planeOf([], { ...leadFacts, autoCompactWindow: 200_000 });
+  const { seen, query } = queryOf(() => []);
+
+  await run({ request: plane.request, query });
+
+  assert.equal(seen.options.settings.autoCompactWindow, 200_000);
+  assert.ok(
+    !("CLAUDE_CODE_AUTO_COMPACT_WINDOW" in seen.options.env),
+    "the variable that overrides the setting was set",
+  );
+});
+
+test("a session whose facts name no compaction window is given no settings", async () => {
+  const plane = planeOf([], leadFacts);
+  const { seen, query } = queryOf(() => []);
+
+  await run({ request: plane.request, query });
+
+  assert.ok(!("settings" in seen.options), "settings were given");
+});
+
 test("an observation answered with decision tools posts the document they composed", async () => {
   const plane = planeOf([observationTurn], leadFacts);
   const { query } = queryOf((_asked, _index, options) => [
