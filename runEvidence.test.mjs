@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer";
 import test from "node:test";
 import { setImmediate } from "node:timers";
 
+import { limitSnapshot } from "./codexRollout.fixture.mjs";
 import {
   runEndedEvidences,
   runModelCharsMax,
@@ -924,6 +925,27 @@ test("the recorder folds the frames it ships, so the ending reads the whole run"
   recorder.observed(apiErrorResult);
   await recorder.ended();
 
+  const ended = calls.find(({ path }) => path === "/v1/run/ended");
+  assert.deepEqual(JSON.parse(ended.init.body), {
+    evidence: "RunRateLimited",
+  });
+});
+
+/** Catches a Codex limit read from its rollout but not priced as a hold, or written into the transcript as if the run had streamed it. */
+test("what a Codex rollout declared ends the run held and adds nothing to its transcript", async () => {
+  const { recorder, calls, tick } = harness();
+  recorder.rolloutObserved({
+    snapshot: limitSnapshot,
+    errorInfo: "usage_limit_exceeded",
+  });
+  await tick();
+  await recorder.ended();
+
+  assert.equal(recorder.sightings().reset.window, "seven_day");
+  assert.deepEqual(
+    calls.filter(({ path }) => path.startsWith("/v1/run/tran")),
+    [],
+  );
   const ended = calls.find(({ path }) => path === "/v1/run/ended");
   assert.deepEqual(JSON.parse(ended.init.body), {
     evidence: "RunRateLimited",

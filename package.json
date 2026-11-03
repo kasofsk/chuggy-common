@@ -40,6 +40,7 @@
     "claude.mjs",
     "claudeCredential.mjs",
     "codex.mjs",
+    "codexRollout.mjs",
     "containerBackend.mjs",
     "contractProbe.mjs",
     "control.mjs",

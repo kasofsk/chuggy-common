@@ -72,6 +72,19 @@ import {
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import { codexAgent } from "./codex.mjs";
 import {
+  limitSnapshot,
+  ordinarySnapshot,
+  rolloutFolder,
+  rolloutLine,
+  rolloutName,
+  tokenCount,
+  usageLimitComplete,
+  usageLimitFrames,
+  usageLimitSentence,
+  weeklyResetsAtSecs,
+  windowlessSnapshot,
+} from "./codexRollout.fixture.mjs";
+import {
   decidingFor,
   strayEnvironment,
   strayLeftFor,
@@ -4534,11 +4547,11 @@ function revokedRun(file = "half.txt") {
  * records its pid and argv, runs that start's `work` in the workspace, writes
  * that start's `frames`, stays alive where told to `linger`, and exits as told.
  * A start past the last of `runs` fails, so a run started once too often does
- * not pass for one that was not.
+ * not pass for one that was not. It is found as `name`.
  */
-async function standInRuntime(t, runs) {
+async function standInRuntime(t, runs, name = "claude") {
   const root = await suiteDirectory(t, "chuggy-stand-in-");
-  const executable = join(root, "claude");
+  const executable = join(root, name);
   const started = join(root, "started");
   await writeFile(started, "");
   await writeFile(join(root, "runs.json"), JSON.stringify(runs));
@@ -5208,20 +5221,22 @@ test("a limit that cannot be waited out ends the run, saying the limit, its rese
 /**
  * A pod launched for real at `checkout`, `carried` naming its task, its runtime
  * the stand-in running `runs` and found on PATH as a host job finds it, in
- * directories of its own.
+ * directories of its own. `agent` is the task's answer, its credential and the
+ * name its runtime is found by, which are Claude's unless it says otherwise.
  */
-async function launchedStandIn(t, checkout, runs, carried) {
+async function launchedStandIn(t, checkout, runs, carried, agent = {}) {
+  const {
+    answer = agentAnswer(),
+    credential = secret,
+    runtime: name = "claude",
+  } = agent;
   const root = await suiteDirectory(t, "chuggy-launched-");
   await mkdir(join(root, "minted"));
   const providerCredentialFile = join(root, "claude-code");
-  await writeFile(providerCredentialFile, `${secret}\n`);
-  const plane = await standInPlane(
-    agentAnswer(),
-    checkout.remote,
-    checkout.base,
-  );
+  await writeFile(providerCredentialFile, `${credential}\n`);
+  const plane = await standInPlane(answer, checkout.remote, checkout.base);
   t.after(() => plane.close());
-  const runtime = await standInRuntime(t, runs);
+  const runtime = await standInRuntime(t, runs, name);
   const ran = await launched(
     {
       ...(await carried({ root, plane, providerCredentialFile })),
@@ -5247,6 +5262,166 @@ function envelopeCarried(fields = {}) {
     }),
   });
 }
+
+/**
+ * A pod's task run by Codex, its credential an auth.json, and its runtime found
+ * as Codex is.
+ */
+const codexLaunched = {
+  answer: {
+    ...fetchedAnswer,
+    worker: {
+      ...fetchedAnswer.worker,
+      mode: {
+        type: "SingleAgent",
+        agent: "Codex",
+        model: "gpt-5.3-codex",
+        arguments: [],
+      },
+    },
+    authority: {
+      ...fetchedAnswer.authority,
+      credentials: ["forge", codexAgent.credential],
+    },
+  },
+  credential: JSON.stringify({ OPENAI_API_KEY: secret }),
+  runtime: "codex",
+};
+
+/** `text` as one POSIX shell word. */
+function shellWord(text) {
+  return `'${text.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * The starts of a Codex run: its `--version`, then a process that wrote
+ * half.txt in the tree and the rollout `lines` under its Codex home, wrote
+ * `frames` and exited as told.
+ */
+function codexRuns({ lines, frames = usageLimitFrames, exit = 1 }) {
+  const folder = `"$CODEX_HOME/sessions/${rolloutFolder.join("/")}"`;
+  const rollout =
+    lines === undefined
+      ? []
+      : [
+          `mkdir -p ${folder}`,
+          `printf '%s\\n' ${lines.map(shellWord).join(" ")} > ${folder}/${rolloutName()}`,
+        ];
+  return [
+    { frames: ["codex-cli 0.165.0"] },
+    { work: ["echo half > half.txt", ...rollout].join(" && "), frames, exit },
+  ];
+}
+
+/** A pod launched for real on the Codex `runs`, and the label and the text it ended its run with. */
+async function codexLaunchedEnded(t, runs) {
+  let ended;
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const { ran, plane } = await launchedStandIn(
+      t,
+      checkout,
+      runs,
+      envelopeCarried(),
+      codexLaunched,
+    );
+    assert.equal(ran.code, 1, ran.stderr);
+    const [{ evidence }] = planeBodies(plane, "runEnded");
+    const [uploaded] = planeBodies(plane, "artifact");
+    ended = {
+      evidence,
+      lines: Buffer.from(uploaded).toString("utf8").split("\n"),
+      stderr: ran.stderr,
+    };
+  });
+  return ended;
+}
+
+/**
+ * The Codex limit through a real pod. Catches the run that exited 1 ending
+ * failed and spending a retry, a text that says neither which limit nor when
+ * it resets, and Codex's own message dropped.
+ */
+test("a Codex run its limit stopped ends rate-limited, saying the window, its reset and Codex's message", async (t) => {
+  const { evidence, lines } = await codexLaunchedEnded(
+    t,
+    codexRuns({
+      lines: [
+        rolloutLine(tokenCount(ordinarySnapshot)),
+        rolloutLine(tokenCount(limitSnapshot)),
+        rolloutLine(usageLimitComplete),
+      ],
+    }),
+  );
+
+  assert.equal(evidence, "RunRateLimited");
+  assert.deepEqual(lines.slice(0, 4), [
+    "Codex exited 1",
+    usageLimitSentence,
+    `The seven_day limit resets at ${new Date(weeklyResetsAtSecs * 1_000).toISOString()}.`,
+    "The run was not held: this agent cannot resume a conversation.",
+  ]);
+  assert.match(lines[4], /^The run's work is kept on /u);
+});
+
+test("a Codex limit whose rollout named no reset ends rate-limited, saying the reset is unknown", async (t) => {
+  const { evidence, lines } = await codexLaunchedEnded(
+    t,
+    codexRuns({
+      lines: [
+        rolloutLine(tokenCount(windowlessSnapshot)),
+        rolloutLine(usageLimitComplete),
+      ],
+    }),
+  );
+
+  assert.equal(evidence, "RunRateLimited");
+  assert.deepEqual(lines.slice(0, 4), [
+    "Codex exited 1",
+    usageLimitSentence,
+    "When the limit resets is unknown.",
+    "The run was not held: this agent cannot resume a conversation.",
+  ]);
+});
+
+/** Catches a missing rollout failing the run in its own way, or read as a limit. */
+test("a Codex run with no rollout ends failed as it always did, and the log says why", async (t) => {
+  const { evidence, lines, stderr } = await codexLaunchedEnded(
+    t,
+    codexRuns({}),
+  );
+
+  assert.equal(evidence, "RunFailed");
+  assert.deepEqual(lines.slice(0, 2), ["Codex exited 1", usageLimitSentence]);
+  assert.match(lines[2], /^The run's work is kept on /u);
+  assert.match(stderr, /Codex's rollout of thread .* was not found/u);
+});
+
+/** Catches a run that gave a verdict folded as a hold: a verdict wins, so its rollout is never read. */
+test("a Codex run that gave a verdict is not made rate-limited by its rollout", async (t) => {
+  const verdict = {
+    type: "item.completed",
+    item: {
+      type: "agent_message",
+      text: JSON.stringify({ verdict: "Fail", summary: "ended" }),
+    },
+  };
+
+  const { evidence, lines } = await codexLaunchedEnded(
+    t,
+    codexRuns({
+      lines: [
+        rolloutLine(tokenCount(limitSnapshot)),
+        rolloutLine(usageLimitComplete),
+      ],
+      frames: [usageLimitFrames[0], verdict],
+    }),
+  );
+
+  assert.equal(evidence, "RunFailed");
+  assert.equal(lines[0], "Codex exited 1");
+  assert.ok(!lines.some((line) => line.includes("limit")), lines.join("\n"));
+});
 
 /** What a pushed pod's launcher sets in its environment instead. */
 async function documentCarried({ root, plane, providerCredentialFile }) {

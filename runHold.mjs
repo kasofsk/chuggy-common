@@ -99,18 +99,21 @@ export function runHoldDecided({
 /**
  * The error text of a run that ended without a verdict: `stopped`, how its
  * process ended; `sentence`, what the runtime said of it, scrubbed; and for a
- * limit `decided` did not wait out, which window, when it reopens and why.
+ * limit `decided` did not wait out, which window, when it reopens or that
+ * that is unknown, and why.
  */
 export function runEndedText(stopped, sentence, decided) {
   const reset = decided?.reset;
   return [
     stopped,
     ...(typeof sentence === "string" && sentence.length > 0 ? [sentence] : []),
-    ...(reset === undefined
+    ...(decided === undefined
       ? []
-      : [
-          `The ${reset.window ?? "account's"} limit resets at ${runHoldInstant(reset.resetsAtSecs * 1_000)}.`,
-        ]),
+      : reset === undefined
+        ? ["When the limit resets is unknown."]
+        : [
+            `The ${reset.window ?? "account's"} limit resets at ${runHoldInstant(reset.resetsAtSecs * 1_000)}.`,
+          ]),
     ...(decided === undefined
       ? []
       : [`The run was not held: ${decided.refused}.`]),
