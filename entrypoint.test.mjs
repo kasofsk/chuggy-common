@@ -72,11 +72,13 @@ import {
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import { codexAgent } from "./codex.mjs";
 import {
+  fiveHourResetsAtSecs,
   limitSnapshot,
   ordinarySnapshot,
   rolloutFolder,
   rolloutLine,
   rolloutName,
+  rolloutObservedAtSecs,
   tokenCount,
   usageLimitComplete,
   usageLimitFrames,
@@ -5069,8 +5071,21 @@ test("a held run's totals are of both its processes", async (t) => {
     const [totals] = planeBodies(plane, "runTotals");
     assert.equal(totals.turns, limitResult.num_turns + 2);
     assert.equal(totals.costUsdMicros, 2_500_000);
+    assert.deepEqual(
+      totals.usage,
+      limitUsage(Math.floor(limitStoppedMs / 1_000)),
+    );
   });
 });
+
+/** What `limitRejected`'s windows read as, seen at `observedAt`. */
+function limitUsage(observedAt) {
+  return Object.fromEntries(
+    Object.entries(limitRejected.rate_limit_info.unifiedWindows).map(
+      ([window, reading]) => [window, { ...reading, observedAt }],
+    ),
+  );
+}
 
 /** Catches a resumed process uploading its configuration again, which the plane refuses: `captured` lived for one read of the stream. */
 test("a held run's configuration is uploaded once", async (t) => {
@@ -5313,7 +5328,11 @@ function codexRuns({ lines, frames = usageLimitFrames, exit = 1 }) {
   ];
 }
 
-/** A pod launched for real on the Codex `runs`, and the label and the text it ended its run with. */
+/**
+ * A pod launched for real on the Codex `runs`: the label, and the limit beside
+ * it, it ended its run with, the usage its totals carried, and the text it
+ * ended with.
+ */
 async function codexLaunchedEnded(t, runs) {
   let ended;
   await inCheckout(async (checkout) => {
@@ -5326,10 +5345,13 @@ async function codexLaunchedEnded(t, runs) {
       codexLaunched,
     );
     assert.equal(ran.code, 1, ran.stderr);
-    const [{ evidence }] = planeBodies(plane, "runEnded");
+    const [{ evidence, limit }] = planeBodies(plane, "runEnded");
+    const [{ usage }] = planeBodies(plane, "runTotals");
     const [uploaded] = planeBodies(plane, "artifact");
     ended = {
       evidence,
+      limit,
+      usage,
       lines: Buffer.from(uploaded).toString("utf8").split("\n"),
       stderr: ran.stderr,
     };
@@ -5337,13 +5359,28 @@ async function codexLaunchedEnded(t, runs) {
   return ended;
 }
 
+/** What `limitSnapshot` reads as from a rollout line. */
+const limitSnapshotUsage = {
+  five_hour: {
+    utilization: 1,
+    resetsAt: fiveHourResetsAtSecs,
+    observedAt: rolloutObservedAtSecs,
+  },
+  seven_day: {
+    utilization: 1,
+    resetsAt: weeklyResetsAtSecs,
+    observedAt: rolloutObservedAtSecs,
+  },
+};
+
 /**
  * The Codex limit through a real pod. Catches the run that exited 1 ending
  * failed and spending a retry, a text that says neither which limit nor when
- * it resets, and Codex's own message dropped.
+ * it resets, Codex's own message dropped, and the plane told neither the limit
+ * nor the account's usage.
  */
 test("a Codex run its limit stopped ends rate-limited, saying the window, its reset and Codex's message", async (t) => {
-  const { evidence, lines } = await codexLaunchedEnded(
+  const { evidence, limit, usage, lines } = await codexLaunchedEnded(
     t,
     codexRuns({
       lines: [
@@ -5355,6 +5392,11 @@ test("a Codex run its limit stopped ends rate-limited, saying the window, its re
   );
 
   assert.equal(evidence, "RunRateLimited");
+  assert.deepEqual(limit, {
+    window: "seven_day",
+    resetsAt: weeklyResetsAtSecs,
+  });
+  assert.deepEqual(usage, limitSnapshotUsage);
   assert.deepEqual(lines.slice(0, 4), [
     "Codex exited 1",
     usageLimitSentence,
@@ -5365,7 +5407,7 @@ test("a Codex run its limit stopped ends rate-limited, saying the window, its re
 });
 
 test("a Codex limit whose rollout named no reset ends rate-limited, saying the reset is unknown", async (t) => {
-  const { evidence, lines } = await codexLaunchedEnded(
+  const { evidence, limit, usage, lines } = await codexLaunchedEnded(
     t,
     codexRuns({
       lines: [
@@ -5376,6 +5418,8 @@ test("a Codex limit whose rollout named no reset ends rate-limited, saying the r
   );
 
   assert.equal(evidence, "RunRateLimited");
+  assert.equal(limit, undefined);
+  assert.equal(usage, undefined);
   assert.deepEqual(lines.slice(0, 4), [
     "Codex exited 1",
     usageLimitSentence,
@@ -5397,30 +5441,66 @@ test("a Codex run with no rollout ends failed as it always did, and the log says
   assert.match(stderr, /Codex's rollout of thread .* was not found/u);
 });
 
-/** Catches a run that gave a verdict folded as a hold: a verdict wins, so its rollout is never read. */
-test("a Codex run that gave a verdict is not made rate-limited by its rollout", async (t) => {
-  const verdict = {
-    type: "item.completed",
-    item: {
-      type: "agent_message",
-      text: JSON.stringify({ verdict: "Fail", summary: "ended" }),
-    },
-  };
-
-  const { evidence, lines } = await codexLaunchedEnded(
+/**
+ * Catches a run that gave a verdict folded as a hold, and its account's usage
+ * left unsent: a verdict wins, so its rollout is read for usage alone.
+ */
+test("a Codex run that gave a verdict is not made rate-limited by its rollout, and sends its usage", async (t) => {
+  const { evidence, limit, usage, lines } = await codexLaunchedEnded(
     t,
     codexRuns({
       lines: [
         rolloutLine(tokenCount(limitSnapshot)),
         rolloutLine(usageLimitComplete),
       ],
-      frames: [usageLimitFrames[0], verdict],
+      frames: [usageLimitFrames[0], codexVerdict("Fail")],
     }),
   );
 
   assert.equal(evidence, "RunFailed");
+  assert.equal(limit, undefined);
+  assert.deepEqual(usage, limitSnapshotUsage);
   assert.equal(lines[0], "Codex exited 1");
   assert.ok(!lines.some((line) => line.includes("limit")), lines.join("\n"));
+});
+
+/** Codex's last message, giving `verdict`. */
+function codexVerdict(verdict) {
+  return {
+    type: "item.completed",
+    item: {
+      type: "agent_message",
+      text: JSON.stringify({ verdict, summary: "ended" }),
+    },
+  };
+}
+
+/** Catches a passed run's rollout left unread, which would send the plane no reading of an account it spent. */
+test("a Codex run that passed sends its account's usage on its totals", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const { ran, plane } = await launchedStandIn(
+      t,
+      checkout,
+      codexRuns({
+        lines: [rolloutLine(tokenCount(ordinarySnapshot))],
+        frames: [usageLimitFrames[0], codexVerdict("Pass")],
+        exit: 0,
+      }),
+      envelopeCarried(),
+      codexLaunched,
+    );
+
+    assert.equal(ran.code, 0, ran.stderr);
+    assert.equal(planeBodies(plane, "report")[0]?.verdict, "Pass");
+    assert.deepEqual(planeBodies(plane, "runTotals")[0]?.usage, {
+      seven_day: {
+        utilization: 0.125,
+        resetsAt: ordinarySnapshot.secondary.resets_at,
+        observedAt: rolloutObservedAtSecs,
+      },
+    });
+  });
 });
 
 /** What a pushed pod's launcher sets in its environment instead. */
@@ -5456,15 +5536,30 @@ test(
     await inCheckout(async (checkout) => {
       await targetPushed(checkout);
 
+      const launchedSecs = Math.floor(Date.now() / 1_000);
       const { ran, plane, runtime } = await launchedStandIn(
         t,
         checkout,
         [limitRun()],
         documentCarried,
       );
+      const endedSecs = Math.floor(Date.now() / 1_000);
 
       assert.equal(ran.code, 1, ran.stderr);
       assert.equal((await runtime.starts()).length, 1);
+      assert.deepEqual(planeBodies(plane, "runEnded"), [
+        {
+          evidence: "RunRateLimited",
+          limit: { window: "five_hour", resetsAt: limitResetsAtSecs },
+        },
+      ]);
+      const [{ usage }] = planeBodies(plane, "runTotals");
+      const observedAt = usage?.five_hour?.observedAt ?? 0;
+      assert.ok(
+        observedAt >= launchedSecs && observedAt <= endedSecs,
+        String(observedAt),
+      );
+      assert.deepEqual(usage, limitUsage(observedAt));
       const [uploaded] = planeBodies(plane, "artifact");
       assert.match(
         Buffer.from(uploaded).toString("utf8"),

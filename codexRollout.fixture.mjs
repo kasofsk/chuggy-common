@@ -25,10 +25,16 @@ export function rolloutName(thread = rolloutThread) {
 /** The date folders under a Codex home's `sessions` a rollout is written in. */
 export const rolloutFolder = ["2026", "11", "02"];
 
-/** One persisted event's line. */
-export function rolloutLine(payload) {
+/** When a line was persisted, as Codex writes it: UTC, to the millisecond. */
+export const rolloutTimestamp = "2026-11-02T21:14:03.250Z";
+
+/** The Unix second `rolloutTimestamp` falls in. */
+export const rolloutObservedAtSecs = 1_793_654_043;
+
+/** One persisted event's line, persisted at `timestamp`. */
+export function rolloutLine(payload, timestamp = rolloutTimestamp) {
   return JSON.stringify({
-    timestamp: "2026-11-02T21:14:03.000Z",
+    timestamp,
     ordinal: 7,
     type: "event_msg",
     payload,

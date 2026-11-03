@@ -14,16 +14,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { workerRunUsageSchema } from "@chuggy/worker-contract/workerPlane";
+
 import {
   fiveHourResetsAtSecs,
   limitSnapshot,
   ordinarySnapshot,
+  rolloutObservedAtSecs,
+  rolloutTimestamp,
   weeklyResetsAtSecs,
   windowlessSnapshot,
 } from "./codexRollout.fixture.mjs";
 import {
+  observeCodexReadings,
   observeCodexRollout,
   observeRateLimit,
+  observeRateLimitReadings,
+  rateLimitReadings,
   rateLimitSightings,
   rateLimited,
 } from "./rateLimit.mjs";
@@ -366,4 +373,323 @@ test("a Codex limit with no used-up window naming a reset has no reset", () => {
     assert.equal(rateLimited(seen), true);
     assert.equal(seen.reset, undefined, JSON.stringify(snapshot));
   }
+});
+
+/** When the frames below were seen, a moment past a whole second, and that second. */
+const seenAtMs = 1_793_250_000_750;
+const seenAtSecs = 1_793_250_000;
+
+/** The readings a run that saw these frames, each at `seenAtMs`, ends with, held to the contract. */
+function readBy(...events) {
+  const readings = events.reduce(
+    (held, event) => observeRateLimitReadings(held, event, seenAtMs),
+    rateLimitReadings(),
+  );
+  assert.ok(workerRunUsageSchema.safeParse(readings).success);
+  return readings;
+}
+
+/** A rate-limit frame carrying `unifiedWindows`, and a status that refuses nothing. */
+function windowsFrame(unifiedWindows) {
+  return {
+    type: "rate_limit_event",
+    rate_limit_info: { status: "allowed", unifiedWindows },
+  };
+}
+
+test("a rate-limit frame's windows are read, each dated when the frame was seen", () => {
+  assert.deepEqual(readBy(limitRejected), {
+    five_hour: {
+      utilization: 1,
+      resetsAt: limitResetsAtSecs,
+      observedAt: seenAtSecs,
+    },
+    seven_day: {
+      utilization: 0.5,
+      resetsAt: 1_793_764_800,
+      observedAt: seenAtSecs,
+    },
+  });
+});
+
+test("a frame naming one window reads that window alone", () => {
+  assert.deepEqual(
+    readBy(
+      windowsFrame({ five_hour: { utilization: 0.24, resetsAt: 1793251800 } }),
+    ),
+    {
+      five_hour: {
+        utilization: 0.24,
+        resetsAt: 1793251800,
+        observedAt: seenAtSecs,
+      },
+    },
+  );
+});
+
+/** Catches a malformed field failing the fold, or read as a window. */
+test("windows that are not an object are none", () => {
+  for (const unifiedWindows of [
+    undefined,
+    null,
+    "five_hour",
+    0.9,
+    true,
+    [{ utilization: 0.5, resetsAt: 1793251800 }],
+  ])
+    assert.deepEqual(
+      readBy(windowsFrame(unifiedWindows)),
+      {},
+      String(unifiedWindows),
+    );
+  assert.deepEqual(readBy({ type: "rate_limit_event" }), {});
+});
+
+/** Catches a window the contract does not name sent, which it would refuse. */
+test("a window that is neither of the two is passed over, and the others still read", () => {
+  assert.deepEqual(
+    readBy(
+      windowsFrame({
+        seven_day_opus: { utilization: 0.9, resetsAt: 1793800800 },
+        overage: { utilization: 0.1, resetsAt: 1793800800 },
+        seven_day: { utilization: 0.2, resetsAt: 1793800800 },
+      }),
+    ),
+    {
+      seven_day: {
+        utilization: 0.2,
+        resetsAt: 1793800800,
+        observedAt: seenAtSecs,
+      },
+    },
+  );
+});
+
+test("a reading's reset is floored to its second", () => {
+  assert.equal(
+    readBy(
+      windowsFrame({ five_hour: { utilization: 0.3, resetsAt: 1793251800.9 } }),
+    ).five_hour?.resetsAt,
+    1793251800,
+  );
+});
+
+/** Catches a reading the contract would refuse sent, losing the run's totals with it. */
+test("a reading with any part the contract would refuse is passed over", () => {
+  for (const reading of [
+    { utilization: 0.3, resetsAt: 0.5 },
+    { utilization: 0.3, resetsAt: 0 },
+    { utilization: 0.3, resetsAt: -1793251800 },
+    { utilization: 0.3, resetsAt: 8_640_000_000_001 },
+    { utilization: 0.3, resetsAt: "1793251800" },
+    { utilization: 0.3 },
+    { utilization: -0.01, resetsAt: 1793251800 },
+    { utilization: 100.5, resetsAt: 1793251800 },
+    { utilization: "0.3", resetsAt: 1793251800 },
+    { resetsAt: 1793251800 },
+    null,
+    "full",
+  ])
+    assert.deepEqual(
+      readBy(windowsFrame({ five_hour: reading })),
+      {},
+      JSON.stringify(reading),
+    );
+});
+
+test("a frame seen at no second the contract takes gives no reading", () => {
+  assert.deepEqual(
+    observeRateLimitReadings(rateLimitReadings(), limitRejected, 999),
+    {},
+  );
+});
+
+/** Catches the declared top-level `utilization` read, whose scale nothing establishes. */
+test("a frame's own utilization is not a reading", () => {
+  assert.deepEqual(
+    readBy({
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status: "allowed_warning",
+        rateLimitType: "five_hour",
+        utilization: 80,
+        resetsAt: 1793251800,
+      },
+    }),
+    {},
+  );
+});
+
+test("each window keeps the latest reading of it, and one the frame passed over keeps the last", () => {
+  assert.deepEqual(
+    readBy(
+      limitRejected,
+      windowsFrame({
+        five_hour: { utilization: 0.1, resetsAt: 1793300000 },
+        seven_day: { utilization: 0.6, resetsAt: -1 },
+      }),
+    ),
+    {
+      five_hour: {
+        utilization: 0.1,
+        resetsAt: 1793300000,
+        observedAt: seenAtSecs,
+      },
+      seven_day: {
+        utilization: 0.5,
+        resetsAt: 1_793_764_800,
+        observedAt: seenAtSecs,
+      },
+    },
+  );
+});
+
+test("only a rate-limit frame carries readings", () => {
+  assert.deepEqual(
+    readBy({
+      type: "assistant",
+      rate_limit_info: limitRejected.rate_limit_info,
+    }),
+    {},
+  );
+});
+
+/** Catches a refusal's sightings changed by the readings, or a reading made of a refusal. */
+test("readings and sightings are folded apart", () => {
+  const sightings = observeRateLimit(rateLimitSightings(), limitRejected);
+  assert.deepEqual(Object.keys(sightings).sort(), [
+    "refused",
+    "reset",
+    "status",
+  ]);
+  assert.deepEqual(
+    observeRateLimitReadings(
+      rateLimitReadings(),
+      {
+        type: "rate_limit_event",
+        rate_limit_info: { status: "rejected", resetsAt: 1793251800 },
+      },
+      seenAtMs,
+    ),
+    {},
+  );
+});
+
+/** The readings a Codex rollout's `snapshot`, its line dated `snapshotTimestamp`, gives, held to the contract. */
+function codexReadBy(
+  snapshot,
+  dated = { snapshotTimestamp: rolloutTimestamp },
+) {
+  const readings = observeCodexReadings(rateLimitReadings(), {
+    snapshot,
+    ...dated,
+    errorInfo: undefined,
+  });
+  assert.ok(workerRunUsageSchema.safeParse(readings).success);
+  return readings;
+}
+
+test("a Codex snapshot's windows are read by their length, as fractions, dated by its line", () => {
+  assert.deepEqual(codexReadBy(limitSnapshot), {
+    five_hour: {
+      utilization: 1,
+      resetsAt: fiveHourResetsAtSecs,
+      observedAt: rolloutObservedAtSecs,
+    },
+    seven_day: {
+      utilization: 1,
+      resetsAt: weeklyResetsAtSecs,
+      observedAt: rolloutObservedAtSecs,
+    },
+  });
+});
+
+/** Catches a percentage sent as a fraction, which would pause the account for a whole window. */
+test("a Codex window of another length is passed over, and a percent is read as its fraction", () => {
+  assert.deepEqual(codexReadBy(ordinarySnapshot), {
+    seven_day: {
+      utilization: 0.125,
+      resetsAt: 1_800_100_000,
+      observedAt: rolloutObservedAtSecs,
+    },
+  });
+  assert.deepEqual(
+    codexReadBy({
+      primary: { used_percent: 250, window_minutes: 300, resets_at: 1 },
+    }).five_hour?.utilization,
+    2.5,
+  );
+});
+
+test("a Codex window naming no reset is passed over", () => {
+  assert.deepEqual(
+    codexReadBy({
+      ...limitSnapshot,
+      primary: { ...limitSnapshot.primary, resets_at: null },
+    }),
+    {
+      seven_day: {
+        utilization: 1,
+        resetsAt: weeklyResetsAtSecs,
+        observedAt: rolloutObservedAtSecs,
+      },
+    },
+  );
+  assert.deepEqual(codexReadBy(windowlessSnapshot), {});
+  assert.deepEqual(codexReadBy(undefined), {});
+});
+
+test("where both Codex windows are one length, the one reopening later is read", () => {
+  const earlier = {
+    used_percent: 90,
+    window_minutes: 300,
+    resets_at: 1_793_600_000,
+  };
+  const later = {
+    used_percent: 10,
+    window_minutes: 300,
+    resets_at: 1_793_610_000,
+  };
+  for (const [primary, secondary] of [
+    [earlier, later],
+    [later, earlier],
+  ])
+    assert.deepEqual(codexReadBy({ primary, secondary }), {
+      five_hour: {
+        utilization: 0.1,
+        resetsAt: 1_793_610_000,
+        observedAt: rolloutObservedAtSecs,
+      },
+    });
+});
+
+test("a Codex snapshot is dated by its line's timestamp floored to its second, or not read without one", () => {
+  assert.equal(
+    codexReadBy(limitSnapshot, {
+      snapshotTimestamp: "2026-11-02T21:14:03.999Z",
+    }).five_hour?.observedAt,
+    rolloutObservedAtSecs,
+  );
+  for (const timestamp of [
+    undefined,
+    1_793_654_043,
+    "2026-11-02 21:14:03",
+    "2026-11-02T21:14:03.000+01:00",
+    "1970-01-01T00:00:00.500Z",
+  ])
+    assert.deepEqual(
+      codexReadBy(limitSnapshot, { snapshotTimestamp: timestamp }),
+      {},
+      String(timestamp),
+    );
+});
+
+test("a Codex snapshot's used percent past what the contract takes is passed over", () => {
+  assert.deepEqual(
+    codexReadBy({
+      primary: { used_percent: 10_001, window_minutes: 300, resets_at: 1 },
+      secondary: { used_percent: -1, window_minutes: 10_080, resets_at: 1 },
+    }),
+    {},
+  );
 });

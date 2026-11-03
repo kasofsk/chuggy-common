@@ -33,13 +33,18 @@ import {
   runTranscriptBatchBytesMax,
   runTranscriptBatchesMax,
   runTurnSeriesMax,
+  runUsageWindows,
   workerPlaneBytesMediaType,
   workerPlaneRoutes,
 } from "@chuggy/worker-contract/workerPlane";
 
 import {
+  observeCodexReadings,
   observeCodexRollout,
   observeRateLimit,
+  observeRateLimitReadings,
+  rateLimitInstantSecs,
+  rateLimitReadings,
   rateLimitSightings,
   rateLimited,
 } from "./rateLimit.mjs";
@@ -459,6 +464,51 @@ export function endedEvidence(result, planeRefused, sightings, step) {
   return planeRefused === true ? runUploadRefused : runFailed;
 }
 
+/** The account's usage as a run's totals carry it, or nothing where no window was read. */
+export function runUsage(readings) {
+  const windows = runUsageWindows.filter(
+    (window) => readings?.[window] !== undefined,
+  );
+  if (windows.length === 0) return undefined;
+  return Object.fromEntries(
+    windows.map((window) => [window, { ...readings[window] }]),
+  );
+}
+
+/**
+ * The limit a run's end carries from the reset its sightings hold, each of
+ * its fields where the contract takes it, or nothing where it takes neither.
+ */
+export function runLimit(reset) {
+  const resetsAt = rateLimitInstantSecs(reset?.resetsAtSecs);
+  const window = runUsageWindows.find((named) => named === reset?.window);
+  if (resetsAt === undefined && window === undefined) return undefined;
+  return {
+    ...(window === undefined ? {} : { window }),
+    ...(resetsAt === undefined ? {} : { resetsAt }),
+  };
+}
+
+/** What a run's end posts: its label, and beside `RunRateLimited` the limit that stopped it. */
+function runEndedBody(state, step) {
+  const evidence = endedEvidence(
+    state.result,
+    state.planeRefused,
+    state.sightings,
+    step,
+  );
+  const limit =
+    evidence === runRateLimited ? runLimit(state.sightings.reset) : undefined;
+  return limit === undefined ? { evidence } : { evidence, limit };
+}
+
+/** What a run's totals post: what it spent, and the account's usage where any was read. */
+function runTotalsBody(state) {
+  const totals = runTotalsSoFar(state);
+  const usage = runUsage(state.readings);
+  return usage === undefined ? totals : { ...totals, usage };
+}
+
 function transcriptTruncationLine(batches) {
   return JSON.stringify({ type: "chuggy_transcript_truncated", batches });
 }
@@ -489,6 +539,7 @@ function evidenceState(scrub) {
     carried: undefined,
     turnsCarried: 0,
     sightings: rateLimitSightings(),
+    readings: rateLimitReadings(),
     totalsPosted: false,
     flushing: undefined,
   };
@@ -642,7 +693,7 @@ function evidenceUploads(state, call, warn, drain, done) {
         await call(workerPlaneRoutes.runTotals.path, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(runTotalsSoFar(state)),
+          body: JSON.stringify(runTotalsBody(state)),
         });
       } catch (failure) {
         refuse(state, warn, "run totals", failure);
@@ -653,14 +704,7 @@ function evidenceUploads(state, call, warn, drain, done) {
       await call(workerPlaneRoutes.runEnded.path, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          evidence: endedEvidence(
-            state.result,
-            state.planeRefused,
-            state.sightings,
-            step,
-          ),
-        }),
+        body: JSON.stringify(runEndedBody(state, step)),
       });
     },
     stop: done,
@@ -670,7 +714,7 @@ function evidenceUploads(state, call, warn, drain, done) {
 /**
  * The worker's evidence client: it buffers the stream, ships it on the flush
  * interval and posts the run's totals before anything terminalizes the
- * execution.
+ * execution. `now` is the clock a reading is dated by.
  */
 export function runEvidenceRecorder(task, bearer, scrub, services = {}) {
   const {
@@ -678,6 +722,7 @@ export function runEvidenceRecorder(task, bearer, scrub, services = {}) {
     setInterval: schedule = globalThis.setInterval,
     clearInterval: unschedule = globalThis.clearInterval,
     warn = (text) => process.stderr.write(text),
+    now = Date.now,
   } = services;
   const state = evidenceState(scrub);
   const call = (path, init) => request(task, bearer, path, init);
@@ -704,6 +749,7 @@ export function runEvidenceRecorder(task, bearer, scrub, services = {}) {
     ...evidenceUploads(state, call, warn, drain, () => unschedule(timer)),
     record(line, event) {
       observeRateLimit(state.sightings, event);
+      observeRateLimitReadings(state.readings, event, now());
       append(state.scrub(truncatedEvent(line)));
       const marker = foldTurn(state, event);
       if (marker !== undefined) append(marker);
@@ -715,6 +761,10 @@ export function runEvidenceRecorder(task, bearer, scrub, services = {}) {
     rolloutObserved(declared) {
       observeCodexRollout(state.sightings, declared);
     },
+    /** What a Codex rollout declared of the account's usage, folded into the readings. */
+    rolloutUsageObserved(declared) {
+      observeCodexReadings(state.readings, declared);
+    },
     sightings: () => state.sightings,
     /** The line saying the run is held, written to the transcript and answered for the log. */
     held(hold) {
@@ -725,7 +775,8 @@ export function runEvidenceRecorder(task, bearer, scrub, services = {}) {
     /**
      * A resumed process starting: what the one before it spent is carried, and
      * what it saw of the limit is dropped, since that hold is over and this
-     * process's end is its own.
+     * process's end is its own. Its readings stand until a later one replaces
+     * them.
      */
     resumed() {
       state.carried = runTotalsSoFar(state);
