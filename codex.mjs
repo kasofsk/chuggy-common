@@ -254,7 +254,7 @@ function codexEnded(_resultEvent, folded) {
   return { sentence: folded?.sentence, session: undefined };
 }
 
-/** What the run's rollout, under the Codex home it was started with, declared of a limit. */
+/** What the run's rollout, under the Codex home it was started with, declared of its usage and a limit. */
 function codexDeclared(folded, environment, warn) {
   return codexRolloutRead({
     home: environment.CODEX_HOME,

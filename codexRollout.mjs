@@ -1,7 +1,8 @@
 /**
- * What a Codex run persisted of the limit that stopped it: the fields of its
- * rollout `rateLimit.mjs` reads, which `codex exec --json` drops from the
- * stream.
+ * What a Codex run persisted of its account's usage and of a limit that
+ * stopped it: the fields of its rollout `rateLimit.mjs` reads, with the
+ * snapshot line's `timestamp`, which `codex exec --json` drops from the
+ * stream. It is read after every Codex run.
  *
  * THE FILE IS FOUND BY ITS THREAD ID, never by a date path built here. Codex
  * writes it as `sessions/YYYY/MM/DD/rollout-<timestamp>-<thread id>.jsonl`
