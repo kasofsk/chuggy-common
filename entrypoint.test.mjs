@@ -7155,3 +7155,207 @@ test("a hook setup installs refuses neither a keep nor the restore after it", as
     assert.match(argv.at(-1), /## Unfinished work from an earlier attempt/u);
   });
 });
+
+/** A commit of `files` on the checkout's `HEAD`, left as `HEAD` and named. */
+async function committedFiles(directory, files, message) {
+  for (const [path, content] of Object.entries(files))
+    await writeFile(join(directory, path), content);
+  await git("git", ["add", "--all"], { cwd: directory });
+  await git("git", [...author, "commit", "-m", message], { cwd: directory });
+  return headOf(directory);
+}
+
+/** A plane serving one commanded task of `taskKind` that leaves a file where its command runs, and an input pinning `base` of `remote` beside `references`. */
+function recheckPlane(taskKind, remote, base, references) {
+  return servedPlane((route) => {
+    switch (route) {
+      case "task":
+        return {
+          status: 200,
+          body: workTaskAnswerSchema.parse({
+            ...fetchedAnswer,
+            taskKind,
+            worker: {
+              mode: {
+                type: "Commands",
+                commands: ["echo ran > workload-ran"],
+              },
+              setup: [],
+              files: [],
+            },
+          }),
+        };
+      case "input": {
+        const input = inputAnswer(remote, base);
+        input.body.references.push(
+          ...references.map((entry, index) => ({
+            ordinal: 3 + index,
+            ...entry,
+          })),
+        );
+        return input;
+      }
+      case "credential":
+        return {
+          status: 200,
+          body: { ...minted, expiresAtMs: 1_900_000_000_000 },
+        };
+      case "report":
+        return { status: 202, body: { action: "stop" } };
+      default:
+        return { status: 204 };
+    }
+  });
+}
+
+/**
+ * One commanded attempt at a task of `taskKind` in a real checkout whose target
+ * is `base` after `build` has made it and returned the commit a re-check names,
+ * over a plane whose input carries `references(recheck, base)`: the report the
+ * plane took, whether the workload ran, and the commit's parents.
+ */
+async function recheckAttempt(taskKind, build, references) {
+  let outcome;
+  await inCheckout(async ({ remote, directory, base: origin }) => {
+    await git("git", ["push", remote, `${origin}:refs/heads/main`], {
+      cwd: directory,
+    });
+    const { base, recheck } = await build(directory, origin);
+    await git("git", ["checkout", "--detach", base], { cwd: directory });
+    const plane = await recheckPlane(taskKind, remote, base, [
+      ...references(recheck, base),
+    ]);
+    const root = await mkdtemp(join(tmpdir(), "chuggy-recheck-"));
+    try {
+      const served = { ...envelope, callbackUrl: plane.url };
+      const { task } = await envelopeTask(served);
+      await workerAttempt(envelopeLaunch(served, task), {
+        minted: root,
+        write: async () => undefined,
+        clone: async () => directory,
+      });
+      const report = plane.requests.find(
+        ({ route }) => route === "report",
+      ).body;
+      const commit = report.source?.commit;
+      outcome = {
+        report,
+        ran: await readFile(join(directory, "workload-ran"), "utf8").then(
+          () => true,
+          () => false,
+        ),
+        refs: await remoteRefs(remote),
+        base,
+        recheck,
+        tree: (
+          await git("git", ["rev-parse", "HEAD^{tree}"], { cwd: directory })
+        ).stdout.trim(),
+        parents:
+          commit === undefined
+            ? undefined
+            : (
+                await git("git", ["rev-list", "--parents", "-n", "1", commit], {
+                  cwd: directory,
+                })
+              ).stdout
+                .trim()
+                .split(" ")
+                .slice(1),
+      };
+    } finally {
+      await plane.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  return outcome;
+}
+
+/** The accepted commit already holds the target: target T, accepted A above it. */
+async function recheckContained(directory) {
+  const base = await committedFiles(directory, { "target.txt": "t\n" }, "t");
+  const recheck = await committedFiles(directory, { "a.txt": "a\n" }, "a");
+  return { base, recheck };
+}
+
+/** The target moved past the base the accepted commit started from, without touching its files. */
+async function recheckMoved(directory, origin) {
+  const recheck = await committedFiles(directory, { "a.txt": "a\n" }, "a");
+  await git("git", ["checkout", "--detach", origin], { cwd: directory });
+  const base = await committedFiles(directory, { "target.txt": "t\n" }, "t");
+  return { base, recheck };
+}
+
+/** The target moved and changed what the accepted commit changed. */
+async function recheckConflicting(directory, origin) {
+  const recheck = await committedFiles(directory, { "README.md": "a\n" }, "a");
+  await git("git", ["checkout", "--detach", origin], { cwd: directory });
+  const base = await committedFiles(directory, { "README.md": "t\n" }, "t");
+  return { base, recheck };
+}
+
+const recheckReference = (recheck) => [{ kind: "Recheck", reference: recheck }];
+
+/**
+ * Catches a re-check that runs the workload where the accepted commit already
+ * holds the target, or reports anything but that commit as the source.
+ */
+test("a Recheck whose commit already holds the target re-reports it and runs no workload", async () => {
+  const run = await recheckAttempt("Work", recheckContained, recheckReference);
+
+  assert.equal(run.ran, false);
+  assert.equal(run.report.verdict, "Pass");
+  assert.equal(run.report.source.commit, run.recheck);
+  assert.equal(run.report.source.base, run.base);
+  assert.match(run.refs, new RegExp(run.recheck, "u"));
+});
+
+/**
+ * Catches a moved target left unmerged, a merge that is not a merge commit, or
+ * a workload run for it.
+ */
+test("a Recheck whose target moved reports a --no-ff merge of the target into it and runs no workload", async () => {
+  const run = await recheckAttempt("Work", recheckMoved, recheckReference);
+
+  assert.equal(run.ran, false);
+  assert.equal(run.report.verdict, "Pass");
+  assert.deepEqual(run.parents.toSorted(), [run.base, run.recheck].toSorted());
+});
+
+/**
+ * Catches a conflicting re-check reported, or one that leaves the workspace
+ * anywhere but at the target the workload then starts from.
+ */
+test("a Recheck whose merge conflicts falls through to the workload at the target", async () => {
+  const run = await recheckAttempt(
+    "Work",
+    recheckConflicting,
+    recheckReference,
+  );
+
+  assert.equal(run.ran, true);
+  assert.equal(run.report.verdict, "Pass");
+  assert.deepEqual(run.parents, [run.base]);
+});
+
+/** Catches a re-check inferred from the commits' shape rather than named. */
+test("a work task without a Recheck reference runs its workload though the target is contained", async () => {
+  const run = await recheckAttempt("Work", recheckContained, () => []);
+
+  assert.equal(run.ran, true);
+  assert.notEqual(run.report.source.commit, run.recheck);
+});
+
+/** Catches a tree reported without the reference, or none reported with it. */
+test("an evaluation reports the tree it evaluated only when its input carries an ExpectedTree", async () => {
+  const named = await recheckAttempt("Evaluation", recheckContained, () => [
+    { kind: "ExpectedTree", reference: "f".repeat(40) },
+  ]);
+  const unnamed = await recheckAttempt(
+    "Evaluation",
+    recheckContained,
+    () => [],
+  );
+
+  assert.equal(named.report.evaluatedTree, named.tree);
+  assert.ok(!Object.hasOwn(unnamed.report, "evaluatedTree"));
+});

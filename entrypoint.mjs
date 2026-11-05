@@ -175,6 +175,7 @@ import {
   commitAndPushSource,
   resultDocument,
   sourceCheckpointRestored,
+  sourceRechecked,
   sourceRestoredBriefed,
 } from "./source.mjs";
 import {
@@ -254,6 +255,29 @@ const changeBaseKind = "ChangeBase";
 
 /** A full commit hash, in either of the object formats git names a commit in. */
 const changeBaseCommit = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
+
+/** The input references naming the tree an evaluation must evaluate, and the accepted commit a re-check re-reports. */
+const expectedTreeKind = "ExpectedTree";
+const recheckKind = "Recheck";
+
+/** The one reference of `kind` the bundle carries, or nothing. */
+function optionalReference(input, kind) {
+  const named = input.references.filter((reference) => reference.kind === kind);
+  if (named.length > 1)
+    throw new Error(`input bundle must carry at most one ${kind}`);
+  return named[0]?.reference;
+}
+
+/**
+ * The accepted commit a contained re-check re-reports: what a `Recheck`
+ * reference names, where it is a full hash. Nothing else asks for one.
+ */
+function workerRecheck(input) {
+  const named = optionalReference(input, recheckKind);
+  return named !== undefined && changeBaseCommit.test(named)
+    ? named
+    : undefined;
+}
 
 /**
  * The commit the change started from, as the input bundle pinned it, or
@@ -1247,6 +1271,7 @@ export async function workerWorkspace(
     );
   const changeBase = await workerChangeBase(input, directory);
   const images = ticketImageReferences(input);
+  const recheck = workerRecheck(input);
   return {
     repositoryId,
     repository,
@@ -1255,6 +1280,10 @@ export async function workerWorkspace(
     environment,
     ...(refresh === undefined ? {} : { refresh, refreshApart }),
     ...(changeBase === undefined ? {} : { changeBase }),
+    ...(recheck === undefined ? {} : { recheck }),
+    ...(optionalReference(input, expectedTreeKind) === undefined
+      ? {}
+      : { evaluatesTree: true }),
     ...(images.length === 0 ? {} : { images }),
   };
 }
@@ -1655,6 +1684,18 @@ export async function workerHeldCredentials({
 }
 
 /**
+ * The git tree the workspace's `HEAD` holds, read once before an evaluator
+ * starts, where the input bundle named a tree to evaluate; nothing otherwise.
+ */
+async function workerEvaluatedTree(workspace) {
+  if (!workspace.evaluatesTree) return undefined;
+  const { stdout } = await command("git", ["rev-parse", "HEAD^{tree}"], {
+    cwd: workspace.directory,
+  });
+  return stdout.trim();
+}
+
+/**
  * What one attempt does in the workspace it cloned, every git it runs handed
  * `git` and every shell told which job it is in and handed its held
  * credentials' files: its setup, what an earlier attempt left put back on top
@@ -1669,21 +1710,23 @@ async function workerAttemptWorked(attempt, workspace, git) {
     job: workerJobEnvironment(task, workspace.repositoryId),
     git,
   };
-  const setupEnvironment = await prepareWorker(
-    task,
-    workspace.directory,
-    handed,
-  );
   const aside = {
     clock: attempt.clock,
     runDeadlineMs: attempt.runDeadlineMs,
     asideCapMs: attempt.asideCapMs,
   };
+  if (await workerRecheckPublished(attempt, workspace, git, aside)) return;
+  const setupEnvironment = await prepareWorker(
+    task,
+    workspace.directory,
+    handed,
+  );
   const working = { task, held: attempt.held, scrub, git, ...aside };
   const restored = await workCheckpointRestored(working, workspace);
   const { keep, keepAgain } = workKeptOnce(() =>
     workCheckpointed(working, workspace),
   );
+  const evaluatedTree = await workerEvaluatedTree(workspace);
   const run = await runWorkerTask(
     {
       task,
@@ -1717,11 +1760,61 @@ async function workerAttemptWorked(attempt, workspace, git) {
       git,
       stopLease: attempt.stopLease,
       request: workerRequest,
+      evaluatedTree,
       ...aside,
     },
     workspace,
     run,
   );
+}
+
+/** Where a contained re-check's note is uploaded. */
+const recheckDiagnosticPath = ".chuggy/recheck-output.json";
+
+/**
+ * Whether the attempt was a contained re-check, reported as one: the accepted
+ * commit re-reported as the source, itself or merged with the target, and no
+ * workload run. False where the task is not a work task whose input named a
+ * `Recheck`, and where the workspace could not be put on one, in which case it
+ * is at its base and the workload runs as it would have.
+ */
+async function workerRecheckPublished(attempt, workspace, git, aside) {
+  const { task, bearer, evidence, scrub } = attempt;
+  if (task.taskKind !== "Work" || workspace.recheck === undefined) return false;
+  const made = await sourceRechecked({
+    base: workspace.base,
+    recheck: workspace.recheck,
+    directory: workspace.directory,
+    command,
+    git,
+  });
+  if (made === undefined) return false;
+  await publishWorkerResult(
+    {
+      task,
+      bearer,
+      evidence,
+      scrub,
+      held: attempt.held,
+      git,
+      stopLease: attempt.stopLease,
+      request: workerRequest,
+      ...aside,
+    },
+    workspace,
+    {
+      output: { recheck: made },
+      result: {
+        verdict: "Pass",
+        summary:
+          made === "contained"
+            ? "Re-check: the accepted commit already contained the target, so it is re-reported and no workload ran."
+            : "Re-check: the target was merged into the accepted commit, and no workload ran.",
+      },
+      diagnosticPath: recheckDiagnosticPath,
+    },
+  );
+  return true;
 }
 
 /**
@@ -1874,6 +1967,9 @@ export async function publishWorkerResult(
       report: reportSummary(result.summary, context.scrub, kept),
       handoffs: [],
       ...(source === undefined ? {} : { source }),
+      ...(context.evaluatedTree === undefined
+        ? {}
+        : { evaluatedTree: context.evaluatedTree }),
       diagnostics,
     });
     await clearing?.clear();
