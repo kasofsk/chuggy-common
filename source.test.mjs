@@ -45,6 +45,7 @@ import {
   sourceCheckpointDeleted,
   sourceCheckpointRestored,
   sourceCheckpointSeen,
+  sourceConflictsLeft,
   sourcePushPlacingVariables,
   sourceRestoredBriefed,
   sourceSecretReader,
@@ -75,15 +76,18 @@ function gitVerb(args) {
 /**
  * A stand-in git that records each call in `calls` and answers it as
  * `answer` does where `answer` answers anything; otherwise `rev-parse` with a
- * workspace's object directory where it asks for one and `stubbedCommit`
- * where it does not, `init` as git itself does, since the push is made from
- * the repository it makes, and anything else with nothing.
+ * workspace's object directory where it asks for one, a failure where it
+ * asks for `MERGE_HEAD`, as git's is where no merge is in progress, and
+ * `stubbedCommit` otherwise, `init` as git itself does, since the push is made
+ * from the repository it makes, and anything else with nothing.
  */
 function stubbedGit(calls, answer = async () => undefined) {
   return async (executable, args, options) => {
     calls.push({ executable, args, options });
     const answered = await answer(args, options);
     if (answered !== undefined) return answered;
+    if (args.includes("MERGE_HEAD"))
+      throw Object.assign(new Error(), { code: 1 });
     if (gitVerb(args) === "init")
       return git(executable, args, {
         ...options,
@@ -2361,5 +2365,62 @@ test("no hook of the project's runs putting a stopped restore back", async () =>
 
     await assert.rejects(stat(ran), { code: "ENOENT" });
     assert.equal(await headOf(clone), checkout.base);
+  });
+});
+
+/**
+ * `checkout`'s workspace stopped partway through a merge of a branch that
+ * changed README.md the other way, `resolved` by a `git add` of the file with
+ * its markers still in it where asked.
+ */
+async function mergeStopped({ directory, base }, resolved = false) {
+  await git("git", ["checkout", "--quiet", "-b", "other", base], {
+    cwd: directory,
+  });
+  await writeFile(join(directory, "README.md"), "theirs\n");
+  await git("git", [...author, "commit", "--quiet", "-am", "theirs"], {
+    cwd: directory,
+  });
+  await git("git", ["checkout", "--quiet", "--detach", base], {
+    cwd: directory,
+  });
+  await writeFile(join(directory, "README.md"), "ours\n");
+  await git("git", [...author, "commit", "--quiet", "-am", "ours"], {
+    cwd: directory,
+  });
+  await assert.rejects(
+    git("git", [...author, "merge", "--no-edit", "other"], { cwd: directory }),
+  );
+  if (resolved) await git("git", ["add", "README.md"], { cwd: directory });
+}
+
+/**
+ * Catches a candidate or a checkpoint built from a merge the core did not
+ * finish, which `git add --all` would otherwise commit with its markers.
+ */
+test("a workspace holding an unfinished merge is neither committed nor kept, and nothing is pushed", async () => {
+  for (const resolved of [false, true])
+    await inCheckout(async (checkout) => {
+      await mergeStopped(checkout, resolved);
+
+      const { source } = await publishedFrom(checkout);
+      await assert.rejects(checkpointFrom(checkout), /unfinished merge/u);
+
+      assert.match(source.message, /unfinished merge/u, String(resolved));
+      assert.equal(await remoteRefs(checkout.remote), "", String(resolved));
+    });
+});
+
+/** Catches a conflict read as resolved because its file was marked so with `git add`, markers and all. */
+test("a conflict marked resolved with its markers still in it is left, and one resolved is not", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory } = checkout;
+    await mergeStopped(checkout, true);
+    const asked = { paths: ["README.md"], directory, command: git };
+
+    assert.deepEqual(await sourceConflictsLeft(asked), ["README.md"]);
+
+    await writeFile(join(directory, "README.md"), "both\n");
+    assert.deepEqual(await sourceConflictsLeft(asked), []);
   });
 });
