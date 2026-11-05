@@ -164,12 +164,13 @@ test("the server's instructions say every tool needs the person signed in, and t
   });
   assert.match(
     instructions,
-    /^These tools are the only way to read or act on chuggy from here, and every one needs the person signed in\./mu,
+    /^These tools are the only way to read or act on chuggy from here, and every one but read_docs needs the person signed in\./mu,
   );
   assert.match(
     instructions,
     /give them the address it names, in full, in your next message/u,
   );
+  assert.match(instructions, /call again once they say they have signed in\./u);
   assert.match(instructions, /do not work around a sign-in\.$/mu);
 });
 
@@ -411,7 +412,7 @@ test("served with the global fetch, a call with no sign-in is answered with a pa
   const text = answer.content.map(({ text }) => text).join("");
   assert.match(
     text,
-    /not signed in to https:\/\/chuggy\.test: every chuggy tool needs the person signed in, so give them this address, in full, in your next message, whatever else you are doing: https:\/\/auth\.test\/oauth2\/auth\?/,
+    /not signed in to https:\/\/chuggy\.test: this call needs the person signed in, so give them this address, in full, in your next message, whatever else you are doing: https:\/\/auth\.test\/oauth2\/auth\?\S+ Call the tool again once they say they have signed in\./,
   );
   stdin.emit("end");
   await served;
