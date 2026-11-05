@@ -142,6 +142,7 @@ import {
   targetMergeConflictNudge,
   targetMergeMovedNudge,
   targetMergeNudgesMax,
+  TargetMergeUnresolved,
 } from "./targetMerge.mjs";
 import {
   credentialUnmappedText,
@@ -7449,6 +7450,104 @@ test("a target that moved while the agent worked is merged on top of the work be
   });
 });
 
+/**
+ * Catches the end's commit of the work, made where the target moved, failing
+ * as no step, so that whether the target moved decides how a refusal of the
+ * project's hooks is labelled.
+ */
+test("a target that moved while the agent worked is merged on a work commit that is the commit step", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const hooks = await suiteDirectory(t, "chuggy-hooks-");
+    await writeFile(join(hooks, "pre-commit"), "#!/bin/sh\nexit 1\n");
+    await chmod(join(hooks, "pre-commit"), 0o755);
+
+    const { failure } = await standInAttempt(
+      t,
+      checkout,
+      [
+        {
+          work: `echo done > done.txt && ${targetMovedWork(checkout, "target.txt", "landed\n")}`,
+          frames: [verdictFrame()],
+        },
+      ],
+      {
+        answer: agentAnswer({
+          worker: {
+            ...fetchedAnswer.worker,
+            setup: [`git config core.hooksPath '${hooks}'`],
+          },
+        }),
+      },
+    );
+
+    assert.ok(failure instanceof RunStepFailure, String(failure));
+    assert.equal(failure.evidence, runCommitFailed);
+    const refs = await remoteRefs(checkout.remote);
+    assert.ok(!refs.includes("/attempts/"), refs);
+  });
+});
+
+/** Catches a target that cannot be fetched, at the start or the end, ending the attempt rather than being logged. */
+test("a target that cannot be fetched is logged at the start and the end, and the work is pushed without it", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const logged = [];
+    t.mock.method(process.stderr, "write", (text) => logged.push(text));
+
+    const { failure, plane } = await standInAttempt(
+      t,
+      checkout,
+      [verdictRun()],
+      { answer: agentAnswer({ targetRef: "refs/heads/never-pushed" }) },
+    );
+
+    passStands(failure, plane);
+    const said = logged.join("");
+    assert.match(
+      said,
+      /the target refs\/heads\/never-pushed could not be fetched, so this attempt runs without merging it/u,
+    );
+    assert.match(
+      said,
+      /the target refs\/heads\/never-pushed could not be fetched, so the work is pushed without merging it/u,
+    );
+    const { merges } = await candidatePushed(checkout.remote, checkout.base);
+    assert.deepEqual(merges, []);
+  });
+});
+
+/** Catches a check stage fetching or merging the target its work task names, at its start or its end. */
+test("a Commands work task naming a target that moved fetches and merges nothing", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    await targetMoved(checkout, "target.txt", "landed\n");
+    const commanded = {
+      ...fetchedAnswer,
+      worker: {
+        ...fetchedAnswer.worker,
+        mode: { type: "Commands", commands: ["test ! -e target.txt"] },
+      },
+    };
+
+    const { failure, plane, workspace } = await standInAttempt(
+      t,
+      checkout,
+      [],
+      { answer: commanded },
+    );
+
+    assert.equal(failure, undefined, String(failure));
+    assert.equal(planeBodies(plane, "report")[0].verdict, "Pass");
+    const { stdout: fetched } = await git(
+      "git",
+      ["for-each-ref", "refs/chuggy/"],
+      { cwd: jobRepositoryDirectory(workspace) },
+    );
+    assert.equal(fetched, "");
+  });
+});
+
 /** A run that changes README.md while the target changes it too, and passes. */
 function conflictingRun(checkout) {
   return {
@@ -7534,6 +7633,23 @@ test("an end conflict the agent never resolves resumes it up to the cap and then
       starts[2].argv.at(-1),
       targetMergeConflictNudge({ targetRef, tip, paths: ["README.md"] }),
     );
+  });
+});
+
+/** Catches a resumed turn that did not pass being pushed because the files it left are resolved. */
+test("an end conflict whose resumed turn does not pass loses the attempt, pushing nothing", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+
+    const { failure, plane, runtime } = await standInAttempt(t, checkout, [
+      conflictingRun(checkout),
+      { work: readmeResolved, frames: [verdictFrame("Fail")] },
+    ]);
+
+    await lostPushingNothing(failure, plane, checkout.remote);
+    assert.ok(failure instanceof TargetMergeUnresolved, String(failure));
+    assert.match(failure.message, /resumed turn ended Fail/u);
+    assert.equal((await runtime.starts()).length, 2);
   });
 });
 

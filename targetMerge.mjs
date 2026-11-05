@@ -21,6 +21,8 @@
  * A resolved merge is committed by the core, and the target fetched again.
  */
 
+import { gitFailureLine } from "./gitRemote.mjs";
+import { runCommitFailed, runStep } from "./runEvidence.mjs";
 import {
   sourceConflictsLeft,
   sourceMergeConcluded,
@@ -166,8 +168,9 @@ export async function targetMergedAtEnd({
 
 /**
  * The target fetched and, where it moved past the work, merged on top of the
- * work committed: the conflict left, as `targetMergedAtEnd` holds one, or
- * nothing where nothing is left to settle.
+ * work committed, a commit that is the commit step as the candidate's is: the
+ * conflict left, as `targetMergedAtEnd` holds one, or nothing where nothing is
+ * left to settle.
  */
 async function targetMergeMoved({ where, fetched, log, said }) {
   const { targetRef } = where.task;
@@ -181,7 +184,11 @@ async function targetMergeMoved({ where, fetched, log, said }) {
     return undefined;
   }
   if (await sourceTargetContained({ ...where, tip })) return undefined;
-  await sourceWorkCommitted(where);
+  await runStep(
+    runCommitFailed,
+    () => sourceWorkCommitted(where),
+    gitFailureLine,
+  );
   let conflicted;
   try {
     ({ conflicted } = await sourceTargetMerged({ ...where, targetRef, tip }));
