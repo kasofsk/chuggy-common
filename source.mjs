@@ -48,6 +48,9 @@ const sourceTargetPrefix = "chuggy-target-";
 /** Where a fetched target's tip is held, in the repository it is fetched into and then in the workspace. */
 const sourceTargetSeenRef = "refs/chuggy/target";
 
+/** Where the index a target's merge stopped with is kept, in the workspace's git directory. */
+const sourceTargetStoppedIndex = "chuggy-target-merge-index";
+
 /** A line a conflicted merge leaves in a file, opening or closing one side or the base between them. */
 const sourceConflictMarker = /^(?:<{7}|\|{7}|>{7})(?: |$)/mu;
 
@@ -1104,9 +1107,23 @@ export async function sourceTargetMerged({
       return { conflicted: [] };
     } catch (failure) {
       if (!(await sourceMerging(command, local))) throw failure;
+      await copyFile(
+        await sourceGitPath(command, local, "index"),
+        await sourceGitPath(command, local, sourceTargetStoppedIndex),
+      );
       return { conflicted: await sourceUnmerged(command, local) };
     }
   });
+}
+
+/** Where `name` is in the workspace's git directory. */
+async function sourceGitPath(command, local, name) {
+  const { stdout } = await command(
+    "git",
+    ["rev-parse", "--git-path", name],
+    local,
+  );
+  return resolve(local.cwd, stdout.trim());
 }
 
 /**
@@ -1136,23 +1153,34 @@ export async function sourceConflictsLeft({
 }
 
 /**
- * A merge in progress whose conflicts are resolved, committed as the core with
- * everything the tree holds but what was provisioned, and no hook of the
- * project's; nothing where no merge is in progress.
+ * A merge in progress whose conflicts are resolved, committed as the core and
+ * with no hook of the project's; nothing where no merge is in progress. The
+ * commit is the index the merge stopped with, each path it left unmerged taken
+ * from the tree, so the commit holds the merge and its resolution alone. The
+ * rest of what the tree changed is left uncommitted, for a commit the
+ * project's hooks run on.
  */
-export async function sourceMergeConcluded({
-  task,
-  directory,
-  command,
-  git = [],
-}) {
+export async function sourceMergeConcluded({ directory, command, git = [] }) {
   const local = sourceLocal(directory, git);
   if (!(await sourceMerging(command, local))) return;
-  await sourceWithoutHooks(command, async (hookless) => {
-    await sourceStaged(task, hookless, local);
+  const stopped = await sourceGitPath(command, local, sourceTargetStoppedIndex);
+  await sourceWithoutHooks(command, async (hookless, made) => {
+    const index = join(made, "index");
+    await copyFile(stopped, index);
+    const merged = { ...local, env: { ...local.env, GIT_INDEX_FILE: index } };
+    const conflicted = await sourceUnmerged(hookless, merged);
+    if (conflicted.length > 0)
+      await hookless(
+        "git",
+        ["--literal-pathspecs", "add", "--all", "--", ...conflicted],
+        merged,
+      );
+    const { stdout: tree } = await hookless("git", ["write-tree"], merged);
+    await hookless("git", ["read-tree", tree.trim()], local);
     await hookless("git", ["commit", "--no-edit", "--quiet"], {
       ...local,
       env: { ...local.env, ...sourceCheckpointIdentity },
     });
   });
+  await rm(stopped, { force: true });
 }

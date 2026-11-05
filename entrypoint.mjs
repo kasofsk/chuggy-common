@@ -978,14 +978,18 @@ async function workWithinBound(context, work) {
   }
 }
 
-/** Whether `apart`'s write credential stayed behind, which is logged. It raises nothing. */
-async function workApartLeft(context, apart) {
+/** Whether `apart`'s credential, `minted` as the log names it, stayed behind, which is logged. It raises nothing. */
+async function workApartLeft(
+  context,
+  apart,
+  minted = "a push's write credential",
+) {
   try {
     await apart?.discard();
     return false;
   } catch (failure) {
     process.stderr.write(
-      `a push's write credential could not be removed: ${workFailureSaid(context, failure)}\n`,
+      `${minted} could not be removed: ${workFailureSaid(context, failure)}\n`,
     );
     return true;
   }
@@ -1195,7 +1199,7 @@ async function workTargetFetchedApart(context, workspace) {
     (tip) => ({ tip }),
     (failure) => ({ failure }),
   );
-  if (await workApartLeft(context, apart))
+  if (await workApartLeft(context, apart, "a target fetch's read credential"))
     throw new Error("the target's fetch left its credential behind");
   if (fetched.failure !== undefined) throw fetched.failure;
   return fetched.tip;

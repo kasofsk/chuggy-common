@@ -5975,6 +5975,44 @@ test(
   },
 );
 
+/** Catches a target fetch's read credential, left behind, logged as a push's write credential. */
+test(
+  "a target fetch's read credential that cannot be removed is logged as what it is",
+  { skip: process.getuid?.() === 0 },
+  async (t) => {
+    await inCheckout(async (checkout) => {
+      await targetPushed(checkout);
+      const locked = [];
+      let reads = 0;
+      const write = async (file, password, options) => {
+        await writeFile(file, password, options);
+        if (password !== readToken || (reads += 1) === 1) return;
+        locked.push(dirname(file));
+        await chmod(dirname(file), 0o555);
+      };
+      const logged = [];
+      t.mock.method(process.stderr, "write", (text) => logged.push(text));
+
+      const { failure, plane } = await standInAttempt(
+        t,
+        checkout,
+        [verdictRun()],
+        { write },
+      );
+      await Promise.all(locked.map((directory) => chmod(directory, 0o755)));
+
+      passStands(failure, plane);
+      assert.ok(locked.length > 0);
+      const said = logged.join("");
+      assert.match(
+        said,
+        /^a target fetch's read credential could not be removed: /mu,
+      );
+      assert.doesNotMatch(said, /write credential could not be removed/u);
+    });
+  },
+);
+
 /**
  * A remote that stalls must not move the run's end to the pool's deadline, where
  * it would read as timed out. Catches a bound that merely stops waiting, which
@@ -7317,6 +7355,64 @@ test("a start whose merge conflicts leaves it to the agent, briefed, and pushes 
       await remoteFile(checkout.remote, commit, "README.md"),
       "both\n",
     );
+  });
+});
+
+/**
+ * Catches the work of an attempt whose start conflicted committed with the
+ * merge, past the project's hooks, rather than in the candidate's own commit.
+ */
+test("a start conflict's merge commits its resolution alone, and the rest of the work meets the project's hooks", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { base } = await reworkConflicting(checkout);
+    const work = `${readmeResolved} && echo done > work.txt && git add --all`;
+
+    const { failure, plane } = await standInAttempt(
+      t,
+      { remote: checkout.remote, base },
+      [{ work, frames: [verdictFrame()] }],
+    );
+
+    passStands(failure, plane);
+    const { commit, merges } = await candidatePushed(checkout.remote, base);
+    assert.equal(merges.length, 1);
+    assert.notEqual(merges[0], commit);
+    assert.equal(
+      await remoteFile(checkout.remote, merges[0], "README.md"),
+      "both\n",
+    );
+    assert.equal(
+      await remoteFile(checkout.remote, merges[0], "work.txt"),
+      undefined,
+    );
+    assert.equal(
+      await remoteFile(checkout.remote, commit, "work.txt"),
+      "done\n",
+    );
+
+    const hooks = await suiteDirectory(t, "chuggy-hooks-");
+    await writeFile(join(hooks, "pre-commit"), "#!/bin/sh\nexit 1\n");
+    await chmod(join(hooks, "pre-commit"), 0o755);
+    const refused = await standInAttempt(
+      t,
+      { remote: checkout.remote, base },
+      [{ work, frames: [verdictFrame()] }],
+      {
+        answer: agentAnswer({
+          attempt: `${fetchedAnswer.attempt}-next`,
+          worker: {
+            ...fetchedAnswer.worker,
+            setup: [`git config core.hooksPath '${hooks}'`],
+          },
+        }),
+      },
+    );
+
+    assert.ok(
+      refused.failure instanceof RunStepFailure,
+      String(refused.failure),
+    );
+    assert.equal(refused.failure.evidence, runCommitFailed);
   });
 });
 
