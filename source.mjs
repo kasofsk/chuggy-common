@@ -847,6 +847,55 @@ async function sourceBaseMissing(directory, base, commit, command) {
   return missing.trim() !== "";
 }
 
+/**
+ * The workspace put on a contained re-check of `recheck`, the accepted commit a
+ * finalization sent back: `"contained"` where `base`, the current target, is
+ * already among its ancestors, so `HEAD` is that commit as it stands, and
+ * `"merged"` where the target moved and `HEAD` is a `--no-ff` merge of it into
+ * that commit. Nothing where the commit is not in the clone or the merge fails,
+ * for a conflict or any other reason: the workspace is then back at `base`, and
+ * the normal workload runs. The push is `commitAndPushSource`'s.
+ */
+export async function sourceRechecked({
+  base,
+  recheck,
+  directory,
+  command,
+  git = [],
+}) {
+  const local = {
+    cwd: directory,
+    env: workerStageEnvironment(process.env, { git }),
+  };
+  const back = () =>
+    command("git", ["checkout", "--force", "--detach", base], local).catch(
+      () => undefined,
+    );
+  try {
+    await command("git", ["cat-file", "-e", `${recheck}^{commit}`], local);
+    await command("git", ["checkout", "--detach", recheck], local);
+    if (!(await sourceBaseMissing(directory, base, recheck, command)))
+      return "contained";
+    await command("git", ["config", "user.name", sourceAuthorName], local);
+    await command("git", ["config", "user.email", sourceAuthorEmail], local);
+    return await sourceWithoutHooks(command, async (hookless) => {
+      try {
+        await hookless("git", ["merge", "--no-ff", "--no-edit", base], local);
+        return "merged";
+      } catch {
+        await hookless("git", ["merge", "--abort"], local).catch(
+          () => undefined,
+        );
+        await back();
+        return undefined;
+      }
+    });
+  } catch {
+    await back();
+    return undefined;
+  }
+}
+
 /** Refuses `commit` where `base` is not among its ancestors, saying what the next attempt does instead. */
 async function sourceDescended(directory, base, commit, command) {
   if (await sourceBaseMissing(directory, base, commit, command))

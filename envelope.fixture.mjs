@@ -51,6 +51,7 @@ export const pushed = workTaskDocumentSchema.strict().parse({
     setup: [],
     files: [],
   },
+  targetRef: "refs/heads/main",
   workerPlane: {
     url: "http://worker-plane.test:3001",
     capabilityFile: "/run/worker-plane.test/bearer",
