@@ -157,6 +157,23 @@ test("the server's instructions open with the workspace and project it is bound 
   );
 });
 
+test("the server's instructions say every tool needs the person signed in, and that a sign-in is relayed, not worked around", () => {
+  const instructions = localToolInstructions({
+    tenant: "vteng",
+    project: "chuggy",
+  });
+  assert.match(
+    instructions,
+    /^These tools are the only way to read or act on chuggy from here, and every one but read_docs needs the person signed in\./mu,
+  );
+  assert.match(
+    instructions,
+    /give them the address it names, in full, in your next message/u,
+  );
+  assert.match(instructions, /call again once they say they have signed in\./u);
+  assert.match(instructions, /do not work around a sign-in\.$/mu);
+});
+
 test("the server's instructions name the filing recipe's tools in order, then who starts the work", () => {
   const instructions = localToolInstructions({
     tenant: "vteng",
@@ -395,7 +412,7 @@ test("served with the global fetch, a call with no sign-in is answered with a pa
   const text = answer.content.map(({ text }) => text).join("");
   assert.match(
     text,
-    /not signed in to https:\/\/chuggy\.test: ask the person to open https:\/\/auth\.test\/oauth2\/auth\?/,
+    /not signed in to https:\/\/chuggy\.test: this call needs the person signed in, so give them this address, in full, in your next message, whatever else you are doing: https:\/\/auth\.test\/oauth2\/auth\?\S+ Call the tool again once they say they have signed in\./,
   );
   stdin.emit("end");
   await served;
