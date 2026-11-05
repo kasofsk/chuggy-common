@@ -1,7 +1,14 @@
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { resultManifestSchemaVersion } from "@chuggy/worker-contract/workerDocuments";
@@ -34,6 +41,18 @@ const sourceObjectPlaces = new Map([
 
 /** What the directory a push is made from is named by, under the temporary directory. */
 const sourcePushPrefix = "chuggy-push-";
+
+/** What the directory a target is fetched into apart from the workspace is named by, there too. */
+const sourceTargetPrefix = "chuggy-target-";
+
+/** Where a fetched target's tip is held, in the repository it is fetched into and then in the workspace. */
+const sourceTargetSeenRef = "refs/chuggy/target";
+
+/** Where the index a target's merge stopped with is kept, in the workspace's git directory. */
+const sourceTargetStoppedIndex = "chuggy-target-merge-index";
+
+/** A line a conflicted merge leaves in a file, opening or closing one side or the base between them. */
+const sourceConflictMarker = /^(?:<{7}|\|{7}|>{7})(?: |$)/mu;
 
 /** What the directory a keep or a restore works in apart from the workspace is named by, there too. */
 const sourceCheckpointPrefix = "chuggy-checkpoint-";
@@ -531,6 +550,7 @@ async function sourceCheckpointCommitted({
   );
   const [parent, tree] = head.trim().split("\n");
   return sourceWithoutHooks(command, async (hookless, made) => {
+    await sourceMergeRefused(hookless, local);
     const kept = join(made, "index");
     await copyFile(resolve(directory, index.trim()), kept);
     const staged = await sourceStaged(task, hookless, {
@@ -655,9 +675,10 @@ export function sourceRestoredBriefed(task, restored) {
   };
 }
 
-/** Where, in a directory the core made, a push's repository, the empty hooks directory, the empty global configuration and the empty home are. */
+/** Where, in a directory the core made, that directory itself, a push's repository, the empty hooks directory, the empty global configuration and the empty home are. */
 function sourcePushPlaces(made) {
   return {
+    root: made,
     repository: join(made, "repository"),
     hooks: join(made, "hooks"),
     configuration: join(made, "configuration"),
@@ -688,26 +709,22 @@ function sourcePushEnvironment(environment, places, commit) {
 }
 
 /**
- * `refspec` pushed to `repository` from a repository made for it in a
- * directory of its own, borrowing the objects of the workspace at `directory`,
- * with the credential taken once that repository is made.
+ * `reach` handed the places of a repository made for it in a directory of its
+ * own named by `prefix`, borrowing the objects of the workspace at
+ * `directory`, and the environment it reaches a remote in, its credential
+ * taken once that repository is made. The directory goes however `reach` ends,
+ * a failure to remove it reported as `named`'s.
  */
-async function sourcePushed({
-  repository,
-  refspec,
-  commit,
-  directory,
-  command,
-  environment,
-  refresh,
-  pause,
-}) {
+async function sourceApart(
+  { prefix, named, commit, directory, command, environment, refresh },
+  reach,
+) {
   const { stdout: objects } = await command(
     "git",
     ["rev-parse", "--git-path", "objects"],
     { cwd: directory, env: workerStageEnvironment(process.env) },
   );
-  const made = resolve(await mkdtemp(workerTemporaryFile(sourcePushPrefix)));
+  const made = resolve(await mkdtemp(workerTemporaryFile(prefix)));
   try {
     const places = sourcePushPlaces(made);
     await mkdir(places.hooks);
@@ -721,43 +738,75 @@ async function sourcePushed({
       join(places.repository, "objects", "info", "alternates"),
       `${resolve(directory, objects.trim())}\n`,
     );
-    const pushing = sourcePushEnvironment(
-      refresh === undefined ? environment : await refresh(),
+    return await reach(
       places,
-      commit,
-    );
-    await gitRemoteTried(
-      () =>
-        command(
-          "git",
-          [
-            "-c",
-            `core.hooksPath=${places.hooks}`,
-            "-c",
-            "credential.helper=",
-            "push",
-            repository,
-            refspec,
-          ],
-          { cwd: made, env: pushing },
-        ),
-      { pause },
+      sourcePushEnvironment(
+        refresh === undefined ? environment : await refresh(),
+        places,
+        commit,
+      ),
     );
   } finally {
-    await sourcePushDiscarded(made);
+    await sourcePushDiscarded(made, named);
   }
 }
 
 /**
- * The directory a push was made from, removed; one that cannot be is reported
- * on stderr rather than raised, so how the push ended is what it reports.
+ * `refspec` pushed to `repository` from a repository made for it
+ * (`sourceApart`), with no hook and no credential helper.
  */
-async function sourcePushDiscarded(made) {
+async function sourcePushed({
+  repository,
+  refspec,
+  commit,
+  directory,
+  command,
+  environment,
+  refresh,
+  pause,
+}) {
+  await sourceApart(
+    {
+      prefix: sourcePushPrefix,
+      named: "the push's repository",
+      commit,
+      directory,
+      command,
+      environment,
+      refresh,
+    },
+    (places, pushing) =>
+      gitRemoteTried(
+        () =>
+          command(
+            "git",
+            [
+              "-c",
+              `core.hooksPath=${places.hooks}`,
+              "-c",
+              "credential.helper=",
+              "push",
+              repository,
+              refspec,
+            ],
+            { cwd: places.root, env: pushing },
+          ),
+        { pause },
+      ),
+  );
+}
+
+/**
+ * The directory a push or a fetch was made from, removed; one that cannot be is
+ * reported on stderr rather than raised, so how the push or fetch ended is what
+ * it reports.
+ */
+async function sourcePushDiscarded(made, named) {
   try {
     await rm(made, { recursive: true, force: true });
   } catch (failure) {
     process.stderr.write(
-      `the push's repository ${made} could not be removed: ${
+      `${named} ${made} could not be removed: ${
         failure instanceof Error ? failure.message : String(failure)
       }\n`,
     );
@@ -785,26 +834,16 @@ async function sourceCommitted({
     cwd: directory,
     env: workerStageEnvironment(process.env, { git }),
   };
-  await command("git", ["config", "user.name", sourceAuthorName], local);
-  await command("git", ["config", "user.email", sourceAuthorEmail], local);
+  await sourceMergeRefused(command, local);
+  await sourceIdentified(command, local);
   const staged = await sourceStaged(task, command, local);
-  const { stdout: head } = await command(
-    "git",
-    ["rev-parse", "HEAD", "HEAD^{tree}"],
-    local,
-  );
-  const [authored, tree] = head.trim().split("\n");
+  const [authored, tree] = await sourceHead(command, local);
   const unchanged = staged === tree;
   if (unchanged && authored === base && !candidate) return undefined;
   if (!unchanged || authored === base)
     await command(
       "git",
-      [
-        "commit",
-        "--allow-empty",
-        "-m",
-        `ticket ${String(task.ticket)} attempt ${task.attempt}`,
-      ],
+      ["commit", "--allow-empty", "-m", sourceWorkMessage(task)],
       local,
     );
   const { stdout } = await command("git", ["rev-parse", "HEAD"], local);
@@ -812,6 +851,27 @@ async function sourceCommitted({
   await sourceSecretRefused(directory, base, commit, secrets);
   if (candidate) await sourceDescended(directory, base, commit, command);
   return commit;
+}
+
+/** What the commit carrying an attempt's work says. */
+function sourceWorkMessage(task) {
+  return `ticket ${String(task.ticket)} attempt ${task.attempt}`;
+}
+
+/** The workspace's git told who the commits this core makes are by. */
+async function sourceIdentified(command, local) {
+  await command("git", ["config", "user.name", sourceAuthorName], local);
+  await command("git", ["config", "user.email", sourceAuthorEmail], local);
+}
+
+/** `HEAD` and its tree. */
+async function sourceHead(command, local) {
+  const { stdout } = await command(
+    "git",
+    ["rev-parse", "HEAD", "HEAD^{tree}"],
+    local,
+  );
+  return stdout.trim().split("\n");
 }
 
 /** Everything in the tree staged in the index `local` names, but what the attempt's block provisioned, and the tree that makes. */
@@ -853,4 +913,274 @@ async function sourceDescended(directory, base, commit, command) {
     throw new Error(
       `commit ${commit} does not descend from ${base}, the commit this attempt started from, so the attempt pushes nothing. A rebase does this, and so does checking out a different commit. Add commits on top of ${base} instead, merging the target in rather than rebasing onto it.`,
     );
+}
+
+/** The workspace's git as `git` configures it, run in `directory`. */
+function sourceLocal(directory, git = []) {
+  return { cwd: directory, env: workerStageEnvironment(process.env, { git }) };
+}
+
+/** Whether a merge is in progress: whether `MERGE_HEAD` names a commit. */
+async function sourceMerging(command, local) {
+  return command(
+    "git",
+    ["rev-parse", "--quiet", "--verify", "MERGE_HEAD"],
+    local,
+  ).then(
+    ({ stdout }) => stdout.trim() !== "",
+    () => false,
+  );
+}
+
+/** The paths the index holds unmerged. */
+async function sourceUnmerged(command, local) {
+  const { stdout } = await command(
+    "git",
+    ["diff", "--name-only", "--diff-filter=U", "-z"],
+    local,
+  );
+  return stdout.split("\0").filter((path) => path !== "");
+}
+
+/**
+ * Refuses a workspace holding a merge in progress or a path unmerged: nothing
+ * committed or kept from it is a tree the merge finished.
+ */
+async function sourceMergeRefused(command, local) {
+  const unmerged = await sourceUnmerged(command, local);
+  if (unmerged.length === 0 && !(await sourceMerging(command, local))) return;
+  throw new Error(
+    `the workspace holds an unfinished merge${
+      unmerged.length === 0 ? "" : ` with conflicts in ${unmerged.join(", ")}`
+    }, so the attempt pushes nothing`,
+  );
+}
+
+/**
+ * The tip of `targetRef` on `repository`, fetched into the workspace at
+ * `directory` and held there as `refs/chuggy/target`.
+ *
+ * THE REMOTE IS REACHED FROM A REPOSITORY OF THE CORE'S OWN, made as a push's
+ * is and borrowing the workspace's objects, so no configuration the attempt
+ * left in the workspace sees the credential, which is `refresh`'s where it is
+ * given and `environment` where not. The workspace then fetches from that
+ * repository, which reaches no remote, with no hook of the project's. The
+ * remote is tried again as `gitRemote.mjs` says.
+ */
+export async function sourceTargetFetched({
+  repository,
+  targetRef,
+  directory,
+  command,
+  environment,
+  refresh,
+  git = [],
+  pause,
+}) {
+  const local = sourceLocal(directory, git);
+  const [head] = await sourceHead(command, local);
+  await sourceApart(
+    {
+      prefix: sourceTargetPrefix,
+      named: "the target's fetching repository",
+      commit: head,
+      directory,
+      command,
+      environment,
+      refresh,
+    },
+    async (places, fetching) => {
+      const hookless = ["-c", `core.hooksPath=${places.hooks}`];
+      await gitRemoteTried(
+        () =>
+          command(
+            "git",
+            [
+              ...hookless,
+              "-c",
+              "credential.helper=",
+              "fetch",
+              "--quiet",
+              "--no-tags",
+              repository,
+              `+${targetRef}:${sourceTargetSeenRef}`,
+            ],
+            { cwd: places.root, env: fetching },
+          ),
+        { pause },
+      );
+      await command(
+        "git",
+        [
+          ...hookless,
+          "-c",
+          "core.fsmonitor=false",
+          "fetch",
+          "--quiet",
+          "--no-tags",
+          places.repository,
+          `+${sourceTargetSeenRef}:${sourceTargetSeenRef}`,
+        ],
+        local,
+      );
+    },
+  );
+  const { stdout: tip } = await command(
+    "git",
+    ["rev-parse", "--verify", `${sourceTargetSeenRef}^{commit}`],
+    local,
+  );
+  return tip.trim();
+}
+
+/** Whether `HEAD` already holds `tip` among its ancestors. */
+export async function sourceTargetContained({
+  tip,
+  directory,
+  command,
+  git = [],
+}) {
+  return command(
+    "git",
+    ["merge-base", "--is-ancestor", tip, "HEAD"],
+    sourceLocal(directory, git),
+  ).then(
+    () => true,
+    (failure) => {
+      if (failure?.code === 1) return false;
+      throw failure;
+    },
+  );
+}
+
+/**
+ * What the attempt changed, committed on top of `HEAD` as a candidate's commit
+ * is, with the project's hooks, so a merge can follow it; nothing where the
+ * tree is `HEAD`'s.
+ */
+export async function sourceWorkCommitted({
+  task,
+  directory,
+  command,
+  git = [],
+}) {
+  const local = sourceLocal(directory, git);
+  await sourceMergeRefused(command, local);
+  await sourceIdentified(command, local);
+  const staged = await sourceStaged(task, command, local);
+  const [, tree] = await sourceHead(command, local);
+  if (staged === tree) return;
+  await command("git", ["commit", "-m", sourceWorkMessage(task)], local);
+}
+
+/**
+ * `tip`, the target `targetRef` named, merged into `HEAD` with `--no-ff`, as
+ * the core and with no hook of the project's (`sourceWithoutHooks`). It
+ * answers `{conflicted}`, the paths the merge left unmerged, where it stopped
+ * on conflicts and left the merge in progress, and `{conflicted: []}` where it
+ * committed. A merge that neither committed nor stopped in progress, as one
+ * refused for a change in the tree it would overwrite does, is raised.
+ */
+export async function sourceTargetMerged({
+  task,
+  targetRef,
+  tip,
+  directory,
+  command,
+  git = [],
+}) {
+  const local = sourceLocal(directory, git);
+  return sourceWithoutHooks(command, async (hookless) => {
+    try {
+      await hookless(
+        "git",
+        [
+          "merge",
+          "--no-ff",
+          "--no-edit",
+          "-m",
+          `Merge ${targetRef} into ticket ${String(task.ticket)} attempt ${task.attempt}`,
+          tip,
+        ],
+        { ...local, env: { ...local.env, ...sourceCheckpointIdentity } },
+      );
+      return { conflicted: [] };
+    } catch (failure) {
+      if (!(await sourceMerging(command, local))) throw failure;
+      await copyFile(
+        await sourceGitPath(command, local, "index"),
+        await sourceGitPath(command, local, sourceTargetStoppedIndex),
+      );
+      return { conflicted: await sourceUnmerged(command, local) };
+    }
+  });
+}
+
+/** Where `name` is in the workspace's git directory. */
+async function sourceGitPath(command, local, name) {
+  const { stdout } = await command(
+    "git",
+    ["rev-parse", "--git-path", name],
+    local,
+  );
+  return resolve(local.cwd, stdout.trim());
+}
+
+/**
+ * Which of `paths`, and of the paths the index holds unmerged, the workspace
+ * has not resolved: unmerged still, or holding a line a conflict marks its
+ * sides with. A path the resolution removed is resolved.
+ */
+export async function sourceConflictsLeft({
+  paths,
+  directory,
+  command,
+  git = [],
+}) {
+  const unmerged = await sourceUnmerged(command, sourceLocal(directory, git));
+  const marked = [];
+  for (const path of paths) {
+    if (unmerged.includes(path)) continue;
+    const content = await readFile(join(directory, path), "utf8").catch(
+      (failure) => {
+        if (failure?.code === "ENOENT") return "";
+        throw failure;
+      },
+    );
+    if (sourceConflictMarker.test(content)) marked.push(path);
+  }
+  return [...unmerged, ...marked];
+}
+
+/**
+ * A merge in progress whose conflicts are resolved, committed as the core and
+ * with no hook of the project's; nothing where no merge is in progress. The
+ * commit is the index the merge stopped with, each path it left unmerged taken
+ * from the tree, so the commit holds the merge and its resolution alone. The
+ * rest of what the tree changed is left uncommitted, for a commit the
+ * project's hooks run on.
+ */
+export async function sourceMergeConcluded({ directory, command, git = [] }) {
+  const local = sourceLocal(directory, git);
+  if (!(await sourceMerging(command, local))) return;
+  const stopped = await sourceGitPath(command, local, sourceTargetStoppedIndex);
+  await sourceWithoutHooks(command, async (hookless, made) => {
+    const index = join(made, "index");
+    await copyFile(stopped, index);
+    const merged = { ...local, env: { ...local.env, GIT_INDEX_FILE: index } };
+    const conflicted = await sourceUnmerged(hookless, merged);
+    if (conflicted.length > 0)
+      await hookless(
+        "git",
+        ["--literal-pathspecs", "add", "--all", "--", ...conflicted],
+        merged,
+      );
+    const { stdout: tree } = await hookless("git", ["write-tree"], merged);
+    await hookless("git", ["read-tree", tree.trim()], local);
+    await hookless("git", ["commit", "--no-edit", "--quiet"], {
+      ...local,
+      env: { ...local.env, ...sourceCheckpointIdentity },
+    });
+  });
+  await rm(stopped, { force: true });
 }

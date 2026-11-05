@@ -13,6 +13,11 @@
  * a commit or push that fails, or a commit carrying a held secret, is logged
  * and the attempt still reports the Fail it ran to.
  *
+ * A WORK TASK'S TARGET IS MERGED IN where its agent runs it: before the agent
+ * starts, and again once its result is accepted, before the candidate is
+ * committed (`targetMerge.mjs`). A conflict the agent leaves unresolved loses
+ * the attempt and pushes nothing, a checkpoint included.
+ *
  * A WORK RUN THAT LEAVES NO RESULT LEAVES A CHECKPOINT, whether it ended without
  * a verdict or passed and could not commit or push, and the ticket's next Work
  * attempt starts from what it left. Such a run is a lost attempt and never a
@@ -176,6 +181,7 @@ import {
   resultDocument,
   sourceCheckpointRestored,
   sourceRestoredBriefed,
+  sourceTargetFetched,
 } from "./source.mjs";
 import {
   readTicketImages,
@@ -184,6 +190,12 @@ import {
 } from "./ticketImages.mjs";
 import { workerPlaneAwayMillisecondsMax, workerRequest } from "./transport.mjs";
 import { agentResultSchema } from "./result.mjs";
+import {
+  TargetMergeUnresolved,
+  targetMergeBriefed,
+  targetMergedAtEnd,
+  targetMergedAtStart,
+} from "./targetMerge.mjs";
 import { answeredWith, rosterLabel, routePath } from "./wire.mjs";
 
 const executeFile = promisify(execFile);
@@ -658,16 +670,78 @@ async function runAgentHeld(context, { untilMs, window }, clock) {
 }
 
 /**
+ * Processes of the agent run from `first` until one finishes: what it
+ * finished with, and the conversation it finished in where its runtime named
+ * one. A process held at a limit is followed by the same conversation resumed
+ * once the limit is waited out. `turns` carries the environment and stream
+ * every process shares and the holds counted across them.
+ */
+async function runAgentTurns(context, task, turns, first) {
+  for (let next = first; ; turns.holds += 1) {
+    const exited = await runAgentProcess(
+      context,
+      next,
+      turns.environment,
+      turns.stream,
+    );
+    await runAgentDeclared(context, exited, turns.environment);
+    const ended = runAgentEnded(context, exited, { holds: turns.holds });
+    if (ended.finished !== undefined)
+      return {
+        finished: ended.finished,
+        session: context.agent.ended?.(exited.resultEvent, exited.frames)
+          ?.session,
+      };
+    const { credentialLeft } = await context.keep();
+    const { held, session } = runAgentEnded(context, exited, {
+      holds: turns.holds,
+      credentialLeft,
+    });
+    await runAgentHeld(context, held, context.clock ?? workerClock);
+    next = context.agent.resumeInvocation(task, session);
+  }
+}
+
+/**
+ * What a finished run hands on: its account, and `resume`, which runs its
+ * conversation on told `prompt` and answers what that finished with, where its
+ * runtime resumes and named the conversation.
+ */
+function runAgentResumable(context, task, turns, { finished, session }) {
+  const { resumeInvocation } = context.agent;
+  if (resumeInvocation === undefined || session === undefined) return finished;
+  let conversation = session;
+  return {
+    ...finished,
+    resume: async (prompt) => {
+      context.keepAgain();
+      const resumed = await runAgentTurns(
+        context,
+        task,
+        turns,
+        resumeInvocation(task, conversation, prompt),
+      );
+      conversation = resumed.session ?? conversation;
+      return resumed.finished;
+    },
+  };
+}
+
+/**
  * The agent started on the task from what a check stage's shells inherit, its
  * shell prepared to hand the project's commands the rest of what those shells
  * are handed, and its briefing told where each image its brief carries was
- * read to and what an earlier attempt left in the tree. A run held at a limit
- * is the same process started again, on the same shell and environment, in the
- * conversation it left, and everything it streams is the one run's.
+ * read to, what an earlier attempt left in the tree and what the start's merge
+ * of the target left in progress. A run held at a limit is the same process
+ * started again, on the same shell and environment, in the conversation it
+ * left, and everything it streams is the one run's, a resumed turn's included.
  */
 async function runAgent(context) {
   const task = ticketImagesBriefed(
-    sourceRestoredBriefed(context.task, context.restored),
+    targetMergeBriefed(
+      sourceRestoredBriefed(context.task, context.restored),
+      context.target,
+    ),
     await agentImages(context),
   );
   const shell = await context.agent.prepareShell(
@@ -690,20 +764,13 @@ async function runAgent(context) {
       argv,
       await context.agent.configuration(task, environment),
     );
-  const stream = { captured: false };
-  for (let holds = 0, next = argv; ; holds += 1) {
-    const exited = await runAgentProcess(context, next, environment, stream);
-    await runAgentDeclared(context, exited, environment);
-    const ended = runAgentEnded(context, exited, { holds });
-    if (ended.finished !== undefined) return ended.finished;
-    const { credentialLeft } = await context.keep();
-    const { held, session } = runAgentEnded(context, exited, {
-      holds,
-      credentialLeft,
-    });
-    await runAgentHeld(context, held, context.clock ?? workerClock);
-    next = context.agent.resumeInvocation(task, session);
-  }
+  const turns = { environment, stream: { captured: false }, holds: 0 };
+  return runAgentResumable(
+    context,
+    task,
+    turns,
+    await runAgentTurns(context, task, turns, argv),
+  );
 }
 
 function artifact(path, content) {
@@ -911,14 +978,18 @@ async function workWithinBound(context, work) {
   }
 }
 
-/** Whether `apart`'s write credential stayed behind, which is logged. It raises nothing. */
-async function workApartLeft(context, apart) {
+/** Whether `apart`'s credential, `minted` as the log names it, stayed behind, which is logged. It raises nothing. */
+async function workApartLeft(
+  context,
+  apart,
+  minted = "a push's write credential",
+) {
   try {
     await apart?.discard();
     return false;
   } catch (failure) {
     process.stderr.write(
-      `a push's write credential could not be removed: ${workFailureSaid(context, failure)}\n`,
+      `${minted} could not be removed: ${workFailureSaid(context, failure)}\n`,
     );
     return true;
   }
@@ -1066,6 +1137,103 @@ async function workCheckpointRestored(context, workspace) {
   }
 }
 
+/** What the target merges run the workspace's git with, as `targetMerge.mjs` takes it. */
+function workTargetWhere(context, workspace) {
+  return {
+    task: context.task,
+    directory: workspace.directory,
+    command: context.command ?? command,
+    git: context.git,
+  };
+}
+
+/** What the target merges log and how they say a failure, as `targetMerge.mjs` takes them. */
+function workTargetLogged(context) {
+  return {
+    log: (line) => process.stderr.write(`${line}\n`),
+    said: (failure) => workFailureSaid(context, failure),
+  };
+}
+
+/** Whether an attempt merges its target: a work task's run by an agent, and never a check stage's. */
+function workTargetMerges(attempt) {
+  return attempt.commands === undefined && attempt.task.taskKind === "Work";
+}
+
+/**
+ * The start's merge of a work task's target, as `targetMergedAtStart` answers
+ * it, fetched with the credential the clone took moments before; nothing where
+ * the attempt merges none.
+ */
+async function workTargetMergedAtStart(context, workspace, attempt) {
+  if (!workTargetMerges(attempt)) return undefined;
+  const where = workTargetWhere(context, workspace);
+  return targetMergedAtStart({
+    where,
+    fetched: () =>
+      sourceTargetFetched({
+        ...where,
+        repository: workspace.repository,
+        targetRef: context.task.targetRef,
+        environment: workspace.environment,
+      }),
+    ...workTargetLogged(context),
+  });
+}
+
+/**
+ * The target's tip fetched at the end, with a read taken again, since the
+ * clone's may have expired, and kept apart from the attempt's own like a
+ * push's, so it goes with its directory however the fetch ends. One whose
+ * credential cannot be removed is a fetch that failed.
+ */
+async function workTargetFetchedApart(context, workspace) {
+  const apart = await workspace.readApart?.();
+  const fetched = await sourceTargetFetched({
+    ...workTargetWhere(context, workspace),
+    repository: workspace.repository,
+    targetRef: context.task.targetRef,
+    environment: workspace.environment,
+    ...(apart === undefined ? {} : { refresh: apart.refresh }),
+  }).then(
+    (tip) => ({ tip }),
+    (failure) => ({ failure }),
+  );
+  if (await workApartLeft(context, apart, "a target fetch's read credential"))
+    throw new Error("the target's fetch left its credential behind");
+  if (fetched.failure !== undefined) throw fetched.failure;
+  return fetched.tip;
+}
+
+/**
+ * The end's merge of a work task's target, as `targetMergedAtEnd` takes it,
+ * resuming `run`'s agent where it can; nothing where the attempt merges none
+ * or the run did not pass. One the agent left unresolved pushes nothing, and
+ * is raised as it is; any other failure is the run's, told what became of its
+ * unfinished work.
+ */
+async function workTargetMergedAtEnd(
+  context,
+  workspace,
+  attempt,
+  { run, started, keep },
+) {
+  if (!workTargetMerges(attempt) || run.result.verdict !== "Pass") return;
+  const { resume } = run;
+  try {
+    await targetMergedAtEnd({
+      where: workTargetWhere(context, workspace),
+      fetched: () => workTargetFetchedApart(context, workspace),
+      ...workTargetLogged(context),
+      started,
+      resume,
+    });
+  } catch (failure) {
+    if (failure instanceof TargetMergeUnresolved) throw failure;
+    throw await workFailureKept(failure, keep);
+  }
+}
+
 /**
  * `keep` taken once for each state of the tree, so a run a hold's own keep ends
  * pushes nothing twice; `keepAgain` says an agent is about to change the tree.
@@ -1131,26 +1299,28 @@ async function workerMinted({
  * here is this attempt's failure: a clone that minted and a push that cannot
  * is a deployment mid-change or an installation that grants only a read, and
  * reaching the remote with something else is exactly what a minted credential
- * is for. It is presented for `remote`, the URL the push reaches.
+ * is for. It is presented for `remote`, the URL the push reaches. `asked`
+ * naming a repository mints a read of it instead, and `reaching` says what for.
  */
-async function workerRefreshed(asked, remote) {
+async function workerRefreshed(asked, remote, reaching = "push with") {
   const minted = await workerMinted(asked);
   if (minted === undefined)
-    throw new Error("the worker plane mints no credential to push with");
+    throw new Error(`the worker plane mints no credential to ${reaching}`);
   return workerCredentialEnvironment(minted.file, minted.username, remote);
 }
 
 /**
- * A push's credential kept apart from the attempt's own, which an agent reads:
- * `refresh`, minting as the push's does into a directory made for it, and
- * `discard`, removing that.
+ * A credential kept apart from the attempt's own, which an agent reads:
+ * `refresh`, minting what `asked` names, a push's where it names no
+ * repository, into a directory made for it, and `discard`, removing that.
+ * `reaching` is what a mint that answers nothing was wanted for.
  */
-async function workerRefreshApart(asked, remote) {
+async function workerRefreshApart(asked, remote, reaching) {
   const directory = await mkdtemp(
     join(asked.directory ?? mintedCredentialDirectory, workAsidePrefix),
   );
   return {
-    refresh: () => workerRefreshed({ ...asked, directory }, remote),
+    refresh: () => workerRefreshed({ ...asked, directory }, remote, reaching),
     discard: () => rm(directory, { recursive: true, force: true }),
   };
 }
@@ -1168,8 +1338,10 @@ function workerMounted(task, repositories, credentialFiles, repositoryId) {
  * with. The plane's mint answers where there is one, a read of the attempt's
  * own repository asked for by name, and the launcher's mount where there is
  * not — which is what answered before this plane minted anything, the
- * attempt's own credential roster included. `refresh` and `refreshApart` come
- * back only from the minted arm, there being nothing to take again in the other.
+ * attempt's own credential roster included. `refresh`, `refreshApart` and
+ * `readApart`, a read of its own repository minted apart as `refreshApart`
+ * mints a push's, come back only from the minted arm, there being nothing to
+ * take again in the other.
  */
 export async function workerCredential(asked) {
   const { task, repositories, credentialFiles, repositoryId } = asked;
@@ -1186,6 +1358,12 @@ export async function workerCredential(asked) {
     ),
     refresh: () => workerRefreshed(asked, repository),
     refreshApart: () => workerRefreshApart(asked, repository),
+    readApart: () =>
+      workerRefreshApart(
+        { ...asked, repository: repositoryId },
+        repository,
+        "fetch with",
+      ),
   };
 }
 
@@ -1220,31 +1398,37 @@ export async function workerWorkspace(
   ).json();
   const repositoryId = oneReference(input, "Repository");
   const base = oneReference(input, "TargetCommit");
-  const { repository, environment, refresh, refreshApart, directory } =
-    await runStep(
-      runCloneFailed,
-      async () => {
-        const credential = await workerCredential({
-          task,
-          bearer,
-          repositories,
-          credentialFiles,
-          repositoryId,
-          keepSecret,
-          request,
-          ...(write === undefined ? {} : { write }),
-          ...(minted === undefined ? {} : { directory: minted }),
-        });
-        const cloned = await clone(
-          credential.repository,
-          base,
-          workspace ?? required(workerWorkspaceVariable),
-          credential.environment,
-        );
-        return { ...credential, directory: cloned };
-      },
-      gitFailureLine,
-    );
+  const {
+    repository,
+    environment,
+    refresh,
+    refreshApart,
+    readApart,
+    directory,
+  } = await runStep(
+    runCloneFailed,
+    async () => {
+      const credential = await workerCredential({
+        task,
+        bearer,
+        repositories,
+        credentialFiles,
+        repositoryId,
+        keepSecret,
+        request,
+        ...(write === undefined ? {} : { write }),
+        ...(minted === undefined ? {} : { directory: minted }),
+      });
+      const cloned = await clone(
+        credential.repository,
+        base,
+        workspace ?? required(workerWorkspaceVariable),
+        credential.environment,
+      );
+      return { ...credential, directory: cloned };
+    },
+    gitFailureLine,
+  );
   const changeBase = await workerChangeBase(input, directory);
   const images = ticketImageReferences(input);
   return {
@@ -1253,7 +1437,7 @@ export async function workerWorkspace(
     base,
     directory,
     environment,
-    ...(refresh === undefined ? {} : { refresh, refreshApart }),
+    ...(refresh === undefined ? {} : { refresh, refreshApart, readApart }),
     ...(changeBase === undefined ? {} : { changeBase }),
     ...(images.length === 0 ? {} : { images }),
   };
@@ -1681,6 +1865,7 @@ async function workerAttemptWorked(attempt, workspace, git) {
   };
   const working = { task, held: attempt.held, scrub, git, ...aside };
   const restored = await workCheckpointRestored(working, workspace);
+  const target = await workTargetMergedAtStart(working, workspace, attempt);
   const { keep, keepAgain } = workKeptOnce(() =>
     workCheckpointed(working, workspace),
   );
@@ -1698,6 +1883,7 @@ async function workerAttemptWorked(attempt, workspace, git) {
       evidence,
       agent: attempt.agent,
       restored,
+      target,
       keep,
       keepAgain,
       clock: attempt.clock,
@@ -1706,6 +1892,11 @@ async function workerAttemptWorked(attempt, workspace, git) {
     attempt.commands,
   ).catch(async (failure) => {
     throw await workFailureKept(failure, keep);
+  });
+  await workTargetMergedAtEnd(working, workspace, attempt, {
+    run,
+    started: target,
+    keep,
   });
   await publishWorkerResult(
     {

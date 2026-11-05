@@ -96,15 +96,13 @@ export function claudeInvocation(task) {
   return [...claudeRunArguments(task), "--", task.briefing.text];
 }
 
-/** The same run carrying on in the conversation `session` named. */
-export function claudeResumeInvocation(task, session) {
-  return [
-    ...claudeRunArguments(task),
-    "--resume",
-    session,
-    "--",
-    claudeResumePrompt,
-  ];
+/** The same run carrying on in the conversation `session` named, told `prompt`, which is a held run's where none is given. */
+export function claudeResumeInvocation(
+  task,
+  session,
+  prompt = claudeResumePrompt,
+) {
+  return [...claudeRunArguments(task), "--resume", session, "--", prompt];
 }
 
 /** `text` as one POSIX shell word, whatever quotes it holds. */

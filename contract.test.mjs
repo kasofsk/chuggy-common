@@ -1095,7 +1095,11 @@ test("the manifest the pod reports is one the contract's manifest schema reads",
                 env: { PATH: process.env.PATH ?? "", ...options.env },
               })
             : {
-                stdout: args.includes("rev-list") ? "" : `${"a".repeat(40)}\n`,
+                stdout: ["rev-list", "MERGE_HEAD", "--diff-filter=U"].some(
+                  (asked) => args.includes(asked),
+                )
+                  ? ""
+                  : `${"a".repeat(40)}\n`,
               },
       },
       {
