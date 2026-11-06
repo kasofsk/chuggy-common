@@ -24,6 +24,9 @@ import {
   chuggyToolTicketLandingBytesMax,
   chuggyToolTicketLandingsResponseBytesMax,
   chuggyToolTimeoutMs,
+  epicPageLimitMax,
+  epicSummaryCharsMax,
+  epicTitleCharsMax,
   nativeHttpPageItemsMax,
   runTranscriptBatchBytesMax,
   runTranscriptPageBatchesMax,
@@ -203,6 +206,8 @@ test("every tool that takes a brief says an intent is bounded as a whole, and gi
 const pageBounds = {
   list_tickets: nativeHttpPageItemsMax,
   list_drafts: nativeHttpPageItemsMax,
+  list_epics: epicPageLimitMax,
+  read_epic_history: epicPageLimitMax,
   list_configurations: nativeHttpPageItemsMax,
   read_decision_log: selectorHistoryLimitMax,
   read_refusals: agenticRefusalsAnsweredMax,
@@ -2939,7 +2944,7 @@ test("read_abilities says who the session is and what it may do", () => {
       /^Who this session acts as and what it may do on this project, read live\./,
       /Call it once before acting\./,
       /`principal` is the session's own principal, encoded as a ticket's `creator` is, so the tickets whose `creator` is it are yours/,
-      /`dispatch` and `skipPlannedEvaluations` among them: read a permit here rather than learning it from a refusal/,
+      /`dispatch`, `skipPlannedEvaluations` and `writeEpic` among them: read a permit here rather than learning it from a refusal/,
     ],
   };
 
@@ -3474,6 +3479,14 @@ test("read_ticket says what a following ticket's `following` answers", () => {
   );
 });
 
+const epicContentGiven = {
+  title: "Search",
+  summary: "Find things",
+  description: "All of search.",
+  visibility: "Active",
+  tickets: [4, 5],
+};
+
 /** What every project tool is driven with where a suite drives them all. */
 const projectToolArguments = {
   list_tickets: {},
@@ -3500,6 +3513,10 @@ const projectToolArguments = {
   fetch_image: { artifact: "image/png:ce47" },
   read_docs: {},
   read_abilities: {},
+  list_epics: {},
+  read_epic: { epic: 3 },
+  read_epic_history: { epic: 3 },
+  read_epic_graph: { epic: 3 },
   initialize_draft: { revision: "r1" },
   file_dependent: dependent,
   revise_draft: {
@@ -3524,6 +3541,10 @@ const projectToolArguments = {
     authoringVersion: 2,
     configurationRevision: "r1",
   },
+  create_epic: epicContentGiven,
+  revise_epic: { epic: 3, expectedRevision: 5, ...epicContentGiven },
+  add_epic_tickets: { epic: 3, tickets: [9] },
+  remove_epic_tickets: { epic: 3, tickets: [4] },
 };
 
 /** What every member tool is driven with where a suite drives them all. */
@@ -3588,12 +3609,20 @@ test("origination, revocation, updating and dispatching are registered for a thr
     "create_draft",
     "revoke_ticket",
     "update_ticket",
+    "create_epic",
+    "revise_epic",
+    "add_epic_tickets",
+    "remove_epic_tickets",
   ]);
   assert.deepEqual(registered(["TicketDispatch"]), ["dispatch_ticket"]);
   for (const tool of [
     "create_draft",
     "revoke_ticket",
     "update_ticket",
+    "create_epic",
+    "revise_epic",
+    "add_epic_tickets",
+    "remove_epic_tickets",
     "dispatch_ticket",
   ]) {
     assert.ok(registered([...threadRoster]).includes(tool), tool);
@@ -3635,15 +3664,23 @@ test("every project tool a session holds asks its route, read_docs the docs host
                   ? JSON.stringify({ repositories: [] })
                   : path.includes("/configurations?")
                     ? JSON.stringify({ configurations: [] })
-                    : path.includes("/draft-initializations/")
-                      ? JSON.stringify(draftInitialized)
-                      : "{}",
+                    : path.endsWith("/epics/3")
+                      ? JSON.stringify(epicRead)
+                      : path.includes("/draft-initializations/")
+                        ? JSON.stringify(draftInitialized)
+                        : "{}",
       }),
     );
 
     const answer = await call(name, projectToolArguments[name]);
 
-    const asked = { dispatch_ticket: 2, read_docs: 0 }[name] ?? 1;
+    const asked =
+      {
+        dispatch_ticket: 2,
+        read_docs: 0,
+        add_epic_tickets: 2,
+        remove_epic_tickets: 2,
+      }[name] ?? 1;
     assert.equal(api.calls.length, asked, name);
     assert.equal(docs.length, name === "read_docs" ? 1 : 0, name);
     assert.ok(answer.isError === undefined, name);
@@ -4033,4 +4070,298 @@ test("every tool's description is whole within what Claude Code passes an agent"
       description.length <= toolDescriptionCharsMax,
       `${name}: ${String(description.length)}`,
     );
+});
+
+/** An epic as its route reads it. */
+const epicRead = {
+  number: 3,
+  revision: 5,
+  title: "Search",
+  summary: "Find things",
+  visibility: "Active",
+  progress: { byPhase: { Done: 1, Pending: 1 }, done: 1, total: 2 },
+  status: "in_progress",
+  waitingOnOutside: [],
+  description: "All of search.",
+  tickets: [4, 5],
+};
+
+const epicsPath = "/api/v1/tenants/vteng/projects/chuggy/epics";
+
+/** A fake chuggy that holds one epic: reads answer it, writes answer `written` in turn. */
+function epicApi(written) {
+  const answers = [...written];
+  return toolsOf({}, (_path, init) =>
+    (init?.method ?? "GET") === "GET"
+      ? { status: 200, body: JSON.stringify(epicRead) }
+      : answers.shift(),
+  );
+}
+
+test("each epic tool reaches the route the contract names for it", async () => {
+  for (const [[name, args], suffix] of [
+    [["list_epics", {}], "/epics"],
+    [
+      [
+        "list_epics",
+        {
+          search: "find",
+          visibility: "All",
+          ticket: 4,
+          sort: "title",
+          after: 2,
+          limit: 5,
+        },
+      ],
+      "/epics?search=find&visibility=All&ticket=4&sort=title&after=2&limit=5",
+    ],
+    [["read_epic", { epic: 3 }], "/epics/3"],
+    [
+      ["read_epic_history", { epic: 3, after: 2, limit: 5 }],
+      "/epics/3/history?after=2&limit=5",
+    ],
+    [["read_epic_graph", { epic: 3 }], "/epics/3/graph"],
+    [["list_tickets", { epic: 3, limit: 5 }], "?limit=5&epic=3"],
+  ]) {
+    const api = apiOf();
+
+    await routeOf(name, args, api);
+
+    assert.equal(
+      api.calls[0].path,
+      `/api/v1/tenants/vteng/projects/chuggy${suffix}`,
+      name,
+    );
+    assert.equal(api.calls[0].method, "GET", name);
+  }
+});
+
+test("create_epic writes the content at the epics route as a Create", async () => {
+  const saved = JSON.stringify({ epic: 8, revision: 1 });
+  const { api, call } = toolsOf({}, () => ({ status: 200, body: saved }));
+
+  const answer = await call("create_epic", epicContentGiven);
+
+  assert.equal(api.calls.length, 1);
+  assert.equal(api.calls[0].method, "POST");
+  assert.equal(api.calls[0].path, epicsPath);
+  assert.deepEqual(JSON.parse(api.calls[0].init.body), {
+    kind: "Create",
+    content: epicContentGiven,
+  });
+  assert.equal(textOf(answer), `HTTP 200\n${saved}`);
+  assert.ok(answer.isError === undefined);
+});
+
+test("revise_epic writes whole against the revision it was given, and a refusal is relayed unaltered and never asked again", async () => {
+  const body = JSON.stringify({
+    error: { code: "StaleRevision", message: "stale" },
+    current: 6,
+  });
+  const { api, call } = toolsOf({}, () => ({ status: 409, body }));
+
+  const answer = await call("revise_epic", {
+    epic: 3,
+    expectedRevision: 5,
+    ...epicContentGiven,
+  });
+
+  assert.equal(api.calls.length, 1);
+  assert.deepEqual(JSON.parse(api.calls[0].init.body), {
+    kind: "Revise",
+    epic: 3,
+    expected: 5,
+    content: epicContentGiven,
+  });
+  assert.equal(textOf(answer), `HTTP 409\n${body}`);
+  assert.equal(answer.isError, true);
+});
+
+test("an epic write past the title or summary bound is refused before any call is made", async () => {
+  const { api, call } = toolsOf();
+
+  for (const content of [
+    { ...epicContentGiven, title: "t".repeat(epicTitleCharsMax + 1) },
+    { ...epicContentGiven, summary: "s".repeat(epicSummaryCharsMax + 1) },
+    { ...epicContentGiven, visibility: "All" },
+  ])
+    assert.equal((await call("create_epic", content)).isError, true);
+  assert.equal(api.calls.length, 0);
+});
+
+test("add_epic_tickets reads the epic and revises it with only its members changed", async () => {
+  const saved = JSON.stringify({ epic: 3, revision: 6 });
+  const { api, call } = epicApi([{ status: 200, body: saved }]);
+
+  const answer = await call("add_epic_tickets", { epic: 3, tickets: [9, 4] });
+
+  assert.deepEqual(
+    api.calls.map(({ method }) => method),
+    ["GET", "POST"],
+  );
+  assert.equal(api.calls[0].path, `${epicsPath}/3`);
+  assert.deepEqual(JSON.parse(api.calls[1].init.body), {
+    kind: "Revise",
+    epic: 3,
+    expected: 5,
+    content: {
+      title: "Search",
+      summary: "Find things",
+      description: "All of search.",
+      visibility: "Active",
+      tickets: [4, 5, 9],
+    },
+  });
+  assert.equal(textOf(answer), `HTTP 200\n${saved}`);
+});
+
+test("remove_epic_tickets drops the named members that are in the epic and leaves the rest", async () => {
+  const { api, call } = epicApi([{ status: 200, body: "{}" }]);
+
+  await call("remove_epic_tickets", { epic: 3, tickets: [4, 99] });
+
+  assert.deepEqual(JSON.parse(api.calls[1].init.body).content.tickets, [5]);
+});
+
+test("a membership change that changes nothing writes nothing", async () => {
+  for (const [name, tickets, said] of [
+    ["add_epic_tickets", [4, 5], /already holds those tickets/],
+    ["remove_epic_tickets", [99], /holds none of those tickets/],
+  ]) {
+    const { api, call } = epicApi([]);
+
+    const answer = await call(name, { epic: 3, tickets });
+
+    assert.deepEqual(
+      api.calls.map(({ method }) => method),
+      ["GET"],
+      name,
+    );
+    assert.match(textOf(answer), said, name);
+    assert.match(textOf(answer), /stays at revision 5/, name);
+    assert.ok(answer.isError === undefined, name);
+  }
+});
+
+test("a membership write that went stale is read and written once more, from a fresh read", async () => {
+  const stale = {
+    status: 409,
+    body: JSON.stringify({
+      error: { code: "StaleRevision", message: "stale" },
+      current: 6,
+    }),
+  };
+  const saved = JSON.stringify({ epic: 3, revision: 7 });
+  const newer = {
+    ...epicRead,
+    revision: 6,
+    title: "Search v2",
+    tickets: [4, 5, 6],
+  };
+  let posts = 0;
+  const { api, call } = toolsOf({}, (_path, init) => {
+    if ((init?.method ?? "GET") === "GET")
+      return {
+        status: 200,
+        body: JSON.stringify(posts === 0 ? epicRead : newer),
+      };
+    posts += 1;
+    return posts === 1 ? stale : { status: 200, body: saved };
+  });
+
+  const answer = await call("add_epic_tickets", { epic: 3, tickets: [9] });
+
+  assert.deepEqual(
+    api.calls.map(({ method }) => method),
+    ["GET", "POST", "GET", "POST"],
+  );
+  const retried = JSON.parse(api.calls[3].init.body);
+  assert.equal(retried.expected, 6);
+  assert.equal(retried.content.title, "Search v2");
+  assert.deepEqual(retried.content.tickets, [4, 5, 6, 9]);
+  assert.equal(textOf(answer), `HTTP 200\n${saved}`);
+});
+
+test("a second stale membership write and any other refusal are relayed, not asked again", async () => {
+  const stale = {
+    status: 409,
+    body: JSON.stringify({ error: { code: "StaleRevision", message: "s" } }),
+  };
+  const twice = epicApi([stale, stale]);
+
+  const answer = await twice.call("add_epic_tickets", {
+    epic: 3,
+    tickets: [9],
+  });
+
+  assert.equal(twice.api.calls.length, 4);
+  assert.equal(textOf(answer), `HTTP 409\n${stale.body}`);
+  assert.equal(answer.isError, true);
+
+  const unknown = {
+    status: 409,
+    body: JSON.stringify({
+      error: { code: "UnknownTickets", message: "u" },
+      tickets: [9],
+    }),
+  };
+  const once = epicApi([unknown]);
+
+  const refused = await once.call("add_epic_tickets", {
+    epic: 3,
+    tickets: [9],
+  });
+
+  assert.equal(once.api.calls.length, 2);
+  assert.equal(textOf(refused), `HTTP 409\n${unknown.body}`);
+});
+
+test("a membership change on an epic that cannot be read relays the read's refusal and writes nothing", async () => {
+  const body = JSON.stringify({ error: { code: "NotFound", message: "n" } });
+  const { api, call } = toolsOf({}, () => ({ status: 404, body }));
+
+  const answer = await call("remove_epic_tickets", { epic: 3, tickets: [4] });
+
+  assert.equal(api.calls.length, 1);
+  assert.equal(textOf(answer), `HTTP 404\n${body}`);
+  assert.equal(answer.isError, true);
+});
+
+test("create_draft carries its epic, and an epic that is missing or Archived is relayed as the API refused it", async () => {
+  for (const [status, code] of [
+    [404, "MissingEpic"],
+    [409, "ArchivedEpic"],
+    [409, "LargeContent"],
+  ]) {
+    const body = JSON.stringify({ error: { code, message: "m" } });
+    const { api, call } = toolsOf({}, () => ({ status, body }));
+
+    const answer = await call("create_draft", { ...origination, epic: 3 });
+
+    assert.equal(JSON.parse(api.calls[0].init.body).epic, 3);
+    assert.equal(textOf(answer), `HTTP ${String(status)}\n${body}`);
+    assert.equal(answer.isError, true);
+    assert.equal(api.calls.length, 1, "a refused epic was asked again");
+  }
+});
+
+test("the epic tools are described: the writes name their refusals and the ability that admits them", () => {
+  const described = (tool) =>
+    chuggyProjectTools.find(({ name }) => name === tool).description;
+
+  for (const tool of [
+    "create_epic",
+    "revise_epic",
+    "add_epic_tickets",
+    "remove_epic_tickets",
+  ])
+    for (const said of [/StaleRevision/, /UnknownTickets/, /read_abilities/])
+      assert.match(described(tool), said, tool);
+  assert.match(described("read_ticket"), /`epics`/);
+  assert.match(described("list_tickets"), /`epics`/);
+  assert.match(
+    parameterDescribed("list_tickets", "epic"),
+    /only the tickets in this epic/,
+  );
+  assert.match(parameterDescribed("create_draft", "epic"), /MissingEpic/);
 });
