@@ -209,7 +209,7 @@ const chuggyDraftBriefDescription = `The minimum brief is {title, intent, links:
 ${chuggyBriefDescription}`;
 
 /** How an epic write is refused, which every tool that writes one says. */
-const chuggyEpicWriteRefusals = `A write is answered as the API answers it, its status and body unaltered: 409 with the \`code\` StaleRevision and the epic's \`current\` revision where it moved since it was read, UnknownTickets and the \`tickets\` that are none the project holds, a draft not yet released among them and an epic holding one refusing every write until it is released, ArchivedEpic where an Archived epic's tickets would change, EmptyTitle, LongTitle, LongSummary or LargeContent for content an epic may not hold; 404 for no such epic; and 403 where your owner may read epics and not write them, which read_abilities says beforehand.`;
+const chuggyEpicWriteRefusals = `A write is answered as the API answers it, its status and body unaltered: 409 with the \`code\` StaleRevision and the epic's \`current\` revision where it moved since it was read, UnknownTickets and the \`tickets\` that are neither a ticket nor a draft of the project, ArchivedEpic where an Archived epic's tickets would change, EmptyTitle, LongTitle, LongSummary or LargeContent for content an epic may not hold; 404 for no such epic; and 403 where your owner may read epics and not write them, which read_abilities says beforehand.`;
 
 const chuggyDraftEpicDescription =
   "An epic the draft's ticket joins, in the same write, as list_epics answers its number; left out, it joins none. An epic that does not exist is refused 404 (MissingEpic), and an Archived one or one that would hold too much is refused 409 (ArchivedEpic, LargeContent) with nothing filed.";
@@ -1352,7 +1352,7 @@ const epicContent = (z) => ({
   tickets: z
     .array(ticket(z))
     .describe(
-      "The tickets in the epic, replacing its members whole; each is a ticket of this project, as list_tickets answers it. A ticket still a draft is refused here until it is released: create_draft's `epic` puts one in.",
+      "The tickets in the epic, replacing its members whole; each is a ticket of this project, as list_tickets answers it. A draft of the project is a member as a released ticket is, and stays one when it is released; deleting a draft takes it out of its epics.",
     ),
 });
 /** The epic revision a write's arguments carry, and nothing else of them. */
