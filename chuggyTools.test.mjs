@@ -3604,6 +3604,97 @@ test("origination, revocation, updating and dispatching are registered for a thr
   }
 });
 
+/** What each offer tool is driven with where a suite drives them all, `navigate` with a page carrying a field beside its name. */
+const offerToolArguments = {
+  navigate: { page: "TicketNew", draft: 7 },
+  offer_release: { ticket: 4, authoringVersion: 2 },
+  offer_revoke: { ticket: 26, revision: 3 },
+};
+
+test("the offer tools are registered under ThreadOffer alone, and no roster without it reaches one", () => {
+  const offers = Object.keys(offerToolArguments);
+  const registered = (capabilities) =>
+    chuggyToolDefinitions(
+      chuggyToolContext(task, bearer, {
+        capabilities,
+        staging: leadDecisionStaging(),
+      }),
+    ).map(({ name }) => name);
+  const without = everyCapability.filter(
+    (capability) => capability !== "ThreadOffer",
+  );
+
+  assert.deepEqual(registered(["ThreadOffer"]), offers);
+  assert.deepEqual(
+    registered(without).filter((name) => offers.includes(name)),
+    [],
+  );
+  const { allowedTools, disallowedTools } = sessionAllowedTools(without);
+  for (const offer of offers) {
+    assert.ok(!allowedTools.includes(`${chuggyToolPrefix}${offer}`), offer);
+    assert.ok(disallowedTools.includes(`${chuggyToolPrefix}${offer}`), offer);
+  }
+});
+
+test("each offer tool takes the contract's shape and answers without asking any route", async () => {
+  for (const [name, args] of Object.entries(offerToolArguments)) {
+    const { api, call } = toolsOf();
+
+    const answer = await call(name, args);
+
+    assert.ok(answer.isError === undefined, name);
+    assert.equal(api.calls.length, 0, name);
+  }
+});
+
+test("navigate answers the page it was given, a field beside its name included", async () => {
+  for (const page of [
+    { page: "TicketNew", draft: 7 },
+    { page: "TicketNew", from: 3 },
+    { page: "TicketNew" },
+    { page: "Ticket", ticket: 41 },
+    { page: "Settings", section: "ProjectPlacement" },
+    { page: "Repository", repository: "github.com/acme/atlas" },
+    { page: "Inbox" },
+  ]) {
+    const { call } = toolsOf();
+
+    const answer = await call("navigate", page);
+
+    assert.ok(answer.isError === undefined, JSON.stringify(page));
+    assert.deepEqual(
+      JSON.parse(/^.*? to (\{.*\})\.$/u.exec(textOf(answer))[1]),
+      page,
+    );
+  }
+});
+
+test("each offer tool refuses an input the contract does not parse, as an error that asks no route", async () => {
+  for (const [name, args, why] of [
+    ["navigate", { page: "Nowhere" }, /page/u],
+    ["navigate", { page: "Ticket" }, /navigate names no page/u],
+    ["navigate", { page: "Inbox", ticket: 4 }, /navigate names no page/u],
+    [
+      "navigate",
+      { page: "TicketNew", from: 3, draft: 7 },
+      /navigate names no page/u,
+    ],
+    ["navigate", { page: "Settings", section: "Nowhere" }, /section/u],
+    ["offer_release", { ticket: 4 }, /authoringVersion/u],
+    ["offer_release", { ticket: 4, authoringVersion: -1 }, /authoringVersion/u],
+    ["offer_revoke", { ticket: 26 }, /revision/u],
+    ["offer_revoke", { ticket: 26, revision: 0 }, /revision/u],
+  ]) {
+    const { api, call } = toolsOf();
+
+    const answer = await call(name, args);
+
+    assert.equal(answer.isError, true, `${name} ${JSON.stringify(args)}`);
+    assert.match(textOf(answer), why);
+    assert.equal(api.calls.length, 0, name);
+  }
+});
+
 /**
  * Every project tool through the handler a session is given, which is where a
  * tool that answered without asking stood: a suite that drives the definition

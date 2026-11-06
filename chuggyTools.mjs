@@ -127,6 +127,12 @@
  * that capability too, which is what keeps them from a roster that does not
  * hold it, and `dispatch_ticket` is under `TicketDispatch` alone.
  *
+ * AN OFFER TOOL REACHES NO ROUTE AND WRITES NOTHING. `navigate`, `offer_release`
+ * and `offer_revoke` are under `ThreadOffer` alone, and each checks its input
+ * against the contract's own schema and answers. The call standing in the
+ * transcript is the whole of what it does: the console reads it there, and
+ * draws nothing of a call answered as an error.
+ *
  * `zod` IS A PEER DEPENDENCY OF THE AGENT SDK, NOT ONE OF ITS DEPENDENCIES, so
  * the shapes are functions of a `z` the caller resolves rather than of an import
  * here, and the image's build probes are what prove the peer is installed and is
@@ -160,12 +166,15 @@ import {
   chuggyToolServerName,
   chuggyToolTicketLandingsResponseBytesMax,
   chuggyToolTimeoutMs,
+  consolePageSchema,
   dependentRelationsAdmitted,
   imageMediaTypes,
   nativeHttpMediaType,
   nativeHttpPageItemsMax,
   projectArtifactEncoding,
   selectorHistoryLimitMax,
+  threadOfferReleaseSchema,
+  threadOfferRevokeSchema,
   threadTurnsAnsweredMax,
   ticketLandingsAnsweredMax,
 } from "@chuggy/worker-contract/sessionTools";
@@ -1963,11 +1972,107 @@ export const chuggyMemberTools = [
   },
 ];
 
+/** The pages `navigate` names and the settings sections one of them names, read off the contract's own union. */
+function navigateVocabulary() {
+  const variants = consolePageSchema.options.map(({ shape }) => shape);
+  return {
+    pages: [...new Set(variants.map(({ page }) => page.value))],
+    sections: variants
+      .find(({ page }) => page.value === "Settings")
+      .section.unwrap().options,
+  };
+}
+
+/** Where `navigate` read no page the console draws, with the contract's own account of why. */
+function navigatePage(args) {
+  const read = consolePageSchema.safeParse(args);
+  if (!read.success)
+    throw new Error(
+      `navigate names no page the console draws: ${read.error.message}`,
+    );
+  return read.data;
+}
+
 /**
- * Every tool this session holds, project, member and decision alike, filtered
- * by the capability roster its row carries. A tool the roster does not admit
- * is not registered at all, so the runtime's own tool list is the proof rather
- * than this source.
+ * Every tool a thread offers its owner rather than doing, exported as the
+ * project tools are. `navigate`'s page is a union, so its shape is the fields
+ * every page may carry and the contract's union is what the call checks.
+ */
+export const chuggyOfferTools = [
+  {
+    name: "navigate",
+    description:
+      "Moves your owner's console to one page. The console follows it only while your owner is still on the page they wrote from, so it is an offer of a page and never the only place your answer is. The fields beside `page` are the ones that page names, and no other.",
+    shape: (z) => {
+      const { pages, sections } = navigateVocabulary();
+      return {
+        page: z.enum(pages).describe("The page, by the console's own name."),
+        ticket: ticket(z)
+          .describe("For Ticket and TicketEdit, the ticket it shows.")
+          .optional(),
+        from: ticket(z)
+          .describe(
+            "For TicketNew, the ticket the new one duplicates; never with `draft`.",
+          )
+          .optional(),
+        draft: ticket(z)
+          .describe(
+            "For TicketNew, the draft it opens, by its ticket; never with `from`.",
+          )
+          .optional(),
+        repository: identity(z)
+          .describe(
+            "For Repository, the repository it shows, as list_repositories answers its `repository`.",
+          )
+          .optional(),
+        section: z
+          .enum(sections)
+          .describe("For Settings, the section it opens.")
+          .optional(),
+      };
+    },
+    call: (_context, args) =>
+      `Your owner's console is asked to move to ${JSON.stringify(navigatePage(args))}.`,
+  },
+  {
+    name: "offer_release",
+    description:
+      "Puts one draft's release in front of your owner as a card they confirm or decline, at exactly the authoring version you name. Their answer arrives as an OfferReply turn.",
+    shape: (z) => ({
+      ticket: ticket(z),
+      authoringVersion: count(z).describe(
+        "The draft's `authoringVersion`, as read_draft answers it; a confirmation releases that version and no other.",
+      ),
+    }),
+    call: (_context, args) => {
+      const { ticket: offered, authoringVersion: version } =
+        threadOfferReleaseSchema.parse(args);
+      return `Ticket ${String(offered)}'s release at authoring version ${String(version)} is offered to your owner.`;
+    },
+  },
+  {
+    name: "offer_revoke",
+    description:
+      "Puts one ticket's revocation in front of your owner as a card they confirm or decline, at exactly the revision you name. Their answer arrives as an OfferReply turn.",
+    shape: (z) => ({
+      ticket: ticket(z),
+      revision: ticket(z).describe(
+        "The ticket's `revision`, as read_ticket answers it; a confirmation revokes it at that revision and no other.",
+      ),
+    }),
+    call: (_context, args) => {
+      const { ticket: offered, revision: at } =
+        threadOfferRevokeSchema.parse(args);
+      return `Ticket ${String(offered)}'s revocation at revision ${String(at)} is offered to your owner.`;
+    },
+  },
+];
+
+/**
+ * Every tool this session holds, project, member, offer and decision alike,
+ * filtered by the capability roster its row carries. A tool the roster does
+ * not admit is not registered at all, so the runtime's own tool list is the
+ * proof rather than this source.
  */
 export function chuggyToolDefinitions(context) {
   const admitted = new Set(
@@ -1975,13 +2080,14 @@ export function chuggyToolDefinitions(context) {
       (held) => sessionCapabilityTools[held] ?? [],
     ),
   );
-  const served = [...chuggyProjectTools, ...chuggyMemberTools].map(
-    (definition) => ({
-      ...definition,
-      call: (args) =>
-        definition.call(context, scrubbedArguments(args, context)),
-    }),
-  );
+  const served = [
+    ...chuggyProjectTools,
+    ...chuggyMemberTools,
+    ...chuggyOfferTools,
+  ].map((definition) => ({
+    ...definition,
+    call: (args) => definition.call(context, scrubbedArguments(args, context)),
+  }));
   return [...served, ...context.staging.definitions].filter((definition) =>
     admitted.has(definition.name),
   );
