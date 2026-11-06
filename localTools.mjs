@@ -36,6 +36,7 @@ import {
   chuggyToolContext,
   chuggyToolDefinitions,
   chuggyToolHandler,
+  chuggyToolInput,
   chuggyToolSignal,
 } from "./chuggyTools.mjs";
 import { localSignIn } from "./localSignIn.mjs";
@@ -130,7 +131,7 @@ export function localToolServer(context, sdk) {
           chuggySubmissionRepeatDescription,
           localToolRepeatDescription,
         ),
-        inputSchema: definition.shape(sdk.z),
+        inputSchema: chuggyToolInput(definition, sdk.z),
       },
       chuggyToolHandler(definition, sdk.z),
     );

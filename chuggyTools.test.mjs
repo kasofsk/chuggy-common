@@ -3684,6 +3684,17 @@ test("each offer tool refuses an input the contract does not parse, as an error 
     ["offer_release", { ticket: 4, authoringVersion: -1 }, /authoringVersion/u],
     ["offer_revoke", { ticket: 26 }, /revision/u],
     ["offer_revoke", { ticket: 26, revision: 0 }, /revision/u],
+    ["navigate", { page: "Inbox", tab: "Unread" }, /tab/u],
+    [
+      "offer_release",
+      { ticket: 4, authoringVersion: 2, revision: 3 },
+      /revision/u,
+    ],
+    [
+      "offer_revoke",
+      { ticket: 26, revision: 3, authoringVersion: 2 },
+      /authoringVersion/u,
+    ],
   ]) {
     const { api, call } = toolsOf();
 
@@ -3692,6 +3703,31 @@ test("each offer tool refuses an input the contract does not parse, as an error 
     assert.equal(answer.isError, true, `${name} ${JSON.stringify(args)}`);
     assert.match(textOf(answer), why);
     assert.equal(api.calls.length, 0, name);
+  }
+});
+
+/**
+ * The runtime validates a call against the schema it was handed before the
+ * handler sees it, so an undeclared key the handed schema drops never reaches
+ * the handler's own check, and still stands in the call the console reads.
+ */
+test("the server hands the runtime an offer tool's input as a schema that refuses an undeclared key", () => {
+  const server = chuggyToolServer(
+    chuggyToolContext(task, bearer, {
+      capabilities: ["ThreadOffer"],
+      staging: leadDecisionStaging(),
+    }),
+    {
+      z,
+      tool: (name, description, schema) => ({ name, schema }),
+      createSdkMcpServer: (options) => options,
+    },
+  );
+
+  for (const { name, schema } of server.tools) {
+    const args = offerToolArguments[name];
+    assert.equal(schema.safeParse(args).success, true, name);
+    assert.equal(schema.safeParse({ ...args, extra: 1 }).success, false, name);
   }
 });
 
