@@ -1183,6 +1183,11 @@ const everyToolArgument = {
   expectedProjectSequence: 1,
   authoring: { dependencies: [7] },
   brief: {},
+  epic: 3,
+  title: "t",
+  description: "d",
+  visibility: "Active",
+  tickets: [7],
 };
 
 /** The routes of the tools' table one path matches. */

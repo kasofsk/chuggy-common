@@ -75,6 +75,13 @@
  * route's body under the same bound, since that body carries the canonical
  * too.
  *
+ * ANOTHER IS AN EPIC, ANSWERED WITH ITS DESCRIPTION CUT where it is larger than
+ * one answer. Its route answers the description whole, bounded by what an epic
+ * may hold rather than by what one answer holds, so `read_epic` answers the
+ * rest of the view whole and the piece of the description from `offset` that
+ * fits, and `revise_epic` sent no `description` keeps the one the epic holds,
+ * so a long one never has to pass through the model to survive a revision.
+ *
  * THREE ARE ANSWERED RESHAPED. `list_repositories` adds to each row whether a
  * ticket may be filed in it, read from that row alone, and `initialize_draft`
  * leaves out the configuration's `canonical`, which `read_configuration`
@@ -110,6 +117,16 @@
  * A WRITE RELAYS THE API'S OUTCOME UNALTERED — the status and the error body, as
  * text. No retry, no repair, no hiding a 409. A tool that decided what a refusal
  * meant would be deciding something the API decided.
+ *
+ * AN EPIC WRITE MAY READ THE EPIC FIRST. `add_epic_tickets` and
+ * `remove_epic_tickets` always read it and revise it against the revision read,
+ * write nothing where its members would not change, and write once more from a
+ * fresh read where the API answers `StaleRevision`: the revision that went stale
+ * is the one the tool read, never one the model sent, so the retry decides
+ * nothing the API decided. A second stale answer, and every other refusal, is
+ * relayed unaltered. `revise_epic` reads it only when sent no `description`, and
+ * writes the one the epic holds against the revision the model gave, so an epic
+ * that has moved is still refused as stale and never retried.
  *
  * WHAT A PROJECT TOOL SENDS IS SCRUBBED. Its arguments are the model's, and the
  * model has read whatever its shell could, so every string of them, a key's
@@ -158,6 +175,7 @@ import {
   chuggyToolCapabilities,
   chuggyToolDocsResponseBytesMax,
   chuggyToolDispatchViewResponseBytesMax,
+  chuggyToolEpicViewResponseBytesMax,
   chuggyToolImageResponseBytesMax,
   chuggyToolNames,
   chuggyToolPrefix,
@@ -170,6 +188,11 @@ import {
   chuggyToolTimeoutMs,
   consolePageSchema,
   dependentRelationsAdmitted,
+  epicContentBytesMax,
+  epicPageLimitMax,
+  epicSummaryCharsMax,
+  epicTicketsMax,
+  epicTitleCharsMax,
   imageMediaTypes,
   nativeHttpMediaType,
   nativeHttpPageItemsMax,
@@ -215,6 +238,12 @@ const chuggyBriefDescription = `\`brief\` is {title?, intent, links, images?, ch
 /** What a draft's brief is first told: the least a ticket can be filed with, ahead of everything a brief may carry. */
 const chuggyDraftBriefDescription = `The minimum brief is {title, intent, links: [], repository: <clone URL from list_repositories>, branch: "refs/heads/<a new branch of your own>"}.
 ${chuggyBriefDescription}`;
+
+/** How an epic write is refused, which every tool that writes one says. */
+const chuggyEpicWriteRefusals = `A write is answered as the API answers it, its status and body unaltered: 409 with the \`code\` StaleRevision and the epic's \`current\` revision where it moved since it was read, UnknownTickets and the \`tickets\` that are neither a ticket nor a draft of the project, ArchivedEpic where an Archived epic's tickets would change, EmptyTitle, LongTitle, LongSummary, ManyTickets or LargeContent for content an epic may not hold; 404 for no such epic; and 403 where your owner may read epics and not write them, which read_abilities says beforehand.`;
+
+const chuggyDraftEpicDescription =
+  "An epic the draft's ticket joins, in the same write, as list_epics answers its number; left out, it joins none. An epic that does not exist, is Archived or would hold too much is refused 409 with nothing filed, its `code` MissingEpic, ArchivedEpic, ManyTickets or LargeContent.";
 
 /** What a draft's authoring carries, which initialize_draft answers the defaults of. */
 const chuggyAuthoringDescription = `\`authoring\` is {program, dependencies}: pass initialize_draft's \`defaults\` unchanged unless you mean otherwise, and \`dependencies\` are ticket numbers chosen from list_tickets.`;
@@ -719,7 +748,7 @@ function readConfigurationChild(value, key) {
  * not, or `total` where that fits: the largest that fits wherever a larger
  * count never composes a lighter answer. `compose(0)` fits.
  */
-function readConfigurationFitting(total, compose) {
+function chuggyToolAnswerFitting(total, compose) {
   let low = 0;
   let high = total;
   while (low < high) {
@@ -745,7 +774,7 @@ function readConfigurationMissing(path, depth, value) {
     const left = keys.length - named;
     return `${opening}, which is an object whose keys are ${JSON.stringify(keys.slice(0, named))}${left > 0 ? ` and ${String(left)} more` : ""}.`;
   };
-  return compose(readConfigurationFitting(keys.length, compose));
+  return compose(chuggyToolAnswerFitting(keys.length, compose));
 }
 
 /** One outline entry: its key, and its child whole where that is short, or what the child is. */
@@ -783,7 +812,7 @@ function readConfigurationOutline(head, path, value, offset) {
       note: `This ${kind} is larger than one answer holds, so this is its outline: each entry's child whole where it is short, and otherwise its kind, its entries and its length in characters. ${left > 0 ? `${String(left)} entries are left, which offset ${String(next)} reads on from. ` : ""}Append an entry's key to path to read that child.`,
     })}`;
   };
-  return compose(readConfigurationFitting(outline.length, compose));
+  return compose(chuggyToolAnswerFitting(outline.length, compose));
 }
 
 /**
@@ -809,7 +838,7 @@ function readConfigurationCut(head, path, value, offset) {
           : "This is the string's end.",
     })}`;
   };
-  return compose(readConfigurationFitting(value.length - offset, compose));
+  return compose(chuggyToolAnswerFitting(value.length - offset, compose));
 }
 
 /**
@@ -1218,6 +1247,185 @@ function submit(context, mutation) {
   );
 }
 
+/** Whether a refused epic write's body says the revision it was written against is no longer the epic's. */
+function epicWriteStale(status, text) {
+  if (status !== 409) return false;
+  try {
+    return JSON.parse(text)?.error?.code === "StaleRevision";
+  } catch {
+    return false;
+  }
+}
+
+/** The fields of an epic read that a revision of it carries over, or nothing where the body is not an epic as the route answers one. */
+function epicRevisable(text) {
+  let view;
+  try {
+    view = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  const { revision, title, summary, description, visibility, tickets } =
+    view ?? {};
+  return Number.isSafeInteger(revision) &&
+    typeof title === "string" &&
+    typeof description === "string" &&
+    (summary === undefined || typeof summary === "string") &&
+    (visibility === "Active" || visibility === "Archived") &&
+    Array.isArray(tickets) &&
+    tickets.every(Number.isSafeInteger)
+    ? { revision, title, summary, description, visibility, tickets }
+    : undefined;
+}
+
+/**
+ * One epic. A view that fits one answer is answered verbatim; one that does
+ * not, or any read with an `offset`, is answered with its description cut to
+ * the piece from `offset` that fits and how much of it is left. It is drawn
+ * under the epic view's own bound, which an ordinary read's is not.
+ */
+async function readEpic(context, epic, offset) {
+  const body = await drawn(
+    context,
+    projectPath(context, "epic", { epic }),
+    chuggyToolEpicViewResponseBytesMax,
+    "this epic",
+  );
+  if (body.refused !== undefined) return body.refused;
+  const head = `HTTP ${String(body.status)}\n`;
+  if (offset === undefined && chuggyToolAnswerFits(`${head}${body.text}`))
+    return answered(`${head}${body.text}`);
+  const view = readEpicView(body.text);
+  if (view === undefined)
+    return answered(
+      `the epic route answered HTTP ${String(body.status)} with a body that is not an epic as the contract answers one.`,
+      true,
+    );
+  const { description } = view;
+  const start = offset ?? 0;
+  if (start > description.length)
+    return answered(
+      `offset ${String(start)} is past the end of this epic's description, which has ${String(description.length)} characters.`,
+      true,
+    );
+  const compose = (taken) => {
+    const next = start + taken;
+    const left = description.length - next;
+    return `${head}${JSON.stringify({
+      ...view,
+      description: description.slice(start, next),
+      descriptionChars: description.length,
+      descriptionOffset: start,
+      descriptionCharsLeft: left,
+      note:
+        left > 0
+          ? `This description is longer than one answer holds; ${String(left)} characters are left, which offset ${String(next)} reads on from.`
+          : "This is the description's end.",
+    })}`;
+  };
+  return answered(
+    compose(chuggyToolAnswerFitting(description.length - start, compose)),
+  );
+}
+
+/** An epic read's view, parsed, or nothing where its body is not an object carrying a description. */
+function readEpicView(text) {
+  try {
+    const view = JSON.parse(text);
+    return typeof view?.description === "string" ? view : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * An epic revised whole from the arguments, its description the one the epic
+ * holds where they leave it out. That one is read and written against
+ * `expectedRevision`, so a description that moved since is refused as stale
+ * rather than carried over.
+ */
+async function reviseEpic(context, args) {
+  let { description } = args;
+  if (description === undefined) {
+    const body = await drawn(
+      context,
+      projectPath(context, "epic", { epic: args.epic }),
+      chuggyToolEpicViewResponseBytesMax,
+      "this epic",
+    );
+    if (body.refused !== undefined) return body.refused;
+    const held = epicRevisable(body.text);
+    if (held === undefined)
+      return answered(
+        `the epic route answered HTTP ${String(body.status)} with a body that is not an epic as the contract answers one.`,
+        true,
+      );
+    description = held.description;
+  }
+  return write(context, projectPath(context, "epics"), "POST", {
+    kind: "Revise",
+    epic: args.epic,
+    expected: args.expectedRevision,
+    content: epicContentOf({ ...args, description }),
+  });
+}
+
+/**
+ * An epic's members changed and nothing else: the epic is read, `change` names
+ * the members it is to have (nothing where it already has them, so nothing is
+ * written), and the revision is written against the one read. A write the API
+ * refuses as stale is read and written once more, since only this call's own
+ * read went stale; any other refusal is relayed as a write's is, and so is a
+ * second stale one.
+ */
+async function epicMembersChanged(context, epic, change, unchanged) {
+  for (let attempt = 0; ; attempt += 1) {
+    const body = await drawn(
+      context,
+      projectPath(context, "epic", { epic }),
+      chuggyToolEpicViewResponseBytesMax,
+      "this epic",
+    );
+    if (body.refused !== undefined) return body.refused;
+    const held = epicRevisable(body.text);
+    if (held === undefined)
+      return answered(
+        `the epic route answered HTTP ${String(body.status)} with a body that is not an epic as the contract answers one.`,
+        true,
+      );
+    const tickets = change(held.tickets);
+    if (tickets === undefined)
+      return answered(
+        `${unchanged(held.tickets)}, so nothing was written; it stays at revision ${String(held.revision)}.`,
+      );
+    const { revision, ...content } = held;
+    const response = await context.request(
+      context.task,
+      context.bearer,
+      projectPath(context, "epics"),
+      {
+        method: "POST",
+        headers: { "content-type": nativeHttpMediaType },
+        body: JSON.stringify({
+          kind: "Revise",
+          epic,
+          expected: revision,
+          content: { ...content, tickets },
+        }),
+      },
+    );
+    const { text } = await chuggyBoundedBody(
+      response,
+      chuggyToolResponseBytesMax,
+    );
+    if (attempt === 0 && epicWriteStale(response.status, text)) continue;
+    return answered(
+      `HTTP ${String(response.status)}\n${text}`,
+      response.status >= 400,
+    );
+  }
+}
+
 /**
  * The parameters several tools share, each describing itself, so every tool
  * that takes one publishes the sentence; a tool where one means something
@@ -1239,6 +1447,60 @@ const limit = (z, max) =>
       `The most items this page answers, at most ${String(max)}; left out, the route's own default.`,
     )
     .optional();
+const epic = (z) =>
+  z
+    .number()
+    .int()
+    .min(1)
+    .describe("An epic's number, as list_epics answers it.");
+/** What an epic's revision carries, which create_epic and revise_epic write whole. */
+const epicContent = (z) => ({
+  title: z
+    .string()
+    .max(epicTitleCharsMax)
+    .describe("The epic's title: one short line naming the body of work."),
+  summary: z
+    .string()
+    .max(epicSummaryCharsMax)
+    .describe("A short summary the epic is listed with; left out, it has none.")
+    .optional(),
+  description: z
+    .string()
+    .max(epicContentBytesMax)
+    .describe("What the epic is for and what finishes it, as Markdown."),
+  visibility: z
+    .enum(["Active", "Archived"])
+    .describe(
+      "Active epics take new tickets; an Archived one is kept and takes none.",
+    ),
+  tickets: z
+    .array(ticket(z))
+    .max(epicTicketsMax)
+    .describe(
+      "The tickets in the epic, replacing its members whole; each is a ticket of this project, as list_tickets answers it. A draft of the project is a member as a released ticket is, and stays one when it is released; deleting a draft takes it out of its epics.",
+    ),
+});
+/** The epic revision a write's arguments carry, and nothing else of them. */
+const epicContentOf = ({
+  title,
+  summary,
+  description,
+  visibility,
+  tickets,
+}) => ({
+  title,
+  summary,
+  description,
+  visibility,
+  tickets,
+});
+/** The tickets add_epic_tickets and remove_epic_tickets name. */
+const epicTickets = (z) =>
+  z
+    .array(ticket(z))
+    .min(1)
+    .max(epicTicketsMax)
+    .describe("The tickets to change, each once.");
 const count = (z) => z.number().int().min(0);
 /** A draft's authoring version, which a new draft starts at. */
 const authoringVersion = (z) => z.number().int().min(1);
@@ -1305,7 +1567,7 @@ export const chuggyProjectTools = [
   {
     name: "list_tickets",
     description:
-      "One page of this project's tickets, ascending by number or by recent activity. Call it to find a ticket and its phase. A page may hold fewer than `limit`, and only `nextAfter`, or `nextCursor`, present says there are more.",
+      "One page of this project's tickets, ascending by number or by recent activity. Call it to find a ticket and its phase. Each carries `epics`, the epics it is in, when it is in any. A page may hold fewer than `limit`, and only `nextAfter`, or `nextCursor`, present says there are more.",
     shape: (z) => ({
       after: ticket(z)
         .describe(
@@ -1331,19 +1593,24 @@ export const chuggyProjectTools = [
           'The `nextCursor` the previous page answered under `order: "RecentActivity"`, for the page after it; left out, the first page.',
         )
         .optional(),
+      epic: epic(z)
+        .describe(
+          "Lists only the tickets in this epic, as list_epics answers its number; left out, every ticket.",
+        )
+        .optional(),
     }),
     // An activity cursor is the server's own, so none names a ticket to move past.
     cursorOf: ({ order }) => (order === undefined ? "after" : undefined),
-    call: (context, { after, limit: pageLimit, phase, order, cursor }) =>
+    call: (context, { after, limit: pageLimit, phase, order, cursor, epic }) =>
       read(
         context,
-        `${projectPath(context, "project")}${search({ after, limit: pageLimit, phase, order, cursor })}`,
+        `${projectPath(context, "project")}${search({ after, limit: pageLimit, phase, order, cursor, epic })}`,
       ),
   },
   {
     name: "read_ticket",
     description:
-      "One ticket: its phase, its version, its authoring, its brief and what its runs cost. Call it for where a ticket stands. It carries `runTotals`, what every run of its executions reported, summed: turns, durations, tokens by kind, permission denials and `costUsdMicros`, millionths of a dollar at the runtime's list price, with tokens and cost per model in `models`. A ticket no run has reported for carries none. A ticket waiting because its run stopped at its clone, setup, commit, push or deadline, or because its runner's disk ran low, names that step's label, the execution and the attempt in `escalation.failed`, which read_run_error takes to read the attempt's error text. Where its work is landing, waits to land or escalated at landing, read_ticket_landings says how: its hold, its approval, or its pull request and what its merge waits on. A Pending ticket following its configuration's newest revision carries `following`: its `verdict`, one of Current, Moves, Held or Trimmed, and for Held the `code` its release would be refused with.",
+      "One ticket: its phase, its version, its authoring, its brief and what its runs cost. Call it for where a ticket stands. It carries `runTotals`, what every run of its executions reported, summed: turns, durations, tokens by kind, permission denials and `costUsdMicros`, millionths of a dollar at the runtime's list price, with tokens and cost per model in `models`. A ticket no run has reported for carries none. A ticket waiting because its run stopped at its clone, setup, commit, push or deadline, or because its runner's disk ran low, names that step's label, the execution and the attempt in `escalation.failed`, which read_run_error takes to read the attempt's error text. Where its work is landing, waits to land or escalated at landing, read_ticket_landings says how: its hold, its approval, or its pull request and what its merge waits on. A ticket in an epic carries `epics`, each epic's number and title, read_epic reads one. A Pending ticket following its configuration's newest revision carries `following`: its `verdict`, one of Current, Moves, Held or Trimmed, and for Held the `code` its release would be refused with.",
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
       read(context, projectPath(context, "ticket", { ticket: args.ticket })),
@@ -1663,14 +1930,89 @@ export const chuggyProjectTools = [
   {
     name: "read_abilities",
     description:
-      "Who this session acts as and what it may do on this project, read live. Call it once before acting. `principal` is the session's own principal, encoded as a ticket's `creator` is, so the tickets whose `creator` is it are yours. The rest are the permits it holds, each true or false, `dispatch` and `skipPlannedEvaluations` among them: read a permit here rather than learning it from a refusal.",
+      "Who this session acts as and what it may do on this project, read live. Call it once before acting. `principal` is the session's own principal, encoded as a ticket's `creator` is, so the tickets whose `creator` is it are yours. The rest are the permits it holds, each true or false, `dispatch`, `skipPlannedEvaluations` and `writeEpic` among them: read a permit here rather than learning it from a refusal. `writeEpic` is what create_epic, revise_epic, add_epic_tickets and remove_epic_tickets need.",
     shape: () => ({}),
     call: (context) => read(context, projectPath(context, "abilities")),
   },
   {
+    name: "list_epics",
+    description:
+      "One page of this project's epics, each with its progress, its status and the outside tickets it waits on. Call it to find an epic. An epic is a named set of tickets worked toward one end; `nextAfter` present says there are more.",
+    shape: (z) => ({
+      search: identity(z)
+        .describe("Lists only the epics whose title or summary has this text.")
+        .optional(),
+      visibility: z
+        .enum(["Active", "Archived", "All"])
+        .describe("Which epics to list; left out, the route's own default.")
+        .optional(),
+      ticket: ticket(z)
+        .describe("Lists only the epics this ticket is in.")
+        .optional(),
+      sort: z
+        .enum(["newest", "oldest", "title"])
+        .describe("The order to list in; left out, the route's own default.")
+        .optional(),
+      after: count(z)
+        .describe(
+          "The `nextAfter` the previous page answered, for the page after it; left out, the first page.",
+        )
+        .optional(),
+      limit: limit(z, epicPageLimitMax),
+    }),
+    cursorOf: () => "after",
+    call: (context, { search: text, visibility, ticket, sort, after, limit }) =>
+      read(
+        context,
+        `${projectPath(context, "epics")}${search({ search: text, visibility, ticket, sort, after, limit })}`,
+      ),
+  },
+  {
+    name: "read_epic",
+    description:
+      "One epic: its title, summary, description, visibility, revision and member tickets. Call it before revise_epic. It carries `progress`, its members counted by phase with `done` and `total`, `status`, one of empty, done, attention, not_started and in_progress, and `waitingOnOutside`, the tickets outside the epic that a Pending member waits on. A description longer than one answer holds is answered cut to fit, with `descriptionChars`, `descriptionCharsLeft` and a `note` naming the `offset` that reads on.",
+    shape: (z) => ({
+      epic: epic(z),
+      offset: count(z)
+        .describe(
+          "Where the description's characters read on from, as the previous answer's `note` said; left out, the start, and a view that fits is answered as the route answered it.",
+        )
+        .optional(),
+    }),
+    call: (context, args) => readEpic(context, args.epic, args.offset),
+  },
+  {
+    name: "read_epic_history",
+    description:
+      "One page of an epic's revisions, newest first, each with who made it and its title then. Call it to see how an epic changed. `nextAfter` present says there are more.",
+    shape: (z) => ({
+      epic: epic(z),
+      after: count(z)
+        .describe(
+          "The `nextAfter` the previous page answered, for the page after it; left out, the first page.",
+        )
+        .optional(),
+      limit: limit(z, epicPageLimitMax),
+    }),
+    cursorOf: () => "after",
+    call: (context, { epic, after, limit }) =>
+      read(
+        context,
+        `${projectPath(context, "epicHistory", { epic })}${search({ after, limit })}`,
+      ),
+  },
+  {
+    name: "read_epic_graph",
+    description:
+      "An epic's members and the tickets outside it that they depend on, with an edge from each dependency to its dependent. Call it to see what orders the epic's work.",
+    shape: (z) => ({ epic: epic(z) }),
+    call: (context, args) =>
+      read(context, projectPath(context, "epicGraph", { epic: args.epic })),
+  },
+  {
     name: "initialize_draft",
     description:
-      "The defaults and the fence a new draft is filed against, for one configuration revision. Call it before create_draft or file_dependent. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from: each stage's `key` and each evaluator's `key` are positions counted from one in the configuration's plan, and passing it unchanged runs the whole plan. `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, stage N runs the selected plan's Nth stage, and `defaults` and `choices` are those of the selection passed. `commandedCheckStage` is the stage a brief's `checks` join, by its program stage key, counted from one as `defaults.program` keys are, and absent where none takes them, and `commandedCheckStageNote` says it in words: the same stage and, for a catalog, the plan and the stage's name, or that none does and which plans would. `configuration` is answered without its `canonical`; read_configuration answers the document, by `path` where it is larger than one answer. Dependencies are chosen from list_tickets.",
+      "The defaults and the fence a new draft is filed against, for one configuration revision. Call it before create_draft or file_dependent. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from: each stage's `key` and each evaluator's `key` are positions counted from one in the configuration's plan, and passing it unchanged runs the whole plan. `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, stage N runs the selected plan's Nth stage, and `defaults` and `choices` are those of the selection passed. `commandedCheckStage` is the stage a brief's `checks` join, by its program stage key, counted from one as `defaults.program` keys are, and absent where none takes them, and `commandedCheckStageNote` says it in words: the same stage and, for a catalog, the plan and the stage's name, or that none does and which plans would. `configuration` is answered without its `canonical`; read_configuration answers the document, by `path` where it is larger than one answer. Dependencies are chosen from list_tickets. An epic for the draft is chosen at create_draft, which is where a missing or Archived one is refused.",
     shape: (z) => ({
       revision: revision(z),
       work: identity(z)
@@ -1833,7 +2175,7 @@ export const chuggyProjectTools = [
   {
     name: "create_draft",
     description:
-      "Files a new draft for work your owner asked for, derived from nothing. Call it after initialize_draft, whose answer it is fenced on.",
+      "Files a new draft for work your owner asked for, derived from nothing. Call it after initialize_draft, whose answer it is fenced on. Its `epic` files the draft into an epic in the same write.",
     shape: (z) => ({
       configurationRevision: identity(z).describe(
         chuggyNewDraftConfigurationDescription.configurationRevision,
@@ -1848,6 +2190,7 @@ export const chuggyProjectTools = [
       brief: anyObject(z).describe(chuggyDraftBriefDescription),
       overrides: anyObject(z).optional().describe(chuggyOverridesDescription),
       selection: anyObject(z).optional().describe(chuggySelectionDescription),
+      epic: epic(z).describe(chuggyDraftEpicDescription).optional(),
     }),
     call: (context, args) =>
       write(context, projectPath(context, "drafts"), "POST", {
@@ -1858,6 +2201,7 @@ export const chuggyProjectTools = [
         brief: args.brief,
         overrides: args.overrides,
         selection: args.selection,
+        epic: args.epic,
       }),
   },
   {
@@ -1890,6 +2234,63 @@ export const chuggyProjectTools = [
         authoringVersion: args.authoringVersion,
         configurationRevision: args.configurationRevision,
       }),
+  },
+  {
+    name: "create_epic",
+    description: `Creates an epic, a named set of tickets worked toward one end, on your owner's word only. Call it after read_abilities says \`writeEpic\`. The answer is the epic's number and its first \`revision\`. ${chuggyEpicWriteRefusals}`,
+    shape: (z) => epicContent(z),
+    call: (context, args) =>
+      write(context, projectPath(context, "epics"), "POST", {
+        kind: "Create",
+        content: epicContentOf(args),
+      }),
+  },
+  {
+    name: "revise_epic",
+    description: `Revises an epic whole, on your owner's word only. Call it after read_epic, whose \`revision\` it is written against and whose fields it replaces: send every field again, changed or not, except a \`description\` that is not changing, which left out is kept as the epic holds it. To change only the members, add_epic_tickets and remove_epic_tickets do it without resending the rest. The answer is the epic's number and its new \`revision\`. ${chuggyEpicWriteRefusals}`,
+    shape: (z) => ({
+      epic: epic(z),
+      expectedRevision: ticket(z).describe(
+        "`expectedRevision` is the epic's `revision` as read_epic answers it.",
+      ),
+      ...epicContent(z),
+      description: epicContent(z)
+        .description.describe(
+          "What the epic is for and what finishes it, as Markdown; left out, the description the epic holds is kept, so a long one is never sent again.",
+        )
+        .optional(),
+    }),
+    call: reviseEpic,
+  },
+  {
+    name: "add_epic_tickets",
+    description: `Adds tickets to an epic and changes nothing else about it, on your owner's word only. It reads the epic and revises it in one call, so no read_epic is needed. Tickets already in it are left, and a call that adds nothing writes nothing. A write that went stale between its read and its write is read and written once more. ${chuggyEpicWriteRefusals}`,
+    shape: (z) => ({ epic: epic(z), tickets: epicTickets(z) }),
+    call: (context, args) =>
+      epicMembersChanged(
+        context,
+        args.epic,
+        (members) =>
+          args.tickets.every((one) => members.includes(one))
+            ? undefined
+            : [...new Set([...members, ...args.tickets])],
+        () => `epic ${String(args.epic)} already holds those tickets`,
+      ),
+  },
+  {
+    name: "remove_epic_tickets",
+    description: `Removes tickets from an epic and changes nothing else about it, on your owner's word only. It reads the epic and revises it in one call, so no read_epic is needed. Tickets not in it are left, and a call that removes nothing writes nothing. A write that went stale between its read and its write is read and written once more. ${chuggyEpicWriteRefusals}`,
+    shape: (z) => ({ epic: epic(z), tickets: epicTickets(z) }),
+    call: (context, args) =>
+      epicMembersChanged(
+        context,
+        args.epic,
+        (members) =>
+          args.tickets.some((one) => members.includes(one))
+            ? members.filter((one) => !args.tickets.includes(one))
+            : undefined,
+        () => `epic ${String(args.epic)} holds none of those tickets`,
+      ),
   },
   {
     name: "dispatch_ticket",
