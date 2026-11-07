@@ -174,6 +174,7 @@ import {
   epicContentBytesMax,
   epicPageLimitMax,
   epicSummaryCharsMax,
+  epicTicketsMax,
   epicTitleCharsMax,
   imageMediaTypes,
   nativeHttpMediaType,
@@ -1365,6 +1366,7 @@ const epicContent = (z) => ({
     ),
   tickets: z
     .array(ticket(z))
+    .max(epicTicketsMax)
     .describe(
       "The tickets in the epic, replacing its members whole; each is a ticket of this project, as list_tickets answers it. A draft of the project is a member as a released ticket is, and stays one when it is released; deleting a draft takes it out of its epics.",
     ),
@@ -1388,7 +1390,7 @@ const epicTickets = (z) =>
   z
     .array(ticket(z))
     .min(1)
-    .max(nativeHttpPageItemsMax)
+    .max(epicTicketsMax)
     .describe("The tickets to change, each once.");
 const count = (z) => z.number().int().min(0);
 /** A draft's authoring version, which a new draft starts at. */

@@ -28,6 +28,7 @@ import {
   epicPageLimitMax,
   epicContentBytesMax,
   epicSummaryCharsMax,
+  epicTicketsMax,
   epicTitleCharsMax,
   nativeHttpPageItemsMax,
   runTranscriptBatchBytesMax,
@@ -4306,16 +4307,23 @@ test("revise_epic writes whole against the revision it was given, and a refusal 
   assert.equal(answer.isError, true);
 });
 
-test("an epic write past the title, summary or content bound is refused before any call is made", async () => {
+test("an epic write past the title, summary, content or tickets bound is refused before any call is made", async () => {
   const { api, call } = toolsOf();
+  const tooMany = Array.from({ length: epicTicketsMax + 1 }, (_, i) => i + 1);
 
   for (const content of [
     { ...epicContentGiven, title: "t".repeat(epicTitleCharsMax + 1) },
     { ...epicContentGiven, summary: "s".repeat(epicSummaryCharsMax + 1) },
     { ...epicContentGiven, description: "d".repeat(epicContentBytesMax + 1) },
     { ...epicContentGiven, visibility: "All" },
+    { ...epicContentGiven, tickets: tooMany },
   ])
     assert.equal((await call("create_epic", content)).isError, true);
+  for (const tool of ["add_epic_tickets", "remove_epic_tickets"])
+    assert.equal(
+      (await call(tool, { epic: 3, tickets: tooMany })).isError,
+      true,
+    );
   assert.equal(api.calls.length, 0);
 });
 
