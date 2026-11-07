@@ -158,6 +158,7 @@ import {
   chuggyToolCapabilities,
   chuggyToolDocsResponseBytesMax,
   chuggyToolDispatchViewResponseBytesMax,
+  chuggyToolEpicViewResponseBytesMax,
   chuggyToolImageResponseBytesMax,
   chuggyToolNames,
   chuggyToolPrefix,
@@ -1272,7 +1273,7 @@ async function epicMembersChanged(context, epic, change, unchanged) {
     const body = await drawn(
       context,
       projectPath(context, "epic", { epic }),
-      chuggyToolResponseBytesMax,
+      chuggyToolEpicViewResponseBytesMax,
       "this epic",
     );
     if (body.refused !== undefined) return body.refused;

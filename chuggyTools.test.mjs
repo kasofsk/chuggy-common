@@ -16,6 +16,7 @@ import {
   chuggyDocsIndex,
   chuggyToolCapabilities,
   chuggyToolDocsResponseBytesMax,
+  chuggyToolEpicViewResponseBytesMax,
   chuggyToolImageResponseBytesMax,
   chuggyToolPrefix,
   chuggyToolResponseBytesMax,
@@ -4458,6 +4459,39 @@ test("a second stale membership write and any other refusal are relayed, not ask
 
   assert.equal(once.api.calls.length, 2);
   assert.equal(textOf(refused), `HTTP 409\n${unknown.body}`);
+});
+
+test("a membership change reads an epic whose content is at its cap, past an ordinary read's bound", async () => {
+  const content = { ...epicRead, description: "" };
+  const spare =
+    epicContentBytesMax -
+    Buffer.byteLength(
+      JSON.stringify({
+        title: content.title,
+        summary: content.summary,
+        description: "",
+        visibility: content.visibility,
+        tickets: content.tickets,
+      }),
+    );
+  const heaviest = { ...content, description: "d".repeat(spare) };
+  const body = JSON.stringify(heaviest);
+  assert.ok(Buffer.byteLength(body) > chuggyToolResponseBytesMax);
+  assert.ok(Buffer.byteLength(body) <= chuggyToolEpicViewResponseBytesMax);
+  const saved = JSON.stringify({ epic: 3, revision: 6 });
+  const { api, call } = toolsOf({}, (_path, init) =>
+    (init?.method ?? "GET") === "GET"
+      ? { status: 200, body }
+      : { status: 200, body: saved },
+  );
+
+  const answer = await call("remove_epic_tickets", { epic: 3, tickets: [4] });
+
+  assert.equal(textOf(answer), `HTTP 200\n${saved}`);
+  assert.equal(
+    JSON.parse(api.calls[1].init.body).content.description,
+    heaviest.description,
+  );
 });
 
 test("a membership change on an epic that cannot be read relays the read's refusal and writes nothing", async () => {
