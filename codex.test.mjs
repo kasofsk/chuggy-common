@@ -13,6 +13,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL, URL } from "node:url";
 
 import { resultReportCharsMax } from "@chuggy/worker-contract/workerDocuments";
+import { workTaskAnswerSchema } from "@chuggy/worker-contract/workerTask";
 
 import {
   workerChangeBaseVariable,
@@ -30,6 +31,7 @@ import {
   prepareCodexShell,
 } from "./codex.mjs";
 import { coreRuntime } from "./coreRuntime.mjs";
+import { fetchedAnswer } from "./envelope.fixture.mjs";
 
 const task = {
   worker: {
@@ -130,6 +132,70 @@ test("Codex configuration records the runtime version and pinned model", async (
       { env: { CODEX_HOME: "/tmp/codex" }, maxBuffer: 4096 },
     ],
   ]);
+});
+
+/** The task `task` is, naming `effort` as its Codex mode's reasoning effort. */
+const effortTask = (effort) => ({
+  ...task,
+  worker: { mode: { ...task.worker.mode, effort } },
+});
+
+test("a Codex invocation sets the reasoning effort its task names", () => {
+  assert.deepEqual(codexInvocation(effortTask("high"), run).slice(4, 9), [
+    "--model",
+    "gpt-5.3-codex",
+    "--config",
+    'model_reasoning_effort="high"',
+    "--dangerously-bypass-approvals-and-sandbox",
+  ]);
+});
+
+/** Catches the contract a task is read under dropping the effort it names. */
+test("the effort a task the plane answers names reaches the Codex invocation", () => {
+  const answered = workTaskAnswerSchema.parse({
+    ...fetchedAnswer,
+    worker: { ...fetchedAnswer.worker, mode: effortTask("medium").worker.mode },
+  });
+  assert.ok(
+    codexInvocation(answered, run).includes('model_reasoning_effort="medium"'),
+  );
+});
+
+test("a Codex invocation whose task names no effort sets none", () => {
+  assert.equal(
+    codexInvocation(task, run).some((argument) =>
+      argument.includes("model_reasoning_effort"),
+    ),
+    false,
+  );
+});
+
+test("a task naming an effort still cannot configure Codex itself", () => {
+  assert.throws(
+    () =>
+      codexInvocation(
+        {
+          ...task,
+          worker: {
+            mode: {
+              ...task.worker.mode,
+              effort: "low",
+              arguments: ['--config=model_reasoning_effort="high"'],
+            },
+          },
+        },
+        run,
+      ),
+    /reserves Codex argument --config=/u,
+  );
+});
+
+test("Codex configuration records the effort its task names beside the model", async () => {
+  const configuration = await codexConfiguration(effortTask("xhigh"), {}, () =>
+    Promise.resolve({ stdout: "codex-cli 0.165.0\n" }),
+  );
+  assert.equal(configuration.model, "gpt-5.3-codex");
+  assert.equal(configuration.effort, "xhigh");
 });
 
 test("attached values cannot evade reserved Codex short options", () => {
