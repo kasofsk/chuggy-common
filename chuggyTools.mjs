@@ -118,14 +118,15 @@
  * text. No retry, no repair, no hiding a 409. A tool that decided what a refusal
  * meant would be deciding something the API decided.
  *
- * TWO EPIC WRITES READ FIRST. `add_epic_tickets` and `remove_epic_tickets`
- * read the epic and revise it against the revision read, write nothing where
- * its members would not change, and write once more from a fresh read where the
- * API answers `StaleRevision`: the revision that went stale is the one the tool
- * read, never one the model sent, so the retry decides nothing the API decided.
- * A second stale answer, and every other refusal, is relayed unaltered.
- * `revise_epic` sent no `description` writes the one the epic holds against the
- * revision the model gave, so an epic that has moved is still refused as stale.
+ * AN EPIC WRITE MAY READ THE EPIC FIRST. `add_epic_tickets` and
+ * `remove_epic_tickets` always read it and revise it against the revision read,
+ * write nothing where its members would not change, and write once more from a
+ * fresh read where the API answers `StaleRevision`: the revision that went stale
+ * is the one the tool read, never one the model sent, so the retry decides
+ * nothing the API decided. A second stale answer, and every other refusal, is
+ * relayed unaltered. `revise_epic` reads it only when sent no `description`, and
+ * writes the one the epic holds against the revision the model gave, so an epic
+ * that has moved is still refused as stale and never retried.
  *
  * WHAT A PROJECT TOOL SENDS IS SCRUBBED. Its arguments are the model's, and the
  * model has read whatever its shell could, so every string of them, a key's
