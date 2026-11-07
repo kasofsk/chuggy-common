@@ -170,6 +170,7 @@ import {
   chuggyToolTimeoutMs,
   consolePageSchema,
   dependentRelationsAdmitted,
+  epicContentBytesMax,
   epicPageLimitMax,
   epicSummaryCharsMax,
   epicTitleCharsMax,
@@ -220,10 +221,10 @@ const chuggyDraftBriefDescription = `The minimum brief is {title, intent, links:
 ${chuggyBriefDescription}`;
 
 /** How an epic write is refused, which every tool that writes one says. */
-const chuggyEpicWriteRefusals = `A write is answered as the API answers it, its status and body unaltered: 409 with the \`code\` StaleRevision and the epic's \`current\` revision where it moved since it was read, UnknownTickets and the \`tickets\` that are neither a ticket nor a draft of the project, ArchivedEpic where an Archived epic's tickets would change, EmptyTitle, LongTitle, LongSummary or LargeContent for content an epic may not hold; 404 for no such epic; and 403 where your owner may read epics and not write them, which read_abilities says beforehand.`;
+const chuggyEpicWriteRefusals = `A write is answered as the API answers it, its status and body unaltered: 409 with the \`code\` StaleRevision and the epic's \`current\` revision where it moved since it was read, UnknownTickets and the \`tickets\` that are neither a ticket nor a draft of the project, ArchivedEpic where an Archived epic's tickets would change, EmptyTitle, LongTitle, LongSummary, ManyTickets or LargeContent for content an epic may not hold; 404 for no such epic; and 403 where your owner may read epics and not write them, which read_abilities says beforehand.`;
 
 const chuggyDraftEpicDescription =
-  "An epic the draft's ticket joins, in the same write, as list_epics answers its number; left out, it joins none. An epic that does not exist is refused 404 (MissingEpic), and an Archived one or one that would hold too much is refused 409 (ArchivedEpic, LargeContent) with nothing filed.";
+  "An epic the draft's ticket joins, in the same write, as list_epics answers its number; left out, it joins none. An epic that does not exist, is Archived or would hold too much is refused 409 with nothing filed, its `code` MissingEpic, ArchivedEpic, ManyTickets or LargeContent.";
 
 /** What a draft's authoring carries, which initialize_draft answers the defaults of. */
 const chuggyAuthoringDescription = `\`authoring\` is {program, dependencies}: pass initialize_draft's \`defaults\` unchanged unless you mean otherwise, and \`dependencies\` are ticket numbers chosen from list_tickets.`;
@@ -1354,6 +1355,7 @@ const epicContent = (z) => ({
     .optional(),
   description: z
     .string()
+    .max(epicContentBytesMax)
     .describe("What the epic is for and what finishes it, as Markdown."),
   visibility: z
     .enum(["Active", "Archived"])

@@ -25,6 +25,7 @@ import {
   chuggyToolTicketLandingsResponseBytesMax,
   chuggyToolTimeoutMs,
   epicPageLimitMax,
+  epicContentBytesMax,
   epicSummaryCharsMax,
   epicTitleCharsMax,
   nativeHttpPageItemsMax,
@@ -4304,16 +4305,32 @@ test("revise_epic writes whole against the revision it was given, and a refusal 
   assert.equal(answer.isError, true);
 });
 
-test("an epic write past the title or summary bound is refused before any call is made", async () => {
+test("an epic write past the title, summary or content bound is refused before any call is made", async () => {
   const { api, call } = toolsOf();
 
   for (const content of [
     { ...epicContentGiven, title: "t".repeat(epicTitleCharsMax + 1) },
     { ...epicContentGiven, summary: "s".repeat(epicSummaryCharsMax + 1) },
+    { ...epicContentGiven, description: "d".repeat(epicContentBytesMax + 1) },
     { ...epicContentGiven, visibility: "All" },
   ])
     assert.equal((await call("create_epic", content)).isError, true);
   assert.equal(api.calls.length, 0);
+});
+
+test("an epic's title and summary are bounded in code points, as the API counts them", async () => {
+  const saved = JSON.stringify({ epic: 8, revision: 1 });
+  const { api, call } = toolsOf({}, () => ({ status: 200, body: saved }));
+  const astral = "\u{1F50D}";
+
+  const answer = await call("create_epic", {
+    ...epicContentGiven,
+    title: astral.repeat(epicTitleCharsMax),
+    summary: astral.repeat(epicSummaryCharsMax),
+  });
+
+  assert.ok(answer.isError === undefined, textOf(answer));
+  assert.equal(api.calls.length, 1);
 });
 
 test("add_epic_tickets reads the epic and revises it with only its members changed", async () => {
@@ -4456,8 +4473,9 @@ test("a membership change on an epic that cannot be read relays the read's refus
 
 test("create_draft carries its epic, and an epic that is missing or Archived is relayed as the API refused it", async () => {
   for (const [status, code] of [
-    [404, "MissingEpic"],
+    [409, "MissingEpic"],
     [409, "ArchivedEpic"],
+    [409, "ManyTickets"],
     [409, "LargeContent"],
   ]) {
     const body = JSON.stringify({ error: { code, message: "m" } });
@@ -4482,7 +4500,12 @@ test("the epic tools are described: the writes name their refusals and the abili
     "add_epic_tickets",
     "remove_epic_tickets",
   ])
-    for (const said of [/StaleRevision/, /UnknownTickets/, /read_abilities/])
+    for (const said of [
+      /StaleRevision/,
+      /UnknownTickets/,
+      /ManyTickets/,
+      /read_abilities/,
+    ])
       assert.match(described(tool), said, tool);
   assert.match(described("read_ticket"), /`epics`/);
   assert.match(described("list_tickets"), /`epics`/);
@@ -4490,5 +4513,8 @@ test("the epic tools are described: the writes name their refusals and the abili
     parameterDescribed("list_tickets", "epic"),
     /only the tickets in this epic/,
   );
-  assert.match(parameterDescribed("create_draft", "epic"), /MissingEpic/);
+  assert.match(
+    parameterDescribed("create_draft", "epic"),
+    /refused 409 .*MissingEpic, ArchivedEpic, ManyTickets or LargeContent/,
+  );
 });
