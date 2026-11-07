@@ -75,6 +75,13 @@
  * route's body under the same bound, since that body carries the canonical
  * too.
  *
+ * ANOTHER IS AN EPIC, ANSWERED WITH ITS DESCRIPTION CUT where it is larger than
+ * one answer. Its route answers the description whole, bounded by what an epic
+ * may hold rather than by what one answer holds, so `read_epic` answers the
+ * rest of the view whole and the piece of the description from `offset` that
+ * fits, and `revise_epic` sent no `description` keeps the one the epic holds,
+ * so a long one never has to pass through the model to survive a revision.
+ *
  * THREE ARE ANSWERED RESHAPED. `list_repositories` adds to each row whether a
  * ticket may be filed in it, read from that row alone, and `initialize_draft`
  * leaves out the configuration's `canonical`, which `read_configuration`
@@ -731,7 +738,7 @@ function readConfigurationChild(value, key) {
  * not, or `total` where that fits: the largest that fits wherever a larger
  * count never composes a lighter answer. `compose(0)` fits.
  */
-function readConfigurationFitting(total, compose) {
+function chuggyToolAnswerFitting(total, compose) {
   let low = 0;
   let high = total;
   while (low < high) {
@@ -757,7 +764,7 @@ function readConfigurationMissing(path, depth, value) {
     const left = keys.length - named;
     return `${opening}, which is an object whose keys are ${JSON.stringify(keys.slice(0, named))}${left > 0 ? ` and ${String(left)} more` : ""}.`;
   };
-  return compose(readConfigurationFitting(keys.length, compose));
+  return compose(chuggyToolAnswerFitting(keys.length, compose));
 }
 
 /** One outline entry: its key, and its child whole where that is short, or what the child is. */
@@ -795,7 +802,7 @@ function readConfigurationOutline(head, path, value, offset) {
       note: `This ${kind} is larger than one answer holds, so this is its outline: each entry's child whole where it is short, and otherwise its kind, its entries and its length in characters. ${left > 0 ? `${String(left)} entries are left, which offset ${String(next)} reads on from. ` : ""}Append an entry's key to path to read that child.`,
     })}`;
   };
-  return compose(readConfigurationFitting(outline.length, compose));
+  return compose(chuggyToolAnswerFitting(outline.length, compose));
 }
 
 /**
@@ -821,7 +828,7 @@ function readConfigurationCut(head, path, value, offset) {
           : "This is the string's end.",
     })}`;
   };
-  return compose(readConfigurationFitting(value.length - offset, compose));
+  return compose(chuggyToolAnswerFitting(value.length - offset, compose));
 }
 
 /**
@@ -1259,6 +1266,98 @@ function epicRevisable(text) {
     tickets.every(Number.isSafeInteger)
     ? { revision, title, summary, description, visibility, tickets }
     : undefined;
+}
+
+/**
+ * One epic. A view that fits one answer is answered verbatim; one that does
+ * not, or any read with an `offset`, is answered with its description cut to
+ * the piece from `offset` that fits and how much of it is left. It is drawn
+ * under the epic view's own bound, which an ordinary read's is not.
+ */
+async function readEpic(context, epic, offset) {
+  const body = await drawn(
+    context,
+    projectPath(context, "epic", { epic }),
+    chuggyToolEpicViewResponseBytesMax,
+    "this epic",
+  );
+  if (body.refused !== undefined) return body.refused;
+  const head = `HTTP ${String(body.status)}\n`;
+  if (offset === undefined && chuggyToolAnswerFits(`${head}${body.text}`))
+    return answered(`${head}${body.text}`);
+  const view = readEpicView(body.text);
+  if (view === undefined)
+    return answered(
+      `the epic route answered HTTP ${String(body.status)} with a body that is not an epic as the contract answers one.`,
+      true,
+    );
+  const { description } = view;
+  const start = offset ?? 0;
+  if (start > description.length)
+    return answered(
+      `offset ${String(start)} is past the end of this epic's description, which has ${String(description.length)} characters.`,
+      true,
+    );
+  const compose = (taken) => {
+    const next = start + taken;
+    const left = description.length - next;
+    return `${head}${JSON.stringify({
+      ...view,
+      description: description.slice(start, next),
+      descriptionChars: description.length,
+      descriptionOffset: start,
+      descriptionCharsLeft: left,
+      note:
+        left > 0
+          ? `This description is longer than one answer holds; ${String(left)} characters are left, which offset ${String(next)} reads on from.`
+          : "This is the description's end.",
+    })}`;
+  };
+  return answered(
+    compose(chuggyToolAnswerFitting(description.length - start, compose)),
+  );
+}
+
+/** An epic read's view, parsed, or nothing where its body is not an object carrying a description. */
+function readEpicView(text) {
+  try {
+    const view = JSON.parse(text);
+    return typeof view?.description === "string" ? view : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * An epic revised whole from the arguments, its description the one the epic
+ * holds where they leave it out. That one is read and written against
+ * `expectedRevision`, so a description that moved since is refused as stale
+ * rather than carried over.
+ */
+async function reviseEpic(context, args) {
+  let { description } = args;
+  if (description === undefined) {
+    const body = await drawn(
+      context,
+      projectPath(context, "epic", { epic: args.epic }),
+      chuggyToolEpicViewResponseBytesMax,
+      "this epic",
+    );
+    if (body.refused !== undefined) return body.refused;
+    const held = epicRevisable(body.text);
+    if (held === undefined)
+      return answered(
+        `the epic route answered HTTP ${String(body.status)} with a body that is not an epic as the contract answers one.`,
+        true,
+      );
+    description = held.description;
+  }
+  return write(context, projectPath(context, "epics"), "POST", {
+    kind: "Revise",
+    epic: args.epic,
+    expected: args.expectedRevision,
+    content: epicContentOf({ ...args, description }),
+  });
 }
 
 /**
@@ -1861,10 +1960,16 @@ export const chuggyProjectTools = [
   {
     name: "read_epic",
     description:
-      "One epic: its title, summary, description, visibility, revision and member tickets. Call it before revise_epic. It carries `progress`, its members counted by phase with `done` and `total`, `status`, one of empty, done, attention, not_started and in_progress, and `waitingOnOutside`, the tickets outside the epic that a Pending member waits on.",
-    shape: (z) => ({ epic: epic(z) }),
-    call: (context, args) =>
-      read(context, projectPath(context, "epic", { epic: args.epic })),
+      "One epic: its title, summary, description, visibility, revision and member tickets. Call it before revise_epic. It carries `progress`, its members counted by phase with `done` and `total`, `status`, one of empty, done, attention, not_started and in_progress, and `waitingOnOutside`, the tickets outside the epic that a Pending member waits on. A description longer than one answer holds is answered cut to fit, with `descriptionChars`, `descriptionCharsLeft` and a `note` naming the `offset` that reads on.",
+    shape: (z) => ({
+      epic: epic(z),
+      offset: count(z)
+        .describe(
+          "Where the description's characters read on from, as the previous answer's `note` said; left out, the start, and a view that fits is answered as the route answered it.",
+        )
+        .optional(),
+    }),
+    call: (context, args) => readEpic(context, args.epic, args.offset),
   },
   {
     name: "read_epic_history",
@@ -2132,21 +2237,20 @@ export const chuggyProjectTools = [
   },
   {
     name: "revise_epic",
-    description: `Revises an epic whole, on your owner's word only. Call it after read_epic, whose \`revision\` it is written against and whose fields it replaces: send every field again, changed or not. To change only the members, add_epic_tickets and remove_epic_tickets do it without resending the rest. The answer is the epic's number and its new \`revision\`. ${chuggyEpicWriteRefusals}`,
+    description: `Revises an epic whole, on your owner's word only. Call it after read_epic, whose \`revision\` it is written against and whose fields it replaces: send every field again, changed or not, except a \`description\` that is not changing, which left out is kept as the epic holds it. To change only the members, add_epic_tickets and remove_epic_tickets do it without resending the rest. The answer is the epic's number and its new \`revision\`. ${chuggyEpicWriteRefusals}`,
     shape: (z) => ({
       epic: epic(z),
       expectedRevision: ticket(z).describe(
         "`expectedRevision` is the epic's `revision` as read_epic answers it.",
       ),
       ...epicContent(z),
+      description: epicContent(z)
+        .description.describe(
+          "What the epic is for and what finishes it, as Markdown; left out, the description the epic holds is kept, so a long one is never sent again.",
+        )
+        .optional(),
     }),
-    call: (context, args) =>
-      write(context, projectPath(context, "epics"), "POST", {
-        kind: "Revise",
-        epic: args.epic,
-        expected: args.expectedRevision,
-        content: epicContentOf(args),
-      }),
+    call: reviseEpic,
   },
   {
     name: "add_epic_tickets",

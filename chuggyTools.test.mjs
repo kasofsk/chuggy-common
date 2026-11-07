@@ -3490,6 +3490,14 @@ const epicContentGiven = {
   tickets: [4, 5],
 };
 
+/** The content revise_epic is given without a description, which it keeps. */
+const epicContentKeptGiven = {
+  title: epicContentGiven.title,
+  summary: epicContentGiven.summary,
+  visibility: epicContentGiven.visibility,
+  tickets: epicContentGiven.tickets,
+};
+
 /** What every project tool is driven with where a suite drives them all. */
 const projectToolArguments = {
   list_tickets: {},
@@ -4500,6 +4508,148 @@ test("a membership change reads an epic whose content is at its cap, past an ord
     JSON.parse(api.calls[1].init.body).content.description,
     heaviest.description,
   );
+});
+
+/**
+ * An epic whose content is at its cap and whose fields beside it are at their
+ * heaviest, escaping included, with a description holding pairs that are one
+ * code point, so its view is more than one answer holds.
+ */
+function epicAtCap() {
+  const heavy = {
+    ...epicRead,
+    title: '"'.repeat(epicTitleCharsMax),
+    summary: "\u0001".repeat(epicSummaryCharsMax),
+    tickets: Array.from(
+      { length: epicTicketsMax },
+      (_, i) => Number.MAX_SAFE_INTEGER - i,
+    ),
+    waitingOnOutside: Array.from(
+      { length: epicTicketsMax },
+      () => Number.MAX_SAFE_INTEGER,
+    ),
+  };
+  const contentBytes = (description) =>
+    Buffer.byteLength(
+      JSON.stringify({
+        title: heavy.title,
+        summary: heavy.summary,
+        description,
+        visibility: heavy.visibility,
+        tickets: heavy.tickets,
+      }),
+    );
+  const line = 'Ship "search" 🙂.\n';
+  let description = line.repeat(
+    Math.floor(
+      (epicContentBytesMax - contentBytes("")) /
+        (contentBytes(line) - contentBytes("")),
+    ),
+  );
+  while (contentBytes(`${description}d`) <= epicContentBytesMax)
+    description += "d";
+  return { ...heavy, description };
+}
+
+test("read_epic answers an epic that fits as the route answered it, and one at its cap as its description in pieces that read on to the whole", async () => {
+  const fits = epicApi([]);
+  assert.equal(
+    textOf(await fits.call("read_epic", { epic: 3 })),
+    `HTTP 200\n${JSON.stringify(epicRead)}`,
+  );
+
+  const heaviest = epicAtCap();
+  const body = JSON.stringify(heaviest);
+  assert.ok(Buffer.byteLength(body) > chuggyToolResponseBytesMax);
+  assert.ok(Buffer.byteLength(body) <= chuggyToolEpicViewResponseBytesMax);
+  const { call } = toolsOf({}, () => ({ status: 200, body }));
+  const { description, ...fields } = heaviest;
+  let read = "";
+  let offset;
+  for (let reads = 1; reads <= description.length; reads += 1) {
+    const answer = await call("read_epic", { epic: 3, offset });
+    assert.equal(answer.isError, undefined, textOf(answer));
+    const text = textOf(answer);
+    assert.ok(chuggyToolAnswerBytes(text) <= chuggyToolAnswerBytesMax);
+    assert.equal(text.slice(0, text.indexOf("\n")), "HTTP 200");
+    const piece = JSON.parse(text.slice(text.indexOf("\n") + 1));
+    for (const [key, value] of Object.entries(fields))
+      assert.deepEqual(piece[key], value, key);
+    assert.equal(piece.descriptionOffset, offset ?? 0);
+    assert.equal(piece.descriptionChars, description.length);
+    read += piece.description;
+    if (piece.descriptionCharsLeft === 0) break;
+    offset = piece.descriptionOffset + piece.description.length;
+    assert.match(piece.note, new RegExp(`offset ${String(offset)} reads on`));
+  }
+  assert.ok(offset !== undefined, "the epic at its cap was answered whole");
+  assert.equal(read, description);
+
+  const past = await call("read_epic", {
+    epic: 3,
+    offset: description.length + 1,
+  });
+  assert.equal(past.isError, true);
+  assert.match(textOf(past), /past the end of this epic's description/);
+});
+
+test("revise_epic sent no description keeps the one the epic holds, at its cap, and writes it against the revision it was given", async () => {
+  const heaviest = epicAtCap();
+  const saved = JSON.stringify({ epic: 3, revision: 6 });
+  const { api, call } = toolsOf({}, (_path, init) =>
+    (init?.method ?? "GET") === "GET"
+      ? { status: 200, body: JSON.stringify(heaviest) }
+      : { status: 200, body: saved },
+  );
+
+  const answer = await call("revise_epic", {
+    epic: 3,
+    expectedRevision: 5,
+    ...epicContentKeptGiven,
+  });
+
+  assert.equal(textOf(answer), `HTTP 200\n${saved}`);
+  assert.deepEqual(
+    api.calls.map(({ method, path }) => [method, path]),
+    [
+      ["GET", `${epicsPath}/3`],
+      ["POST", epicsPath],
+    ],
+  );
+  assert.deepEqual(JSON.parse(api.calls[1].init.body), {
+    kind: "Revise",
+    epic: 3,
+    expected: 5,
+    content: { ...epicContentKeptGiven, description: heaviest.description },
+  });
+});
+
+test("revise_epic sent no description writes nothing where the epic cannot be read", async () => {
+  const body = JSON.stringify({ error: { code: "NotFound", message: "n" } });
+  for (const [status, text, said] of [
+    [404, body, `HTTP 404\n${body}`],
+    [
+      200,
+      JSON.stringify({ number: 3 }),
+      /not an epic as the contract answers one/,
+    ],
+  ]) {
+    const { api, call } = toolsOf({}, () => ({ status, body: text }));
+
+    const answer = await call("revise_epic", {
+      epic: 3,
+      expectedRevision: 5,
+      ...epicContentKeptGiven,
+    });
+
+    assert.deepEqual(
+      api.calls.map(({ method }) => method),
+      ["GET"],
+    );
+    if (typeof said === "string") assert.equal(textOf(answer), said);
+    else assert.match(textOf(answer), said);
+    assert.equal(answer.isError, true);
+  }
 });
 
 test("a membership change on an epic that cannot be read relays the read's refusal and writes nothing", async () => {
