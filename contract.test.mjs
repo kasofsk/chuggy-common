@@ -56,6 +56,7 @@ import { z } from "zod";
 
 import {
   chuggyMemberTools,
+  chuggyOfferTools,
   chuggyProjectTools,
   chuggyToolContext,
   chuggyToolDefinitions,
@@ -1261,6 +1262,7 @@ test("the pod defines every tool the contract rosters, and no other", () => {
   const defined = [
     ...chuggyProjectTools.map(({ name }) => name),
     ...chuggyMemberTools.map(({ name }) => name),
+    ...chuggyOfferTools.map(({ name }) => name),
     ...leadDecisionStaging().definitions.map(({ name }) => name),
   ];
 
@@ -1268,6 +1270,10 @@ test("the pod defines every tool the contract rosters, and no other", () => {
   assert.deepEqual(
     leadDecisionStaging().definitions.map(({ name }) => name),
     [...chuggyToolCapabilities.LeadDecision],
+  );
+  assert.deepEqual(
+    chuggyOfferTools.map(({ name }) => name),
+    [...chuggyToolCapabilities.ThreadOffer],
   );
 });
 

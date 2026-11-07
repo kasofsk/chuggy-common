@@ -127,6 +127,14 @@
  * that capability too, which is what keeps them from a roster that does not
  * hold it, and `dispatch_ticket` is under `TicketDispatch` alone.
  *
+ * AN OFFER TOOL REACHES NO ROUTE AND WRITES NOTHING. `navigate`, `offer_release`
+ * and `offer_revoke` are under `ThreadOffer` alone, and each checks its input
+ * against the contract's own schema and answers. The call standing in the
+ * transcript is the whole of what it does: the console reads it there, and
+ * draws nothing of a call answered as an error. So each is `exact`: its input
+ * schema refuses a key it does not declare, where every other tool's drops it,
+ * because a dropped key still stands in the stored call the console parses.
+ *
  * `zod` IS A PEER DEPENDENCY OF THE AGENT SDK, NOT ONE OF ITS DEPENDENCIES, so
  * the shapes are functions of a `z` the caller resolves rather than of an import
  * here, and the image's build probes are what prove the peer is installed and is
@@ -160,6 +168,7 @@ import {
   chuggyToolServerName,
   chuggyToolTicketLandingsResponseBytesMax,
   chuggyToolTimeoutMs,
+  consolePageSchema,
   dependentRelationsAdmitted,
   epicPageLimitMax,
   epicSummaryCharsMax,
@@ -169,6 +178,8 @@ import {
   nativeHttpPageItemsMax,
   projectArtifactEncoding,
   selectorHistoryLimitMax,
+  threadOfferReleaseSchema,
+  threadOfferRevokeSchema,
   threadTurnsAnsweredMax,
   ticketLandingsAnsweredMax,
 } from "@chuggy/worker-contract/sessionTools";
@@ -2245,11 +2256,110 @@ export const chuggyMemberTools = [
   },
 ];
 
+/** The pages `navigate` names and the settings sections one of them names, read off the contract's own union. */
+function navigateVocabulary() {
+  const variants = consolePageSchema.options.map(({ shape }) => shape);
+  return {
+    pages: [...new Set(variants.map(({ page }) => page.value))],
+    sections: variants
+      .find(({ page }) => page.value === "Settings")
+      .section.unwrap().options,
+  };
+}
+
+/** Where `navigate` read no page the console draws, with the contract's own account of why. */
+function navigatePage(args) {
+  const read = consolePageSchema.safeParse(args);
+  if (!read.success)
+    throw new Error(
+      `navigate names no page the console draws: ${read.error.message}`,
+    );
+  return read.data;
+}
+
 /**
- * Every tool this session holds, project, member and decision alike, filtered
- * by the capability roster its row carries. A tool the roster does not admit
- * is not registered at all, so the runtime's own tool list is the proof rather
- * than this source.
+ * Every tool a thread offers its owner rather than doing, exported as the
+ * project tools are. `navigate`'s page is a union, so its shape is the fields
+ * every page may carry and the contract's union is what the call checks.
+ */
+export const chuggyOfferTools = [
+  {
+    name: "navigate",
+    exact: true,
+    description:
+      "Moves your owner's console to one page. The console follows it only while your owner is still on the page they wrote from, so it is an offer of a page and never the only place your answer is.",
+    shape: (z) => {
+      const { pages, sections } = navigateVocabulary();
+      return {
+        page: z.enum(pages).describe("The page, by the console's own name."),
+        ticket: ticket(z)
+          .describe("For Ticket and TicketEdit, the ticket it shows.")
+          .optional(),
+        from: ticket(z)
+          .describe(
+            "For TicketNew, the ticket the new one duplicates; never with `draft`.",
+          )
+          .optional(),
+        draft: ticket(z)
+          .describe(
+            "For TicketNew, the draft it opens, by its ticket; never with `from`.",
+          )
+          .optional(),
+        repository: identity(z)
+          .describe(
+            "For Repository, the repository it shows, as list_repositories answers its `repository`.",
+          )
+          .optional(),
+        section: z
+          .enum(sections)
+          .describe("For Settings, the section it opens.")
+          .optional(),
+      };
+    },
+    call: (_context, args) =>
+      `Your owner's console is asked to move to ${JSON.stringify(navigatePage(args))}.`,
+  },
+  {
+    name: "offer_release",
+    exact: true,
+    description:
+      "Puts one draft's release in front of your owner as a card they confirm or decline, at exactly the authoring version you name. Their answer arrives as an OfferReply turn.",
+    shape: (z) => ({
+      ticket: ticket(z),
+      authoringVersion: count(z).describe(
+        "The draft's `authoringVersion`, as read_draft answers it; a confirmation releases that version and no other.",
+      ),
+    }),
+    call: (_context, args) => {
+      const { ticket: offered, authoringVersion: version } =
+        threadOfferReleaseSchema.parse(args);
+      return `Ticket ${String(offered)}'s release at authoring version ${String(version)} is offered to your owner.`;
+    },
+  },
+  {
+    name: "offer_revoke",
+    exact: true,
+    description:
+      "Puts one ticket's revocation in front of your owner as a card they confirm or decline, at exactly the revision you name. Their answer arrives as an OfferReply turn.",
+    shape: (z) => ({
+      ticket: ticket(z),
+      revision: ticket(z).describe(
+        "The ticket's `revision`, as read_ticket answers it; a confirmation revokes it at that revision and no other.",
+      ),
+    }),
+    call: (_context, args) => {
+      const { ticket: offered, revision: at } =
+        threadOfferRevokeSchema.parse(args);
+      return `Ticket ${String(offered)}'s revocation at revision ${String(at)} is offered to your owner.`;
+    },
+  },
+];
+
+/**
+ * Every tool this session holds, project, member, offer and decision alike,
+ * filtered by the capability roster its row carries. A tool the roster does
+ * not admit is not registered at all, so the runtime's own tool list is the
+ * proof rather than this source.
  */
 export function chuggyToolDefinitions(context) {
   const admitted = new Set(
@@ -2257,13 +2367,14 @@ export function chuggyToolDefinitions(context) {
       (held) => sessionCapabilityTools[held] ?? [],
     ),
   );
-  const served = [...chuggyProjectTools, ...chuggyMemberTools].map(
-    (definition) => ({
-      ...definition,
-      call: (args) =>
-        definition.call(context, scrubbedArguments(args, context)),
-    }),
-  );
+  const served = [
+    ...chuggyProjectTools,
+    ...chuggyMemberTools,
+    ...chuggyOfferTools,
+  ].map((definition) => ({
+    ...definition,
+    call: (args) => definition.call(context, scrubbedArguments(args, context)),
+  }));
   return [...served, ...context.staging.definitions].filter((definition) =>
     admitted.has(definition.name),
   );
@@ -2321,6 +2432,12 @@ function chuggyToolTimedOut(name) {
   );
 }
 
+/** The object one tool's input is parsed as, here and by the runtime: strict where the definition is `exact`. */
+export function chuggyToolInput(definition, z) {
+  const fields = definition.shape(z);
+  return definition.exact === true ? z.strictObject(fields) : z.object(fields);
+}
+
 /**
  * One tool's handler: its input checked against its own shape, then the call,
  * with every raise answered as text the model reads rather than thrown into the
@@ -2355,7 +2472,7 @@ export function chuggyToolHandler(definition, z) {
   // beside it would be a second answer to a question the shape answers, and
   // the two would part.
   const fields = definition.shape(z);
-  const shape = z.object(fields);
+  const shape = chuggyToolInput(definition, z);
   const pageItemsMax = fields[chuggyToolPageArgument]?.unwrap().maxValue;
   const { name } = definition;
   const asked = async (given) => {
@@ -2393,7 +2510,9 @@ export function chuggyToolHandler(definition, z) {
 /**
  * The in-process server the query is opened with. `timeout` is not optional: a
  * tool call is otherwise effectively unbounded, and an unbounded one is a turn
- * that never reaches its deadline.
+ * that never reaches its deadline. Each tool is handed its whole input object
+ * rather than its fields, which the runtime registers as MCP's `registerTool`
+ * does, so an `exact` tool is refused an undeclared key before its handler.
  */
 export function chuggyToolServer(context, sdk) {
   return sdk.createSdkMcpServer({
@@ -2404,7 +2523,7 @@ export function chuggyToolServer(context, sdk) {
       sdk.tool(
         definition.name,
         definition.description,
-        definition.shape(sdk.z),
+        chuggyToolInput(definition, sdk.z),
         chuggyToolHandler(definition, sdk.z),
       ),
     ),

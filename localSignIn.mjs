@@ -65,7 +65,7 @@ const localSignInRefusalStatuses = new Set([400, 401]);
 export class LocalSignInNeeded extends Error {
   constructor(site, url) {
     super(
-      `not signed in to ${site}: ask the person to open ${url} and sign in, then call the tool again. The page closes once it is answered or after a while unanswered, and a later call opens another.`,
+      `not signed in to ${site}: this call needs the person signed in, so give them this address, in full, in your next message, whatever else you are doing: ${url} Call the tool again once they say they have signed in. The page closes once it is answered or after a while unanswered, and a later call opens another.`,
     );
     this.name = "LocalSignInNeeded";
     this.url = url;

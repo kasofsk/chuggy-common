@@ -926,6 +926,48 @@ test("a thread message naming a runtime command reaches the model as text, and i
   );
 });
 
+/** Catches a member's answer to an offer reaching the model as anything but the text their console posted. */
+test("a thread's offer reply reaches the model as its text, as a member's message does, and is answered in text", async () => {
+  const input = JSON.stringify({
+    version: 1,
+    offerReply: {
+      call: "toolu_01",
+      decision: "Confirmed",
+      outcome: "Succeeded",
+    },
+  });
+  const plane = planeOf(
+    [{ ...turnOne, inputKind: "OfferReply", input }],
+    threadSessionFacts,
+  );
+  const asked = [];
+  const { query } = queryOf((message) => {
+    asked.push(message);
+    return [
+      { type: "system", subtype: "init", session_id: "runtime-1" },
+      result("success", { result: "it is released" }),
+    ];
+  });
+
+  const code = await run({
+    request: plane.request,
+    requestOnce: plane.requestOnce,
+    query,
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(
+    asked.map((message) => [message.message.content, message.client_composed]),
+    [[input, undefined]],
+  );
+  assert.deepEqual(
+    plane.calls
+      .filter(({ path }) => path === sessionPlaneRoutes.turnAnswer.path)
+      .map(({ body }) => [body.turn, body.result]),
+    [["turn-1", "it is released"]],
+  );
+});
+
 /** Catches a session carrying on in a stream its reference does not name, which the next resume would not bring back. */
 test("a runtime that leaves the stream its reference names ends the session and fails the turn", async () => {
   const moves = {

@@ -36,6 +36,7 @@ import {
   chuggyToolContext,
   chuggyToolDefinitions,
   chuggyToolHandler,
+  chuggyToolInput,
   chuggyToolSignal,
 } from "./chuggyTools.mjs";
 import { localSignIn } from "./localSignIn.mjs";
@@ -56,6 +57,7 @@ export const localToolRepeatDescription = `The same call again is a new operatio
 /** What the server tells an agent before it lists the tools, `task` naming the workspace and project it is bound to. */
 export function localToolInstructions(task) {
   return `This server is bound to the workspace ${task.tenant} and its project ${task.project}.
+These tools are the only way to read or act on chuggy from here, and every one but read_docs needs the person signed in. When a call answers that they are not, give them the address it names, in full, in your next message, whatever else you are doing, and call again once they say they have signed in. Nothing else stands in for what these tools answer, so do not work around a sign-in.
 The chuggy docs are behind read_docs: call it with no page for the index first, then with a page the index lists.
 To file a ticket:
 1. read_abilities: who you act as, which a ticket's \`creator\` names, and what you may do.
@@ -129,7 +131,7 @@ export function localToolServer(context, sdk) {
           chuggySubmissionRepeatDescription,
           localToolRepeatDescription,
         ),
-        inputSchema: definition.shape(sdk.z),
+        inputSchema: chuggyToolInput(definition, sdk.z),
       },
       chuggyToolHandler(definition, sdk.z),
     );
