@@ -34,6 +34,7 @@ import {
   runConfigurationBytesMax,
   workerPlaneBytesMediaType,
   workerPlaneUploadBytesMax,
+  workerRunContextSchema,
 } from "@chuggy/worker-contract/workerPlane";
 import { workTaskAnswerSchema } from "@chuggy/worker-contract/workerTask";
 
@@ -69,6 +70,11 @@ import {
   chatCheckoutVariable,
   chatMintedVariable,
 } from "./chatChannel.mjs";
+import {
+  claudeControlChannel,
+  claudeControlRefusal,
+  claudeControlWaitMs,
+} from "./claudeControl.mjs";
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import { codexAgent } from "./codex.mjs";
 import {
@@ -92,6 +98,8 @@ import {
   strayLeftFor,
 } from "./claudeCredential.fixture.mjs";
 import { pausedClock } from "./clock.fixture.mjs";
+import { contextWindow } from "./contextReading.mjs";
+import { contextUsage } from "./contextUsage.fixture.mjs";
 import {
   limitFrames,
   limitRefused,
@@ -160,7 +168,10 @@ import {
 } from "./source.mjs";
 import { workerPlaneAwayMillisecondsMax, workerRequest } from "./transport.mjs";
 
-const task = { workerPlane: { url: "http://worker-plane.test:3001" } };
+const task = {
+  workerPlane: { url: "http://worker-plane.test:3001" },
+  briefing: { text: "the briefing" },
+};
 const secret = "sk-ant-oat01-0123456789abcdefghijklmnop";
 const minted = {
   username: "x-access-token",
@@ -1936,6 +1947,14 @@ test("an agent's summary is cut to a report on a code point", async () => {
   assert.equal(report.length, resultReportCharsMax - 1);
 });
 
+/** Evidence that keeps nothing, for a run whose evidence is not what is under test. */
+const evidenceIdle = {
+  observed: () => undefined,
+  record: () => undefined,
+  turnsFolded: () => 0,
+  context: () => undefined,
+};
+
 /**
  * The run an agent's process leaves, the agent stood in for by a shell that
  * writes the one result event Claude Code ends with, its shell prepared with
@@ -1950,7 +1969,7 @@ function agentRun(summary, verdict = "Pass") {
     task,
     directory: process.cwd(),
     agentEnvironment: {},
-    evidence: { observed: () => undefined, record: () => undefined },
+    evidence: evidenceIdle,
     agent: {
       ...claudeAgent,
       executable: "/bin/sh",
@@ -2010,7 +2029,7 @@ test("an agent is started as a check stage's shells inherit, and its shell prepa
     directory: process.cwd(),
     changeBase,
     agentEnvironment: {},
-    evidence: { observed: () => undefined, record: () => undefined },
+    evidence: evidenceIdle,
     agent: {
       ...claudeAgent,
       executable: "/bin/sh",
@@ -2055,7 +2074,7 @@ test("an agent's shell is handed no change base where the attempt knows none", a
     task,
     directory: process.cwd(),
     agentEnvironment: {},
-    evidence: { observed: () => undefined, record: () => undefined },
+    evidence: evidenceIdle,
     agent: {
       ...claudeAgent,
       executable: "/bin/sh",
@@ -2086,7 +2105,7 @@ test("an agent's shell is handed what the job's setup passed on, and the agent's
     directory: process.cwd(),
     setupEnvironment: { PASSED: "on", NODE_PATH: "/setup/node_modules" },
     agentEnvironment: {},
-    evidence: { observed: () => undefined, record: () => undefined },
+    evidence: evidenceIdle,
     agent: {
       ...claudeAgent,
       executable: "/bin/sh",
@@ -2118,7 +2137,7 @@ test("an agent's process is started with what the agent adds to the whole of its
     task,
     directory: process.cwd(),
     agentEnvironment: { CHUG_SUITE_CREDENTIAL: "credential" },
-    evidence: { observed: () => undefined, record: () => undefined },
+    evidence: evidenceIdle,
     agent: {
       ...claudeAgent,
       executable: "/bin/sh",
@@ -2154,24 +2173,31 @@ const briefImage = {
 
 /**
  * A stand-in agent ending its run with a failing verdict, so a work attempt it
- * runs pushes nothing, and every task it was started on.
+ * runs pushes nothing, and every brief its stdin opened with.
  */
-function briefedAgent() {
-  const started = [];
+async function briefedAgent(t) {
+  const started = join(await suiteDirectory(t, "chuggy-briefed-"), "started");
   const ended = JSON.stringify({
     type: "result",
     structured_output: { verdict: "Fail", summary: "ended" },
   });
   return {
-    started,
+    briefs: async () =>
+      (await readFile(started, "utf8"))
+        .split("\n")
+        .filter((line) => line !== "")
+        .map((line) => JSON.parse(line).message.content),
     agent: {
       ...claudeAgent,
       executable: "/bin/sh",
       prepareShell: async () => ({ environment: {}, arguments: [] }),
-      invocation: (begun) => {
-        started.push(begun);
-        return ["-c", 'printf "%s\\n" "$1"', "agent", ended];
-      },
+      invocation: () => [
+        "-c",
+        'IFS= read -r brief; printf "%s\\n" "$brief" >> "$2"; printf "%s\\n" "$1"',
+        "agent",
+        ended,
+        started,
+      ],
     },
   };
 }
@@ -2190,6 +2216,7 @@ function briefedFile(text, identity) {
  * the temporary directory, or its briefing not told where.
  */
 test("an agent is started on its briefing told where each image was read to", async (t) => {
+  const { briefs, agent } = await briefedAgent(t);
   const temporary = await mkdtemp(join(tmpdir(), "chuggy-temporary-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   podHolds(t, { TMPDIR: temporary });
@@ -2198,7 +2225,6 @@ test("an agent is started on its briefing told where each image was read to", as
     read.push(request.path);
     return { status: 200, body: briefImage.bytes };
   });
-  const { started, agent } = briefedAgent();
   const briefed = { ...task, briefing: { text: "## Your role\nWork." } };
 
   await runWorkerTask({
@@ -2211,14 +2237,14 @@ test("an agent is started on its briefing told where each image was read to", as
     }),
     directory: process.cwd(),
     agentEnvironment: {},
-    evidence: { observed: () => undefined, record: () => undefined },
+    evidence: evidenceIdle,
     agent,
   });
 
   assert.deepEqual(read, ["/v1/input/artifacts/image/png:one"]);
-  const [{ briefing }] = started;
-  assert.ok(briefing.text.startsWith("## Your role\nWork.\n\n"));
-  const file = briefedFile(briefing.text, "image/png:one");
+  const [brief] = await briefs();
+  assert.ok(brief.startsWith("## Your role\nWork.\n\n"));
+  const file = briefedFile(brief, "image/png:one");
   assert.equal(dirname(dirname(file)), temporary);
   assert.match(file, /\/chuggy-ticket-images-[^/]+\/1\.png$/u);
   assert.deepEqual(await readFile(file), briefImage.bytes);
@@ -2226,10 +2252,10 @@ test("an agent is started on its briefing told where each image was read to", as
 
 /** Catches a briefing changed, or a directory made, where the bundle pins no image. */
 test("an agent whose bundle pins no image is started on its briefing as written", async (t) => {
+  const { briefs, agent } = await briefedAgent(t);
   const temporary = await mkdtemp(join(tmpdir(), "chuggy-temporary-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   podHolds(t, { TMPDIR: temporary });
-  const { started, agent } = briefedAgent();
   const briefed = { ...task, briefing: { text: "## Your role\nWork." } };
 
   await runWorkerTask({
@@ -2237,11 +2263,11 @@ test("an agent whose bundle pins no image is started on its briefing as written"
     bearer: "the attempt's bearer",
     directory: process.cwd(),
     agentEnvironment: {},
-    evidence: { observed: () => undefined, record: () => undefined },
+    evidence: evidenceIdle,
     agent,
   });
 
-  assert.equal(started[0], briefed);
+  assert.deepEqual(await briefs(), [briefed.briefing.text]);
   assert.deepEqual(await readdir(temporary), []);
 });
 
@@ -3647,7 +3673,7 @@ test("an agent's attempt reads the images its bundle pins with its bearer before
       base,
     );
     t.after(() => plane.close());
-    const { started, agent } = briefedAgent();
+    const { briefs, agent } = await briefedAgent(t);
 
     const temporary = await imageAttempt(t, plane, directory, agent);
 
@@ -3655,7 +3681,8 @@ test("an agent's attempt reads the images its bundle pins with its bearer before
     assert.deepEqual(reads, [
       { route: "inputArtifact", authorization: `Bearer ${envelope.bearer}` },
     ]);
-    const file = briefedFile(started[0].briefing.text, "image/png:one");
+    const [brief] = await briefs();
+    const file = briefedFile(brief, "image/png:one");
     assert.equal(dirname(dirname(file)), temporary);
     assert.deepEqual(await readFile(file), briefImage.bytes);
   });
@@ -3686,7 +3713,7 @@ test("an agent's shell is told which job it is in", async (t) => {
     );
     t.after(() => plane.close());
     const preparedWith = [];
-    const { agent } = briefedAgent();
+    const { agent } = await briefedAgent(t);
 
     await imageAttempt(t, plane, directory, {
       ...agent,
@@ -4389,7 +4416,7 @@ test("an agent's shell is handed a held credential's file over the pod's own val
     directory: process.cwd(),
     heldCredentials: { [trackRecord.variable]: file },
     agentEnvironment: {},
-    evidence: { observed: () => undefined, record: () => undefined },
+    evidence: evidenceIdle,
   };
   const ended = (summary) =>
     `printf '{"type":"result","structured_output":{"verdict":"Pass","summary":"%s"}}\\n' ${summary}`;
@@ -4544,12 +4571,77 @@ function revokedRun(file = "half.txt") {
   };
 }
 
+/** The source of `standInRuntime`'s executable, its runs and its records under `root`. */
+function standInRuntimeScript(root) {
+  return `#!${process.execPath}
+const { execSync, spawn } = require("node:child_process");
+const { appendFileSync, readFileSync } = require("node:fs");
+const { createInterface } = require("node:readline");
+const root = ${JSON.stringify(root)};
+const log = readFileSync(root + "/started", "utf8");
+const at = log === "" ? 0 : log.trimEnd().split("\\n").length;
+const run = JSON.parse(readFileSync(root + "/runs.json", "utf8"))[at];
+const input = createInterface({ input: process.stdin })[Symbol.asyncIterator]();
+const answer = (request) =>
+  process.stdout.write(
+    JSON.stringify({
+      type: "control_response",
+      response:
+        run.context === undefined
+          ? { subtype: "error", request_id: request.request_id, error: "none" }
+          : { subtype: "success", request_id: request.request_id, response: run.context },
+    }) + "\\n",
+  );
+(async () => {
+  const first = process.argv.includes("--input-format")
+    ? await input.next()
+    : { done: true };
+  appendFileSync(
+    root + "/started",
+    JSON.stringify({
+      pid: process.pid,
+      argv: process.argv.slice(2),
+      ...(first.done ? {} : { brief: JSON.parse(first.value).message.content }),
+    }) + "\\n",
+  );
+  if (run.work !== undefined) execSync(run.work, { stdio: "ignore" });
+  if (run.holder !== undefined)
+    spawn("sh", ["-c", run.holder], { stdio: ["ignore", "inherit", "ignore"] }).unref();
+  for (const frame of run.frames)
+    process.stdout.write(
+      (typeof frame === "string" ? frame : JSON.stringify(frame)) + "\\n",
+    );
+  if (run.linger === true) {
+    setTimeout(() => undefined, 300000);
+    return;
+  }
+  if (!first.done && run.frames.some((frame) => frame?.type === "result")) {
+    for (let line = await input.next(); !line.done; line = await input.next()) {
+      const message = JSON.parse(line.value);
+      appendFileSync(root + "/asked", JSON.stringify(message) + "\\n");
+      if (message.type === "control_request" && run.silent !== true)
+        answer(message);
+    }
+    appendFileSync(root + "/closed", String(at) + "\\n");
+  }
+  process.stdin.destroy();
+  process.exitCode = run.exit ?? 0;
+})();
+`;
+}
+
 /**
  * A stand-in for the runtime: an executable that, each time it is started,
- * records its pid and argv, runs that start's `work` in the workspace, writes
- * that start's `frames`, stays alive where told to `linger`, and exits as told.
- * A start past the last of `runs` fails, so a run started once too often does
- * not pass for one that was not. It is found as `name`.
+ * records its pid, its argv and, started to read its input as Claude Code's
+ * stream, the brief its stdin opens with, runs that
+ * start's `work` in the workspace, writes that start's `frames`, stays alive
+ * where told to `linger`, and exits as told. As Claude Code does, a start that
+ * wrote a result answers each control request on its stdin, with that start's
+ * `context` where it has one, nothing where it is `silent`, and an error
+ * otherwise, and exits only once
+ * its stdin closes, which it records. A start past the last of `runs` fails, so
+ * a run started once too often does not pass for one that was not. It is found
+ * as `name`.
  */
 async function standInRuntime(t, runs, name = "claude") {
   const root = await suiteDirectory(t, "chuggy-stand-in-");
@@ -4557,39 +4649,21 @@ async function standInRuntime(t, runs, name = "claude") {
   const started = join(root, "started");
   await writeFile(started, "");
   await writeFile(join(root, "runs.json"), JSON.stringify(runs));
-  await writeFile(
-    executable,
-    `#!${process.execPath}
-const { execSync, spawn } = require("node:child_process");
-const { appendFileSync, readFileSync } = require("node:fs");
-const root = ${JSON.stringify(root)};
-const log = readFileSync(root + "/started", "utf8");
-const at = log === "" ? 0 : log.trimEnd().split("\\n").length;
-appendFileSync(
-  root + "/started",
-  JSON.stringify({ pid: process.pid, argv: process.argv.slice(2) }) + "\\n",
-);
-const run = JSON.parse(readFileSync(root + "/runs.json", "utf8"))[at];
-if (run.work !== undefined) execSync(run.work, { stdio: "ignore" });
-if (run.holder !== undefined)
-  spawn("sh", ["-c", run.holder], { stdio: ["ignore", "inherit", "ignore"] }).unref();
-for (const frame of run.frames)
-  process.stdout.write(
-    (typeof frame === "string" ? frame : JSON.stringify(frame)) + "\\n",
-  );
-if (run.linger === true) setTimeout(() => undefined, 300000);
-else process.exitCode = run.exit ?? 0;
-`,
-  );
+  await writeFile(executable, standInRuntimeScript(root));
   await chmod(executable, 0o755);
+  const lines = async (file) =>
+    (await readFile(join(root, file), "utf8").catch(() => ""))
+      .split("\n")
+      .filter((line) => line !== "");
   return {
     directory: root,
     executable,
     starts: async () =>
-      (await readFile(started, "utf8"))
-        .split("\n")
-        .filter((line) => line !== "")
-        .map((line) => JSON.parse(line)),
+      (await lines("started")).map((line) => JSON.parse(line)),
+    /** Every message a start that wrote a result read after its brief. */
+    asked: async () => (await lines("asked")).map((line) => JSON.parse(line)),
+    /** Each start that saw its stdin close after its result. */
+    closed: async () => (await lines("closed")).map(Number),
   };
 }
 
@@ -4908,8 +4982,8 @@ test("the next work attempt starts from what the last left, and is told", async 
     ]);
 
     assert.equal(failure, undefined, String(failure));
-    const [{ argv }] = await runtime.starts();
-    assert.match(argv.at(-1), /## Unfinished work from an earlier attempt/u);
+    const [{ brief }] = await runtime.starts();
+    assert.match(brief, /## Unfinished work from an earlier attempt/u);
     assert.equal(await readFile(join(seen, "status"), "utf8"), "?? half.txt\n");
     assert.equal(
       await readFile(join(seen, "head"), "utf8"),
@@ -4933,8 +5007,8 @@ test("an attempt with nothing to start from is told nothing of it", async (t) =>
 
     const { runtime } = await standInAttempt(t, checkout, [verdictRun()]);
 
-    const [{ argv }] = await runtime.starts();
-    assert.ok(!argv.at(-1).includes("Unfinished work"));
+    const [{ brief }] = await runtime.starts();
+    assert.ok(!brief.includes("Unfinished work"));
   });
 });
 
@@ -4960,8 +5034,8 @@ test("a checkpoint that cannot be restored leaves the attempt to run from its ba
     ]);
 
     assert.equal(failure, undefined, String(failure));
-    const [{ argv }] = await runtime.starts();
-    assert.ok(!argv.at(-1).includes("Unfinished work"));
+    const [{ brief }] = await runtime.starts();
+    assert.ok(!brief.includes("Unfinished work"));
   });
 });
 
@@ -4984,8 +5058,8 @@ test("an evaluation neither restores a checkpoint nor leaves one", async (t) => 
 
     assert.match(failure.message, /^Claude Code exited 1$/mu);
     assert.ok(!failure.message.includes("kept"));
-    const [{ argv }] = await runtime.starts();
-    assert.ok(!argv.at(-1).includes("Unfinished work"));
+    const [{ brief }] = await runtime.starts();
+    assert.ok(!brief.includes("Unfinished work"));
     const { stdout: after } = await git("git", ["rev-parse", checkpointRef], {
       cwd: checkout.remote,
     });
@@ -5027,13 +5101,10 @@ test("a run the limit stopped waits it out, its work kept first, and carries on 
     assert.equal(prepared.times, 1);
     const [first, second] = await runtime.starts();
     assert.equal(first.argv.indexOf("--resume"), -1);
-    const flags = first.argv.slice(0, first.argv.indexOf("--"));
-    assert.deepEqual(second.argv.slice(0, flags.length), flags);
-    assert.deepEqual(second.argv.slice(flags.length, flags.length + 2), [
-      "--resume",
-      limitSession,
-    ]);
-    assert.match(second.argv.at(-1), /has reset/u);
+    assert.deepEqual(second.argv, [...first.argv, "--resume", limitSession]);
+    assert.match(first.brief, /^## Your role\nImplement one task/u);
+    assert.match(second.brief, /has reset/u);
+    assert.deepEqual(await runtime.closed(), [0, 1]);
     const held = transcriptSent(plane)
       .split("\n")
       .filter((line) => line.includes("chuggy_run_held"))
@@ -5100,6 +5171,144 @@ test("a held run's configuration is uploaded once", async (t) => {
 
     assert.equal(failure, undefined, String(failure));
     assert.equal(planeBodies(plane, "runConfiguration").length, 1);
+  });
+});
+
+/** A compaction as Claude Code's stream marks one. */
+const compactFrame = {
+  type: "system",
+  subtype: "compact_boundary",
+  compact_metadata: {
+    trigger: "auto",
+    pre_tokens: 167_000,
+    post_tokens: 9_000,
+  },
+};
+
+/**
+ * Catches a run whose window is read at none of its start, its compaction or
+ * its end, a reading asked for in more than summary, its brief kept nowhere
+ * now its argv does not carry it, or a stdin left open past the result, which
+ * Claude Code waits on.
+ */
+test("a Claude run's window is read at its start, after a compaction and at its end, and its stdin closes after its result", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const init = { type: "system", subtype: "init", session_id: limitSession };
+
+    const { failure, plane, runtime } = await standInAttempt(t, checkout, [
+      {
+        ...verdictRun(),
+        frames: [init, compactFrame, verdictFrame()],
+        context: contextUsage,
+      },
+    ]);
+
+    assert.equal(failure, undefined, String(failure));
+    const readings = planeBodies(plane, "runContext").flatMap(
+      (body) => body.readings,
+    );
+    const window = contextWindow(contextUsage, (text) => text);
+    assert.deepEqual(readings, [
+      { ordinal: 1, afterTurn: 0, cause: "Start", window },
+      {
+        ordinal: 2,
+        afterTurn: 0,
+        cause: "Compaction",
+        compaction: {
+          trigger: "Auto",
+          tokensBefore: 167_000,
+          tokensAfter: 9_000,
+        },
+        window,
+      },
+      { ordinal: 3, afterTurn: 0, cause: "End", window },
+    ]);
+    assert.ok(workerRunContextSchema.safeParse({ readings }).success);
+    const asked = await runtime.asked();
+    assert.equal(asked.length, 3);
+    for (const { type, request } of asked) {
+      assert.equal(type, "control_request");
+      assert.deepEqual(request, {
+        subtype: "get_context_usage",
+        detail: "summary",
+      });
+    }
+    assert.deepEqual(await runtime.closed(), [0]);
+    const [configuration] = planeBodies(plane, "runConfiguration").map((body) =>
+      JSON.parse(Buffer.from(body).toString("utf8")),
+    );
+    const [{ brief }] = await runtime.starts();
+    assert.equal(configuration.brief, brief);
+    assert.ok(!configuration.argv.includes(brief));
+    assert.ok(!transcriptSent(plane).includes("control_"));
+  });
+});
+
+/**
+ * Catches a run held on a reading its runtime never answers. The bound is
+ * waited out on a pause that ends at once, so what is proved is that the run
+ * goes on when it ends, and the bound's length is `claudeControlWaitMs`.
+ */
+test("a reading the runtime never answers does not hold the run past its bound", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const init = { type: "system", subtype: "init", session_id: limitSession };
+    const asked = [];
+
+    const { failure, plane, runtime } = await standInAttempt(
+      t,
+      checkout,
+      [{ ...verdictRun(), frames: [init, verdictFrame()], silent: true }],
+      {
+        agent: {
+          channel: (input, given) =>
+            claudeControlChannel(input, {
+              ...given,
+              pause: async (milliseconds) => {
+                asked.push(milliseconds);
+              },
+            }),
+        },
+      },
+    );
+
+    assert.equal(failure, undefined, String(failure));
+    assert.deepEqual(asked, [claudeControlWaitMs, claudeControlWaitMs]);
+    assert.deepEqual(planeBodies(plane, "runContext"), []);
+    assert.deepEqual(await runtime.closed(), [0]);
+    assert.equal(planeBodies(plane, "report")[0]?.verdict, "Pass");
+  });
+});
+
+/** Catches a permission prompt or a hook callback left unanswered, which a run would wait on with its stdin open. */
+test("a control request the runtime sends a run is answered with an error", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const prompt = {
+      type: "control_request",
+      request_id: "cli-1",
+      request: { subtype: "can_use_tool", tool_name: "Bash", input: {} },
+    };
+
+    const { failure, runtime } = await standInAttempt(t, checkout, [
+      { ...verdictRun(), frames: [prompt, verdictFrame()] },
+    ]);
+
+    assert.equal(failure, undefined, String(failure));
+    const answers = (await runtime.asked()).filter(
+      ({ type }) => type === "control_response",
+    );
+    assert.deepEqual(answers, [
+      {
+        type: "control_response",
+        response: {
+          subtype: "error",
+          request_id: "cli-1",
+          error: claudeControlRefusal,
+        },
+      },
+    ]);
   });
 });
 
@@ -5688,8 +5897,8 @@ test("a pass whose push failed leaves its work on the checkpoint, its label its 
     const next = await standInAttempt(t, checkout, [verdictRun("more.txt")]);
 
     assert.equal(next.failure, undefined, String(next.failure));
-    const [{ argv }] = await next.runtime.starts();
-    assert.match(argv.at(-1), /## Unfinished work from an earlier attempt/u);
+    const [{ brief }] = await next.runtime.starts();
+    assert.match(brief, /## Unfinished work from an earlier attempt/u);
     const [{ source }] = planeBodies(next.plane, "report");
     assert.equal(await remoteFile(remote, source.commit, "work.txt"), "done\n");
     assert.equal(await remoteFile(remote, source.commit, "more.txt"), "done\n");
@@ -6283,8 +6492,8 @@ test("a rework is not handed what an earlier attempt threw away", async (t) => {
       [verdictRun()],
     );
 
-    const [{ argv }] = await rework.runtime.starts();
-    assert.ok(!argv.at(-1).includes("Unfinished work"));
+    const [{ brief }] = await rework.runtime.starts();
+    assert.ok(!brief.includes("Unfinished work"));
     const [{ source: reworked }] = planeBodies(rework.plane, "report");
     assert.equal(
       await remoteFile(remote, reworked.commit, "rejected.txt"),
@@ -6355,8 +6564,8 @@ test(
         (await readFile(join(seen, "head"), "utf8")).trim(),
         carried.base,
       );
-      const [{ argv }] = await runtime.starts();
-      assert.ok(!argv.at(-1).includes("Unfinished work"));
+      const [{ brief }] = await runtime.starts();
+      assert.ok(!brief.includes("Unfinished work"));
     });
   },
 );
@@ -6785,8 +6994,8 @@ test("a pass whose report is refused leaves its checkpoint to the next attempt",
     });
 
     assert.equal(next.failure, undefined, String(next.failure));
-    const [{ argv }] = await next.runtime.starts();
-    assert.match(argv.at(-1), /## Unfinished work from an earlier attempt/u);
+    const [{ brief }] = await next.runtime.starts();
+    assert.match(brief, /## Unfinished work from an earlier attempt/u);
     assert.ok(!(await remoteRefs(remote)).includes(checkpointRef));
   });
 });
@@ -7151,8 +7360,8 @@ test("a hook setup installs refuses neither a keep nor the restore after it", as
       }),
     });
 
-    const [{ argv }] = await runtime.starts();
-    assert.match(argv.at(-1), /## Unfinished work from an earlier attempt/u);
+    const [{ brief }] = await runtime.starts();
+    assert.match(brief, /## Unfinished work from an earlier attempt/u);
   });
 });
 

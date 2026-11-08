@@ -23,9 +23,11 @@
  * it was made under, from the event's `parent_tool_use_id`, only to a plane
  * that takes the field.
  *
- * A COMPACTION IS A READING. Each `compact_boundary` the stream carries is
- * posted as one, after the turn it follows, to a plane that takes readings and
- * to no other; one it refuses stops the readings and nothing else.
+ * A READING IS OFFERED, NOT FOLDED. What reads the window hands each reading
+ * over with the turn it follows, and it is posted to a plane that takes
+ * readings and to no other; one it refuses stops the readings and nothing
+ * else. A window the contract refuses costs a compaction's reading its window
+ * and any other reading itself.
  *
  * EVIDENCE NEVER FAILS A RUN. A refused evidence call stops the transcript and
  * is remembered as the reason an already-failing run ended; it does not itself
@@ -53,7 +55,6 @@ import {
   workerRunTurnsSchema,
 } from "@chuggy/worker-contract/workerPlane";
 
-import { contextCompacted, contextCompaction } from "./contextReading.mjs";
 import {
   observeCodexReadings,
   observeCodexRollout,
@@ -610,25 +611,28 @@ function foldTurn(state, event) {
     : undefined;
 }
 
-/** A compaction the stream marked, as the reading after the turns folded so far, while the run's readings are still taken. */
-function foldCompaction(state, event) {
-  if (
-    !contextCompacted(event) ||
-    state.contextRefused ||
-    state.contextRecorded >= runContextReadingsMax
-  )
+/** The cause whose reading carries the compaction's facts, so it stands without a window. */
+const contextCompactionCause = "Compaction";
+
+/** An offered reading, numbered after every one taken so far, while the run's readings are still taken. */
+function foldContext(state, { cause, afterTurn, compaction, window }) {
+  if (state.contextRefused || state.contextRecorded >= runContextReadingsMax)
     return;
-  const compaction = contextCompaction(event);
   const reading = {
     ordinal: state.contextRecorded + 1,
-    afterTurn: state.ordinal,
-    cause: "Compaction",
+    afterTurn,
+    cause,
     ...(compaction === undefined ? {} : { compaction }),
   };
-  if (!workerRunContextSchema.safeParse({ readings: [reading] }).success)
-    return;
+  const kept = [
+    ...(window === undefined ? [] : [{ ...reading, window }]),
+    ...(cause === contextCompactionCause ? [reading] : []),
+  ].find(
+    (offer) => workerRunContextSchema.safeParse({ readings: [offer] }).success,
+  );
+  if (kept === undefined) return;
   state.contextRecorded += 1;
-  state.contextPending.push(reading);
+  state.contextPending.push(kept);
 }
 
 /** A turn row as the plane is offered it: without the subagent it names where the plane does not take that. */
@@ -858,7 +862,12 @@ export function runEvidenceRecorder(task, bearer, scrub, services = {}) {
       append(state.scrub(truncatedEvent(line)));
       const marker = foldTurn(state, event);
       if (marker !== undefined) append(marker);
-      foldCompaction(state, event);
+    },
+    /** How many turns are folded so far, which a reading taken now follows. */
+    turnsFolded: () => state.ordinal,
+    /** A reading of the window, after the turn `afterTurn` names. */
+    context(offered) {
+      foldContext(state, offered);
     },
     observed(result) {
       state.result = result;

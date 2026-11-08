@@ -10,6 +10,7 @@ import {
   claudeCredentialSecrets,
   claudeCredentialVariables,
 } from "./claudeCredential.mjs";
+import { claudeControlChannel } from "./claudeControl.mjs";
 import { coreRuntime } from "./coreRuntime.mjs";
 import { agentResult, agentResultSchema } from "./result.mjs";
 
@@ -68,10 +69,18 @@ function configuredArguments(task) {
 const claudeResumePrompt =
   "The usage limit that stopped this run has reset. Carry on where you left off, in the same workspace, and finish the task.";
 
-/** Every argument of a run but its prompt. */
-function claudeRunArguments(task) {
+/**
+ * The argv of one run. Its brief is no word of it: the run reads its messages
+ * from stdin, the first of them the brief, so the core can ask the run what
+ * its window holds while it works (`./claudeControl.mjs`). The configuration
+ * is given as `--mcp-config=`, since `--mcp-config` takes every word after it
+ * up to the next option.
+ */
+export function claudeInvocation(task) {
   return [
     "-p",
+    "--input-format",
+    "stream-json",
     "--output-format",
     "stream-json",
     "--verbose",
@@ -85,26 +94,14 @@ function claudeRunArguments(task) {
   ];
 }
 
-/**
- * The argv of one run. The briefing comes after `--`, so it is the prompt
- * whatever precedes it: `--mcp-config` takes every word after it up to the
- * next option, as can an option a worker configures, and either would
- * otherwise take the briefing as one of its values. The configuration is
- * given as `--mcp-config=` for the same reason.
- */
-export function claudeInvocation(task) {
-  return [...claudeRunArguments(task), "--", task.briefing.text];
-}
-
 /** The same run carrying on in the conversation `session` named. */
 export function claudeResumeInvocation(task, session) {
-  return [
-    ...claudeRunArguments(task),
-    "--resume",
-    session,
-    "--",
-    claudeResumePrompt,
-  ];
+  return [...claudeInvocation(task), "--resume", session];
+}
+
+/** What a run's first message says: its briefing, or, carrying on in `session`, that the limit has reset. */
+export function claudeBrief(task, session) {
+  return session === undefined ? task.briefing.text : claudeResumePrompt;
 }
 
 /** `text` as one POSIX shell word, whatever quotes it holds. */
@@ -198,6 +195,8 @@ export const claudeAgent = {
   credential: "claude-code",
   invocation: claudeInvocation,
   resumeInvocation: claudeResumeInvocation,
+  brief: claudeBrief,
+  channel: claudeControlChannel,
   result: claudeResult,
   ended: claudeEnded,
   prepareCredential: claudeCredentialPrepared,

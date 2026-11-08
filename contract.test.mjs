@@ -211,13 +211,12 @@ async function recorded(request) {
     type: "assistant",
     message: { model: "claude-test", usage: { input_tokens: 1 } },
   };
-  const compacted = {
-    type: "system",
-    subtype: "compact_boundary",
-    compact_metadata: { trigger: "auto", pre_tokens: 1 },
-  };
   await recorder.record(JSON.stringify(event), event);
-  await recorder.record(JSON.stringify(compacted), compacted);
+  recorder.context({
+    cause: "Compaction",
+    afterTurn: recorder.turnsFolded(),
+    compaction: { trigger: "Auto", tokensBefore: 1 },
+  });
   await recorder.finish();
   return recorder;
 }
