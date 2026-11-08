@@ -199,7 +199,7 @@ function sessionSuccess(route, nth) {
   }
 }
 
-/** A run whose one assistant turn reaches every run route the recorder writes. */
+/** A run whose one assistant turn and one compaction reach every run route the recorder writes. */
 async function recorded(request) {
   const recorder = runEvidenceRecorder(jobTask, bearer, (text) => text, {
     request,
@@ -211,7 +211,13 @@ async function recorded(request) {
     type: "assistant",
     message: { model: "claude-test", usage: { input_tokens: 1 } },
   };
+  const compacted = {
+    type: "system",
+    subtype: "compact_boundary",
+    compact_metadata: { trigger: "auto", pre_tokens: 1 },
+  };
   await recorder.record(JSON.stringify(event), event);
+  await recorder.record(JSON.stringify(compacted), compacted);
   await recorder.finish();
   return recorder;
 }
@@ -269,6 +275,7 @@ const jobCallers = {
   },
   runTranscript: recorded,
   runTurns: recorded,
+  runContext: recorded,
   runTotals: recorded,
   runEnded: async (request) => {
     const recorder = await recorded(request);
@@ -505,6 +512,7 @@ const jobReactions = {
     503: "retries",
   },
   runTurns: { 200: "reads", 400: "reads", 401: "reads", 409: "reads" },
+  runContext: { 204: "reads", 400: "reads", 401: "reads", 409: "reads" },
   runTotals: {
     204: "reads",
     400: "reads",

@@ -1,10 +1,16 @@
 /**
  * What the pod reads off the contract's tables rather than writing out: a
  * route's path, the statuses a route answers with one body, a label a roster
- * carries, and a public API path filled in from its pattern. Each raises where
- * the contract no longer has what was asked for, so a pod built against one
- * that dropped it fails as it loads rather than on the wire.
+ * carries, a public API path filled in from its pattern, and the version a
+ * plane's answer names. Each raises where the contract no longer has what was
+ * asked for, so a pod built against one that dropped it fails as it loads
+ * rather than on the wire.
  */
+
+import {
+  workerContractHeader,
+  workerContractVersionOf,
+} from "@chuggy/worker-contract/workerContract";
 
 /** The path of a route whose pattern ends in `*`, with `rest` in its place. */
 export function routePath(route, rest) {
@@ -39,4 +45,21 @@ export function routeFilled(pattern, values) {
     if (value === undefined) throw new Error(`${pattern} needs a ${name}`);
     return encodeURIComponent(String(value));
   });
+}
+
+/** The version a plane's answer names in its release header, or nothing where it names none. */
+export function answeredVersion(response) {
+  const release = response?.headers?.get?.(workerContractHeader);
+  return typeof release === "string"
+    ? workerContractVersionOf(release)
+    : undefined;
+}
+
+/** Whether a plane speaking `version` speaks `first` or a later version of its major. */
+export function versionReaches(version, first) {
+  return (
+    version !== undefined &&
+    version.major === first.major &&
+    version.minor >= first.minor
+  );
 }
