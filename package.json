@@ -38,6 +38,7 @@
     "chuggyApi.mjs",
     "chuggyTools.mjs",
     "claude.mjs",
+    "claudeControl.mjs",
     "claudeCredential.mjs",
     "codex.mjs",
     "codexRollout.mjs",

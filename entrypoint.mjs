@@ -472,9 +472,10 @@ export async function prepareWorker(task, directory, handed = {}) {
   return setupEnvironment;
 }
 
-async function captureConfiguration(context, argv, init) {
+async function captureConfiguration(context, { argv, brief }, init) {
   const snapshot = await runConfigurationSnapshot({
     argv,
+    ...(brief === undefined ? {} : { brief }),
     init,
     task: context.task,
     cwd: context.directory,
@@ -484,21 +485,23 @@ async function captureConfiguration(context, argv, init) {
   await context.evidence.configuration(snapshot);
 }
 
-async function readAgentStream(context, child, argv, stream) {
+async function readAgentStream(context, child, launch, stream) {
   const lines = createInterface({ input: child.stdout });
   for await (const line of lines) {
-    process.stdout.write(`${line}\n`);
     let event;
     try {
       event = JSON.parse(line);
     } catch {
+      process.stdout.write(`${line}\n`);
       throw new Error(
         `${context.agent.runtime} emitted invalid streaming JSON`,
       );
     }
+    if (stream.channel?.control(event) === true) continue;
+    process.stdout.write(`${line}\n`);
     if (!stream.captured && context.agent.configurationEvent(event)) {
       stream.captured = true;
-      await captureConfiguration(context, argv, event);
+      await captureConfiguration(context, launch, event);
     }
     if (context.agent.resultEvent(event)) stream.result = event;
     if (context.agent.frame !== undefined)
@@ -506,7 +509,10 @@ async function readAgentStream(context, child, argv, stream) {
     const observed = context.agent.observed(event);
     if (observed !== undefined) context.evidence.observed(observed);
     context.evidence.record(line, event);
+    stream.channel?.observed(event);
   }
+  stream.channel?.ended();
+  await stream.channel?.settled();
 }
 
 /**
@@ -550,15 +556,17 @@ async function runAgentEnvironment(context, shell) {
 
 /**
  * One process of the agent, run to its end: its stream's last result, what the
- * agent folded from its stream, and how it exited. One whose stream cannot be
- * read is killed before the failure is raised. That is the process alone:
- * anything it started can still be writing to the tree.
+ * agent folded from its stream, and how it exited. An agent with a channel is
+ * handed its brief on its stdin, which is otherwise not its to read. One whose
+ * stream cannot be read is killed before the failure is raised. That is the
+ * process alone: anything it started can still be writing to the tree.
  */
-async function runAgentProcess(context, argv, environment, stream) {
-  const child = spawn(context.agent.executable, argv, {
+async function runAgentProcess(context, launch, environment, stream) {
+  const channelled = launch.brief !== undefined;
+  const child = spawn(context.agent.executable, launch.argv, {
     cwd: context.directory,
     env: environment,
-    stdio: ["ignore", "pipe", "inherit"],
+    stdio: [channelled ? "pipe" : "ignore", "pipe", "inherit"],
   });
   const exited = new Promise((resolve, reject) => {
     child.once("error", reject);
@@ -568,13 +576,21 @@ async function runAgentProcess(context, argv, environment, stream) {
   });
   stream.result = undefined;
   stream.frames = undefined;
+  stream.channel = channelled
+    ? context.agent.channel(child.stdin, {
+        evidence: context.evidence,
+        scrub: context.scrub,
+      })
+    : undefined;
+  stream.channel?.brief(launch.brief);
   try {
-    await readAgentStream(context, child, argv, stream);
+    await readAgentStream(context, child, launch, stream);
     const [code, signal] = await exited;
     return { resultEvent: stream.result, frames: stream.frames, code, signal };
   } catch (failure) {
     child.kill("SIGKILL");
     child.stdout.destroy();
+    stream.channel?.ended();
     await exited.catch(() => undefined);
     const { sentence } =
       context.agent.ended?.(stream.result, stream.frames) ?? {};
@@ -703,19 +719,22 @@ async function runAgent(context) {
       git: context.git,
     }),
   );
-  const argv = context.agent.invocation(task, {
-    resultSchema: workerTemporaryFile(agentResultSchemaName),
-    shellArguments: shell.arguments,
-  });
+  const launch = {
+    argv: context.agent.invocation(task, {
+      resultSchema: workerTemporaryFile(agentResultSchemaName),
+      shellArguments: shell.arguments,
+    }),
+    brief: context.agent.brief?.(task),
+  };
   const environment = await runAgentEnvironment(context, shell);
   if (context.agent.configuration !== undefined)
     await captureConfiguration(
       context,
-      argv,
+      launch,
       await context.agent.configuration(task, environment),
     );
   const stream = { captured: false };
-  for (let holds = 0, next = argv; ; holds += 1) {
+  for (let holds = 0, next = launch; ; holds += 1) {
     const exited = await runAgentProcess(context, next, environment, stream);
     await runAgentDeclared(context, exited, environment);
     const ended = runAgentEnded(context, exited, { holds });
@@ -726,7 +745,10 @@ async function runAgent(context) {
       credentialLeft,
     });
     await runAgentHeld(context, held, context.clock ?? workerClock);
-    next = context.agent.resumeInvocation(task, session);
+    next = {
+      argv: context.agent.resumeInvocation(task, session),
+      brief: context.agent.brief?.(task, session),
+    };
   }
 }
 

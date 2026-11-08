@@ -254,6 +254,72 @@ test("an argv too large to carry is referenced by a digest of the argv itself", 
   );
 });
 
+test("a brief argv does not carry is kept as its own field, scrubbed", async () => {
+  const secret = "sk-ant-oat01-0123456789abcdefghijklmnop";
+  const bytes = await runConfigurationSnapshot(
+    {
+      argv: ["-p", "--input-format", "stream-json"],
+      brief: `briefing quoting ${secret}`,
+      init: { claude_code_version: "2.1.319" },
+      cwd: undefined,
+      home: undefined,
+      scrub: credentialScrub([secret]),
+    },
+    fakeTree({}),
+  );
+  const snapshot = JSON.parse(bytes.toString("utf8"));
+
+  assert.equal(snapshot.brief, "briefing quoting [redacted credential]");
+  assert.deepEqual(snapshot.argv, ["-p", "--input-format", "stream-json"]);
+  assert.equal(Object.hasOwn(snapshot, "briefTruncated"), false);
+});
+
+test("a run whose argv carries its brief keeps no field for it", async () => {
+  const snapshot = JSON.parse(
+    (
+      await runConfigurationSnapshot(
+        {
+          argv: ["exec", "briefing"],
+          init: {},
+          cwd: undefined,
+          home: undefined,
+          scrub: (text) => text,
+        },
+        fakeTree({}),
+      )
+    ).toString("utf8"),
+  );
+
+  assert.equal(Object.hasOwn(snapshot, "brief"), false);
+  assert.equal(Object.hasOwn(snapshot, "briefTruncated"), false);
+});
+
+/** Catches a brief too large for the cap costing the argv beside it, or kept with nothing to say it was cut. */
+test("a brief too large to carry is referenced by a digest of it, and the argv is kept", async () => {
+  const brief = "b".repeat(runConfigurationBytesMax);
+  const argv = ["-p", "--input-format", "stream-json"];
+  const bytes = await runConfigurationSnapshot(
+    {
+      argv,
+      brief,
+      init: { claude_code_version: "2.1.319" },
+      cwd: undefined,
+      home: undefined,
+      scrub: (text) => text,
+    },
+    fakeTree({}),
+  );
+  const snapshot = JSON.parse(bytes.toString("utf8"));
+
+  assert.ok(bytes.byteLength <= runConfigurationBytesMax);
+  assert.equal(Object.hasOwn(snapshot, "brief"), false);
+  assert.deepEqual(snapshot.briefTruncated.chuggy_truncated, {
+    bytes: runConfigurationBytesMax,
+    digest: createHash("sha256").update(brief).digest("hex"),
+  });
+  assert.deepEqual(snapshot.argv, argv);
+});
+
 test("a dropped list too long for the cap cannot push the body over it", async () => {
   const packed = {};
   const memory = [];

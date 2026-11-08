@@ -57,6 +57,8 @@ import {
   rateLimitSightings,
   rateLimited,
 } from "./rateLimit.mjs";
+import { contextWindow } from "./contextReading.mjs";
+import { contextUsage } from "./contextUsage.fixture.mjs";
 import { limitRejected, limitResetsAtSecs } from "./rateLimit.fixture.mjs";
 
 /** The sightings a run that saw exactly these frames, in this order, ends with. */
@@ -617,14 +619,10 @@ test("a plane from before the field is offered no subagent", async () => {
   assert.equal(Object.hasOwn(postedTurns(calls)[0], "parentToolUseId"), false);
 });
 
-const compactBoundary = {
-  type: "system",
-  subtype: "compact_boundary",
-  compact_metadata: {
-    trigger: "auto",
-    pre_tokens: 167_000,
-    post_tokens: 9_000,
-  },
+const compaction = {
+  trigger: "Auto",
+  tokensBefore: 167_000,
+  tokensAfter: 9_000,
 };
 
 /** Every reading a plane was posted, in the order it was posted them. */
@@ -634,36 +632,70 @@ function postedReadings(calls) {
     .flatMap(({ init }) => JSON.parse(init.body).readings);
 }
 
+/** A reading of `cause` offered after the turns `recorder` has folded. */
+function offerReading(recorder, cause, fields = {}) {
+  recorder.context({ cause, afterTurn: recorder.turnsFolded(), ...fields });
+}
+
 test("a compaction posts one reading, after the turn it follows", async () => {
   const { recorder, calls, tick } = harness({ release: workerContractRelease });
-  await recordAll(recorder, [
-    ...callEvents("msg_1", ["thinking", "text"]),
-    compactBoundary,
-  ]);
+  await recordAll(recorder, callEvents("msg_1", ["thinking", "text"]));
+  offerReading(recorder, "Compaction", { compaction });
   await tick();
 
   const readings = postedReadings(calls);
   assert.deepEqual(readings, [
-    {
-      ordinal: 1,
-      afterTurn: 1,
-      cause: "Compaction",
-      compaction: {
-        trigger: "Auto",
-        tokensBefore: 167_000,
-        tokensAfter: 9_000,
-      },
-    },
+    { ordinal: 1, afterTurn: 1, cause: "Compaction", compaction },
   ]);
   assert.ok(workerRunContextSchema.safeParse({ readings }).success);
 });
 
+test("readings at start, at a compaction and at end are numbered in the order offered, each with its window", async () => {
+  const { recorder, calls, tick } = harness({ release: workerContractRelease });
+  const window = contextWindow(contextUsage, (text) => text);
+  offerReading(recorder, "Start", { window });
+  await recordAll(recorder, callEvents("msg_1", ["text"]));
+  offerReading(recorder, "Compaction", { compaction, window });
+  await recordAll(recorder, callEvents("msg_2", ["text"]));
+  offerReading(recorder, "End", { window });
+  await tick();
+
+  const readings = postedReadings(calls);
+  assert.deepEqual(
+    readings.map(({ ordinal, afterTurn, cause }) => [
+      ordinal,
+      afterTurn,
+      cause,
+    ]),
+    [
+      [1, 0, "Start"],
+      [2, 1, "Compaction"],
+      [3, 2, "End"],
+    ],
+  );
+  assert.ok(readings.every((reading) => reading.window !== undefined));
+  assert.ok(workerRunContextSchema.safeParse({ readings }).success);
+});
+
+/** Catches a window the contract refuses costing the compaction it rides on, or posting a reading that is nothing but its cause. */
+test("a refused window costs a compaction only its window, and any other reading itself", async () => {
+  const { recorder, calls, tick } = harness({ release: workerContractRelease });
+  const refused = { ...contextWindow(contextUsage, (text) => text), model: "" };
+  await recordAll(recorder, callEvents("msg_1", ["text"]));
+  offerReading(recorder, "Start", { window: refused });
+  offerReading(recorder, "Compaction", { compaction, window: refused });
+  offerReading(recorder, "End", { window: refused });
+  await tick();
+
+  assert.deepEqual(postedReadings(calls), [
+    { ordinal: 1, afterTurn: 1, cause: "Compaction", compaction },
+  ]);
+});
+
 test("a plane from before readings is offered none", async () => {
   const { recorder, calls } = harness({ release: releaseBeforeContext });
-  await recordAll(recorder, [
-    ...callEvents("msg_1", ["text"]),
-    compactBoundary,
-  ]);
+  await recordAll(recorder, callEvents("msg_1", ["text"]));
+  offerReading(recorder, "Compaction", { compaction });
   await recorder.finish();
 
   assert.deepEqual(postedReadings(calls), []);
@@ -676,15 +708,11 @@ test("a refused reading stops the readings and nothing else of the run's evidenc
       if (path === "/v1/run/context") throw new Error("refused");
     },
   });
-  await recordAll(recorder, [
-    ...callEvents("msg_1", ["text"]),
-    compactBoundary,
-  ]);
+  await recordAll(recorder, callEvents("msg_1", ["text"]));
+  offerReading(recorder, "Compaction", { compaction });
   await tick();
-  await recordAll(recorder, [
-    ...callEvents("msg_2", ["text"]),
-    compactBoundary,
-  ]);
+  await recordAll(recorder, callEvents("msg_2", ["text"]));
+  offerReading(recorder, "Compaction", { compaction });
   await tick();
 
   assert.equal(
