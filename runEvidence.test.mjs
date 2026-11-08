@@ -16,11 +16,18 @@ import {
   runTranscriptBatchBytesMax,
   runTranscriptBatchesMax,
   runTurnSeriesMax,
+  workerRunContextSchema,
   workerRunEndedSchema,
   workerRunLimitSchema,
   workerRunTotalsSchema,
+  workerRunTurnsSchema,
   workerRunUsageSchema,
 } from "@chuggy/worker-contract/workerPlane";
+
+import {
+  workerContractHeader,
+  workerContractRelease,
+} from "@chuggy/worker-contract/workerContract";
 
 import { drawnSecrets, drawnText, seeded } from "./credentialText.fixture.mjs";
 import {
@@ -74,10 +81,16 @@ function harness(options = {}) {
       request: async (_task, _bearer, path, init) => {
         calls.push({ path, init });
         await options.behaviour?.(path);
-        if (path !== "/v1/run/turns") return { ok: true, status: 204 };
+        const headers = new globalThis.Headers(
+          options.release === undefined
+            ? {}
+            : { [workerContractHeader]: options.release },
+        );
+        if (path !== "/v1/run/turns") return { ok: true, status: 204, headers };
         return {
           ok: true,
           status: 200,
+          headers,
           json: async () => ({ turnsRecorded: options.turnsRecorded ?? 0 }),
         };
       },
@@ -516,6 +529,170 @@ test("a turn row carries what the plane takes and nothing besides", async () => 
     "tokensInput",
     "tokensOutput",
   ]);
+});
+
+/** The release of a plane from before turns named their subagent and runs took readings. */
+const releaseBeforeContext = "1.43.0";
+
+/** One API call's events as Claude Code streams them: one per content block, each repeating the call's id and usage. */
+function callEvents(id, blocks, extra = {}) {
+  return blocks.map((block) => ({
+    type: "assistant",
+    message: {
+      id,
+      model: "claude-opus-4",
+      content: [{ type: block }],
+      usage: { input_tokens: 10, output_tokens: 1 },
+    },
+    parent_tool_use_id: null,
+    ...extra,
+  }));
+}
+
+async function recordAll(recorder, events) {
+  for (const event of events)
+    await recorder.record(JSON.stringify(event), event);
+}
+
+/** Every turn row a plane was posted, in the order it was posted them. */
+function postedTurns(calls) {
+  return calls
+    .filter(({ path }) => path === "/v1/run/turns")
+    .flatMap(({ init }) => JSON.parse(init.body).turns);
+}
+
+test("one API call is one turn row, whatever blocks it streamed as, and ordinals stay contiguous", async () => {
+  const { recorder, calls, tick } = harness();
+  await recordAll(recorder, [
+    ...callEvents("msg_1", ["thinking", "text", "tool_use"]),
+    ...callEvents("msg_2", ["text"]),
+  ]);
+  await tick();
+
+  assert.deepEqual(
+    postedTurns(calls).map(({ ordinal }) => ordinal),
+    [1, 2],
+  );
+});
+
+test("a run with no result folds its totals from one row per API call", async () => {
+  const { recorder, calls } = harness();
+  await recordAll(
+    recorder,
+    callEvents("msg_1", ["thinking", "text", "tool_use"]),
+  );
+  await recorder.finish();
+
+  const totals = JSON.parse(
+    calls.find(({ path }) => path === "/v1/run/totals").init.body,
+  );
+  assert.equal(totals.turns, 1);
+  assert.equal(totals.tokensInput, 10);
+});
+
+test("a subagent's call names the call it was made under, to a plane that takes the field", async () => {
+  const { recorder, calls, tick } = harness({ release: workerContractRelease });
+  await recorder.configuration(Buffer.from("{}"));
+  await recordAll(recorder, [
+    ...callEvents("msg_1", ["tool_use"]),
+    ...callEvents("msg_2", ["text"], { parent_tool_use_id: "toolu_01" }),
+  ]);
+  await tick();
+
+  const turns = postedTurns(calls);
+  assert.equal(Object.hasOwn(turns[0], "parentToolUseId"), false);
+  assert.equal(turns[1].parentToolUseId, "toolu_01");
+  assert.ok(workerRunTurnsSchema.safeParse({ turns }).success);
+});
+
+test("a plane from before the field is offered no subagent", async () => {
+  const { recorder, calls, tick } = harness({ release: releaseBeforeContext });
+  await recorder.configuration(Buffer.from("{}"));
+  await recordAll(
+    recorder,
+    callEvents("msg_1", ["text"], { parent_tool_use_id: "toolu_01" }),
+  );
+  await tick();
+
+  assert.equal(Object.hasOwn(postedTurns(calls)[0], "parentToolUseId"), false);
+});
+
+const compactBoundary = {
+  type: "system",
+  subtype: "compact_boundary",
+  compact_metadata: {
+    trigger: "auto",
+    pre_tokens: 167_000,
+    post_tokens: 9_000,
+  },
+};
+
+/** Every reading a plane was posted, in the order it was posted them. */
+function postedReadings(calls) {
+  return calls
+    .filter(({ path }) => path === "/v1/run/context")
+    .flatMap(({ init }) => JSON.parse(init.body).readings);
+}
+
+test("a compaction posts one reading, after the turn it follows", async () => {
+  const { recorder, calls, tick } = harness({ release: workerContractRelease });
+  await recordAll(recorder, [
+    ...callEvents("msg_1", ["thinking", "text"]),
+    compactBoundary,
+  ]);
+  await tick();
+
+  const readings = postedReadings(calls);
+  assert.deepEqual(readings, [
+    {
+      ordinal: 1,
+      afterTurn: 1,
+      cause: "Compaction",
+      compaction: {
+        trigger: "Auto",
+        tokensBefore: 167_000,
+        tokensAfter: 9_000,
+      },
+    },
+  ]);
+  assert.ok(workerRunContextSchema.safeParse({ readings }).success);
+});
+
+test("a plane from before readings is offered none", async () => {
+  const { recorder, calls } = harness({ release: releaseBeforeContext });
+  await recordAll(recorder, [
+    ...callEvents("msg_1", ["text"]),
+    compactBoundary,
+  ]);
+  await recorder.finish();
+
+  assert.deepEqual(postedReadings(calls), []);
+});
+
+test("a refused reading stops the readings and nothing else of the run's evidence", async () => {
+  const { recorder, calls, tick } = harness({
+    release: workerContractRelease,
+    behaviour: async (path) => {
+      if (path === "/v1/run/context") throw new Error("refused");
+    },
+  });
+  await recordAll(recorder, [
+    ...callEvents("msg_1", ["text"]),
+    compactBoundary,
+  ]);
+  await tick();
+  await recordAll(recorder, [
+    ...callEvents("msg_2", ["text"]),
+    compactBoundary,
+  ]);
+  await tick();
+
+  assert.equal(
+    calls.filter(({ path }) => path === "/v1/run/context").length,
+    1,
+  );
+  assert.equal(transcriptBatches(calls).length, 2);
+  assert.equal(postedTurns(calls).length, 2);
 });
 
 test("a buffer that would exceed one body's worth is shipped first", async () => {

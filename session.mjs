@@ -58,6 +58,13 @@
  * result too, and with no drain it is charged to the turn after, which runs to
  * its result, fails `StoreRefused` and ends the session, as a refusal later
  * than the drain is charged after any turn.
+ *
+ * AN ANSWERED TURN CARRIES ITS READINGS OF THE CONTEXT WINDOW, to a plane whose
+ * answers name the version that takes them: one per compaction its stream
+ * marked, and one of the window as it ended, which the runtime is asked for
+ * at `summary` detail, since `full` spends a token-count call per category. A
+ * reading the contract would refuse, or a window the runtime does not answer
+ * within `sessionContextUsageWaitMs`, is left out, never the answer.
  */
 
 import { execFile } from "node:child_process";
@@ -69,13 +76,17 @@ import { promisify } from "node:util";
 import {
   agentReportedTurnFailures,
   sessionCapabilities,
+  sessionContextCauses,
   sessionPlaneRoutes,
+  sessionTurnAnswerSchema,
+  sessionTurnContextReadingsMax,
   sessionTurnModelCharsMax,
   sessionTurnResultCharsMax,
   sessionTurnToolNameCharsMax,
   sessionTurnToolsMax,
 } from "@chuggy/worker-contract/sessionPlane";
 import { chuggyToolServerName } from "@chuggy/worker-contract/sessionTools";
+import { workerContractSessionContext } from "@chuggy/worker-contract/workerContract";
 import {
   mintedCredentialDirectory,
   sessionConfigDirectoryVariable,
@@ -98,6 +109,11 @@ import {
   sessionAllowedTools,
 } from "./chuggyTools.mjs";
 import { claudeCredentialPrepared } from "./claude.mjs";
+import {
+  contextCompacted,
+  contextCompaction,
+  contextWindow,
+} from "./contextReading.mjs";
 import { leadDecisionStaging } from "./leadDecision.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import {
@@ -127,7 +143,7 @@ import {
   sessionStopped,
 } from "./sessionTransport.mjs";
 import { WorkerPlaneRefusal } from "./transport.mjs";
-import { rosterLabel } from "./wire.mjs";
+import { answeredVersion, rosterLabel, versionReaches } from "./wire.mjs";
 
 /** The failures this pod names for a turn, each one the plane's roster carries. */
 const [
@@ -143,6 +159,13 @@ const [
   "AgentBudgetExhausted",
   "StoreRefused",
 ].map((label) => rosterLabel(agentReportedTurnFailures, label));
+
+const [contextCompactionCause, contextEndCause] = ["Compaction", "End"].map(
+  (label) => rosterLabel(sessionContextCauses, label),
+);
+
+/** How long the runtime is given to answer what its window holds as a turn ends. */
+export const sessionContextUsageWaitMs = 5_000;
 
 /** What a micro is of a dollar, which is the unit the measured cost is carried in. */
 const microsPerDollar = 1_000_000;
@@ -699,6 +722,11 @@ async function observe(context, message) {
     );
   observeRateLimit(context.sightings, message);
   context.measure.saw(message);
+  if (
+    contextCompacted(message) &&
+    context.compactions.length < sessionTurnContextReadingsMax - 1
+  )
+    context.compactions.push(contextCompaction(message));
   if (message.type === "result") {
     context.stops?.released();
     context.live?.ended(context.mailbox.claimed()?.turn);
@@ -712,6 +740,7 @@ async function observe(context, message) {
 export async function runSessionTurn(context) {
   context.store.startTurn();
   context.sightings = rateLimitSightings();
+  context.compactions = [];
   context.measure.startTurn();
   let result;
   for (;;) {
@@ -781,13 +810,60 @@ async function settleTurn(context, turn, result) {
     return failure === agentBudgetExhausted ? "Spent" : "Continue";
   }
   const measured = context.measure.of(result);
+  const readings = await sessionTurnReadings(context);
   await post(context, sessionPlaneRoutes.turnAnswer.path, {
     turn: turn.turn,
     result: sessionAnswerText(context, turn, result),
     ...context.store.turnBatches(),
     ...(measured === undefined ? {} : { measured }),
+    ...(readings.length === 0 ? {} : { readings }),
   });
   return "Continue";
+}
+
+/**
+ * The readings an answered turn carries, in the order it took them, each one
+ * the contract takes: none to a plane that does not take them, which refuses
+ * the whole answer over the field.
+ */
+async function sessionTurnReadings(context) {
+  if (!versionReaches(context.version, workerContractSessionContext)) return [];
+  const window = await sessionTurnWindow(context);
+  return [
+    ...context.compactions.map((compaction) => ({
+      cause: contextCompactionCause,
+      ...(compaction === undefined ? {} : { compaction }),
+    })),
+    ...(window === undefined ? [] : [{ cause: contextEndCause, window }]),
+  ].filter(
+    (reading) =>
+      sessionTurnAnswerSchema.safeParse({
+        turn: "turn",
+        result: "",
+        readings: [reading],
+      }).success,
+  );
+}
+
+/**
+ * The window as the runtime answers for it at a turn's end, or nothing where
+ * it cannot be asked, fails, or takes longer than `sessionContextUsageWaitMs`.
+ */
+async function sessionTurnWindow(context) {
+  if (typeof context.runtime?.getContextUsage !== "function") return undefined;
+  let asked;
+  try {
+    asked = Promise.resolve(
+      context.runtime.getContextUsage({ detail: "summary" }),
+    );
+  } catch {
+    return undefined;
+  }
+  const usage = await Promise.race([
+    asked.catch(() => undefined),
+    context.pause(sessionContextUsageWaitMs).then(() => undefined),
+  ]);
+  return usage === undefined ? undefined : contextWindow(usage, context.scrub);
 }
 
 /**
@@ -1313,6 +1389,29 @@ export function sessionEnvelopeServices(
   };
 }
 
+/**
+ * What a session runs on before it learns its facts. Its `request` keeps the
+ * latest release a plane's answer named, which is what a turn's readings are
+ * offered to.
+ */
+function sessionMainContext(task, bearer, { request, ...held }) {
+  const context = {
+    task,
+    bearer,
+    ...held,
+    version: undefined,
+    mirrored: false,
+    sightings: rateLimitSightings(),
+    measure: sessionMeasure(),
+  };
+  context.request = async (...asked) => {
+    const answer = await request(...asked);
+    context.version = answeredVersion(answer) ?? context.version;
+    return answer;
+  };
+  return context;
+}
+
 export async function sessionMain(services = {}) {
   const {
     environment = process.env,
@@ -1331,17 +1430,13 @@ export async function sessionMain(services = {}) {
   let stopLease = async () => undefined;
   try {
     const { task, bearer } = await launch();
-    const context = {
-      task,
-      bearer,
+    const context = sessionMainContext(task, bearer, {
       request,
       now,
+      pause,
       minted: services.minted ?? mintedCredentialDirectory,
       scrub,
-      mirrored: false,
-      sightings: rateLimitSightings(),
-      measure: sessionMeasure(),
-    };
+    });
     const facts = await sessionFacts(context);
     const held = await sessionHeld(context, environment, read, write, facts);
     const { credentialFiles, credential, scrubHead, keepSecret } = held;
