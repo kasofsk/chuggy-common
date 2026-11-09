@@ -35,7 +35,10 @@
  * host runs at once, with no swap past it, and it is named for its host, so
  * none is started beside another. The Claude credential's directory is
  * mounted read-only in one only the credential's owner opens, and the
- * supervisor is told that owner, which it reads the credential as.
+ * supervisor is told that owner, which it reads the credential as. Where the
+ * runner gives a selector, each Claude credential of its set is mounted so,
+ * at a directory of its name, and each session's `Start` names the one the
+ * selector chose for it, which the supervisor runs it on.
  *
  * THE CREDENTIAL'S DIRECTORY IS BOUND, NOT ITS FILE. A file bound alone stays
  * the file that was there when the container started, so a credential
@@ -55,6 +58,7 @@ import { chatProtocolVersion } from "@chuggy/worker-contract/chatHost";
 import { workerRepositoriesVariable } from "@chuggy/worker-contract/workerEnvironment";
 import { z } from "zod";
 
+import { agentCredentialSetCredentials } from "./agentCredentialSet.mjs";
 import { chatHostBackend, chatSupervisorPhases } from "./chatHostBackend.mjs";
 import {
   chatMirrorGroupCount,
@@ -86,7 +90,7 @@ import {
   removeArgv,
 } from "./engineArgv.mjs";
 import { engineFailure, engineFailureLine } from "./engineErrors.mjs";
-import { jobRunDirectory } from "./job.mjs";
+import { jobClaudeAgent, jobRunDirectory } from "./job.mjs";
 import { memoryRoomMibMin } from "./memoryBudget.mjs";
 import { poolIdentityDigest, poolLabelValue } from "./poolIdentity.mjs";
 import {
@@ -119,9 +123,10 @@ import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
  *
  * @typedef {object} ChatSupervisorPlaces what a supervisor's container is given of this machine
  * @property {{sessions: string, mirrors: string}} volumes the engine's volumes its sessions' directories and its mirrors are kept in
- * @property {string} credentialFile the Claude credential's file on this machine, whose directory the supervisor is given whole, and which each session is handed under whatever slot its task names
- * @property {{uid: number, gid: number}} credentialOwner who owns that file as the engine shows it inside a container, which the supervisor reads it as and no session's user may be
- * @property {ClaudeCredentialSetting} [claudeCredential] the kind of credential it is
+ * @property {string} [credentialFile] the Claude credential's file on this machine, whose directory the supervisor is given whole, and which each session is handed under whatever slot its task names; required where no selector is given
+ * @property {{uid: number, gid: number}} credentialOwner who owns that file, or every file of the selector's Claude set, as the engine shows it inside a container, which the supervisor reads it as and no session's user may be
+ * @property {ClaudeCredentialSetting} [claudeCredential] the kind of credential `credentialFile` is
+ * @property {import("./agentCredentialSet.mjs").AgentCredentialSelector} [credentials] the runner's selector, in place of the two above: the supervisor is given the directory of each file of its Claude set, and each session runs on the one it chooses
  * @property {string} [repositories] the site's map of the repositories a session may reach, as `CHUG_WORKER_REPOSITORIES` carries it
  * @property {Readonly<Record<string, string>>} [variables] the supervisor's own counts, by the `CHUG_CHAT_` name of each
  *
@@ -325,13 +330,14 @@ function chatSupervisorCounts(places) {
 }
 
 /**
- * The credential's mount, its directory bound where the supervisor finds
- * it: refused where its file is no absolute path written plainly, or its
- * directory the root.
+ * A credential's mount, its directory bound at `target`, where the
+ * supervisor finds it: refused where its file is no absolute path written
+ * plainly, or its directory the root.
  *
  * @param {string} file
+ * @param {string} target
  */
-function chatSupervisorCredentialMount(file) {
+function chatSupervisorCredentialMount(file, target) {
   if (!file.startsWith("/") || posix.normalize(file) !== file)
     throw new RangeError(
       "the credential's file is no absolute path written plainly",
@@ -339,23 +345,99 @@ function chatSupervisorCredentialMount(file) {
   const source = posix.dirname(file);
   if (source === "/" || file.endsWith("/"))
     throw new RangeError("the credential's file is in no directory of its own");
+  return { source, target, file: `${target}/${posix.basename(file)}` };
+}
+
+/**
+ * The credentials' mounts and what the supervisor is told of them: the one
+ * file's directory and its kind, or the directory of each Claude credential
+ * of the runner's selector at one of its name, and each named with its type,
+ * setting and file there, never its value. Refused where `places` names both
+ * or neither, or a selector holding no Claude credential, which a chat
+ * session runs on.
+ *
+ * @param {ChatSupervisorPlaces} places
+ */
+function chatSupervisorCredentialMounts(places) {
+  const names = chatSupervisorVariables;
+  if (places.credentials === undefined) {
+    if (places.credentialFile === undefined)
+      throw new RangeError(
+        "a supervisor is handed no credential: give the runner's selector or the credential's file",
+      );
+    const mount = chatSupervisorCredentialMount(
+      places.credentialFile,
+      chatSupervisorCredentialDirectory,
+    );
+    return {
+      mounts: [mount],
+      named: { [names.credential]: mount.file },
+      carried: claudeCredentialCarried(places.claudeCredential),
+    };
+  }
+  const named = ["credentialFile", "claudeCredential"].find(
+    (key) => places[key] !== undefined,
+  );
+  if (named !== undefined)
+    throw new RangeError(
+      `${named} names a credential, and so does the runner's selector; keep the selector`,
+    );
+  const set = places.credentials.sets[jobClaudeAgent];
+  if (set === undefined)
+    throw new RangeError(
+      "the runner's selector holds no Claude credential, which a chat session runs on",
+    );
+  const held = agentCredentialSetCredentials(set).map((credential) => ({
+    credential,
+    mount: chatSupervisorCredentialMount(
+      credential.file,
+      `${chatSupervisorCredentialsDirectory}/${credential.name}`,
+    ),
+  }));
   return {
-    source,
-    target: chatSupervisorCredentialDirectory,
-    file: `${chatSupervisorCredentialDirectory}/${posix.basename(file)}`,
+    mounts: held.map(({ mount }) => mount),
+    carried: {},
+    named: {
+      [names.credentials]: JSON.stringify(
+        held.map(({ credential, mount }) => ({
+          agent: credential.agent,
+          type: credential.type,
+          name: credential.name,
+          file: mount.file,
+          setting: credential.setting,
+        })),
+      ),
+    },
   };
 }
 
+/**
+ * What a host's `Start` names of the credential its selector chose for the
+ * next session, Claude's, or why it chose none.
+ *
+ * @param {import("./agentCredentialSet.mjs").AgentCredentialSelector} selector
+ * @returns {{credential: import("@chuggy/worker-contract/chatHost").ChatHostCredential} | {refused: string}}
+ */
+export function chatHostCredentialChosen(selector) {
+  const credential = selector.chosen(jobClaudeAgent);
+  if (credential === undefined)
+    return {
+      refused: `this runner holds no ${jobClaudeAgent} credential its policy allows that is available`,
+    };
+  const { agent, type, name } = credential;
+  return { credential: { agent, type, name } };
+}
+
 /** The supervisor's environment, refused wherever the supervisor would refuse it. */
-function chatSupervisorEnvironment(places, mount) {
+function chatSupervisorEnvironment(places, credentials) {
   const names = chatSupervisorVariables;
   const environment = {
     [chatSupervisorProtocolVariable]: String(chatProtocolVersion),
     ...chatSupervisorCounts(places),
-    [names.credential]: mount.file,
+    ...credentials.named,
     [names.credentialUid]: String(places.credentialOwner.uid),
     [names.credentialGid]: String(places.credentialOwner.gid),
-    ...claudeCredentialCarried(places.claudeCredential),
+    ...credentials.carried,
     ...(places.repositories === undefined
       ? {}
       : { [workerRepositoriesVariable]: places.repositories }),
@@ -370,8 +452,8 @@ function chatSupervisorEnvironment(places, mount) {
  * The supervisor's container, for any engine to run: root with the
  * capabilities it needs and none to gain, its input held open, its memory
  * `memoryBytes`, its sessions' directories and mirrors in volumes of its
- * own, its run directory a tmpfs a session's user may pass through, and the
- * credential's directory bound read-only into a tmpfs only the credential's
+ * own, its run directory a tmpfs a session's user may pass through, and each
+ * credential's directory bound read-only into a tmpfs only the credentials'
  * owner opens.
  *
  * @param {string} image
@@ -382,8 +464,8 @@ function chatSupervisorEnvironment(places, mount) {
 export function chatSupervisorContainer(image, places, memoryBytes) {
   if (!Number.isSafeInteger(memoryBytes) || memoryBytes < 1)
     throw new RangeError("a supervisor's memory must be a positive integer");
-  const mount = chatSupervisorCredentialMount(places.credentialFile);
-  const environment = chatSupervisorEnvironment(places, mount);
+  const credentials = chatSupervisorCredentialMounts(places);
+  const environment = chatSupervisorEnvironment(places, credentials);
   const flags = ["nosuid", "nodev", "noexec"];
   const { uid, gid } = places.credentialOwner;
   return {
@@ -415,7 +497,11 @@ export function chatSupervisorContainer(image, places, memoryBytes) {
         flags,
       },
     ],
-    binds: [{ source: mount.source, target: mount.target, readonly: true }],
+    binds: credentials.mounts.map(({ source, target }) => ({
+      source,
+      target,
+      readonly: /** @type {const} */ (true),
+    })),
     memoryBytes,
     environment,
   };
@@ -952,6 +1038,7 @@ export function checkedChatHostSettings(settings, engineName) {
  */
 export function chatHost(credentials, settings, seams) {
   const checked = checkedChatHostSettings(settings, seams.site.engine);
+  const selector = checked.places.credentials;
   const backend = chatHostBackend(
     {
       outputBytesMax: checked.outputBytesMax,
@@ -959,7 +1046,13 @@ export function chatHost(credentials, settings, seams) {
       exitWaitMs: chatHostExitWaitMs,
       stopWaitMs: chatHostStopWaitMs,
     },
-    { log: seams.log, logFor: seams.logFor },
+    {
+      log: seams.log,
+      logFor: seams.logFor,
+      ...(selector === undefined
+        ? {}
+        : { credentialChosen: () => chatHostCredentialChosen(selector) }),
+    },
   );
   const client = poolRunnerClient(
     credentials,

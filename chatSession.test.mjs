@@ -27,6 +27,7 @@ import {
   chatSessionScratchListed,
   chatSessionsOpened,
 } from "./chatSession.mjs";
+import { agentCredentialNameVariable } from "./agentCredentialSet.mjs";
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import { chatSupervisorCheckout } from "./chatSupervisor.mjs";
 import {
@@ -1038,4 +1039,174 @@ test("a user whose processes outlive the sweep at the start is held, and the sup
 
   assert.ok(system.children[0].args.includes("--reuid=20001"));
   assert.match(logged.join(""), /\[user-20000\] it is not given out/u);
+});
+
+/** The set a supervisor handed one is told of, two Claude credentials by name. */
+const handedSet = [
+  {
+    agent: "Claude",
+    type: "OAuth",
+    name: "team-a",
+    file: "/credentials/team-a/token",
+    setting: { kind: "Subscription" },
+  },
+  {
+    agent: "Claude",
+    type: "ApiKey",
+    name: "key-b",
+    file: "/credentials/key-b/key",
+    setting: { kind: "ApiKey" },
+  },
+];
+
+const apiKey = "sk-ant-api03-an-api-key-0123456789";
+
+/** A system whose every file of `handedSet` holds its own secret. */
+function setSystemOf() {
+  const texts = new Map([
+    [handedSet[0].file, token],
+    [handedSet[1].file, apiKey],
+  ]);
+  const system = systemOf({
+    credentialRead: async (path, owner) => {
+      system.calls.push(["credentialRead", path, owner]);
+      const text = texts.get(path);
+      if (text === undefined) throw new Error(`no file at ${path}`);
+      return text;
+    },
+  });
+  return system;
+}
+
+const setSettings = { credentialFile: undefined, credentials: handedSet };
+
+test("a session whose Start names a credential runs on that credential's file, told its type and name and never its value", async () => {
+  const system = setSystemOf();
+  const { sessions, logged } = await sessionsOf(system, setSettings);
+
+  await sessions.prepared(assignment, envelope, live(), {
+    agent: "Claude",
+    type: "ApiKey",
+    name: "key-b",
+  });
+
+  const [{ child, options }] = system.children;
+  assert.deepEqual(
+    system.calls.filter(([name]) => name === "credentialRead"),
+    [["credentialRead", "/credentials/key-b/key", settings.credentialOwner]],
+  );
+  assert.deepEqual(
+    system.calls.find(([name]) => name === "credentialWritten"),
+    [
+      "credentialWritten",
+      "/minted/session-20000/provider-credential",
+      apiKey,
+      20_000,
+    ],
+  );
+  assert.equal(
+    options.env[claudeCredentialVariable],
+    JSON.stringify({ kind: "ApiKey" }),
+  );
+  assert.equal(options.env[agentCredentialNameVariable], "key-b");
+  assert.ok(!JSON.stringify(options.env).includes(apiKey));
+  assert.ok(!child.written.includes(apiKey), "the channel carried the key");
+
+  child.stdout.end(`said ${apiKey}\n`);
+  await new Promise((resolve) => globalThis.setImmediate(resolve));
+  assert.ok(!logged.join("").includes(apiKey), "the key was printed");
+});
+
+/** Catches a session the supervisor holds no file for that runs on another, or for which anything is made. */
+test("a session whose Start names a credential the supervisor holds no file for is refused, and nothing is made or run", async () => {
+  for (const named of [
+    { agent: "Claude", type: "OAuth", name: "elsewhere" },
+    { agent: "Claude", type: "ApiKey", name: "team-a" },
+    { agent: "Codex", type: "OAuth", name: "team-a" },
+    undefined,
+  ]) {
+    const system = setSystemOf();
+    const { sessions, logged } = await sessionsOf(system, setSettings);
+    const before = system.calls.length;
+
+    await assert.rejects(
+      sessions.prepared(assignment, envelope, live(), named),
+      named === undefined
+        ? /names no credential/u
+        : new RegExp(
+            `credential ${named.name}, which this supervisor holds no file for`,
+            "u",
+          ),
+    );
+
+    assert.deepEqual(since(system, before), []);
+    assert.equal(system.children.length, 0);
+    assert.match(logged.join(""), /^a session was not prepared: /mu);
+  }
+});
+
+/** Catches a supervisor handed one file that runs a session naming a credential on it. */
+test("a supervisor handed one file refuses a Start naming a credential, and runs one naming none on that file", async () => {
+  const system = systemOf();
+  const { sessions } = await sessionsOf(system);
+
+  await assert.rejects(
+    sessions.prepared(assignment, envelope, live(), {
+      agent: "Claude",
+      type: "OAuth",
+      name: "claude",
+    }),
+    /holds no file for/u,
+  );
+  assert.equal(system.children.length, 0);
+
+  await sessions.prepared(assignment, envelope, live());
+  assert.deepEqual(
+    system.calls.filter(([name]) => name === "credentialRead"),
+    [credentialReadCall],
+  );
+  assert.equal(
+    system.children[0].options.env[agentCredentialNameVariable],
+    undefined,
+  );
+});
+
+/** Catches sessions naming different credentials that share one file, as every session did before a set. */
+test("two sessions naming two credentials are each handed a copy of its own credential's file", async () => {
+  const twoSet = [
+    handedSet[0],
+    { ...handedSet[0], name: "team-c", file: "/credentials/team-c/token" },
+  ];
+  const texts = new Map([
+    [twoSet[0].file, `${token}-a`],
+    [twoSet[1].file, `${token}-c`],
+  ]);
+  const system = systemOf({ credentialRead: async (path) => texts.get(path) });
+  const { sessions } = await sessionsOf(system, {
+    credentialFile: undefined,
+    credentials: twoSet,
+  });
+
+  for (const name of ["team-a", "team-c"])
+    await sessions.prepared(`assignment-${name}`, envelope, live(), {
+      agent: "Claude",
+      type: "OAuth",
+      name,
+    });
+
+  assert.deepEqual(
+    system.calls
+      .filter(([name]) => name === "credentialWritten")
+      .map(([, file, text]) => [file, text]),
+    [
+      ["/minted/session-20000/provider-credential", `${token}-a`],
+      ["/minted/session-20001/provider-credential", `${token}-c`],
+    ],
+  );
+  assert.deepEqual(
+    system.children.map(
+      ({ options }) => options.env[agentCredentialNameVariable],
+    ),
+    ["team-a", "team-c"],
+  );
 });

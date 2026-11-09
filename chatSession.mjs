@@ -14,11 +14,15 @@
  * its own, and with an environment that carries none of the supervisor's
  * secrets: its bearer crosses on its channel (`./chatChannel.mjs`).
  *
- * ITS PROVIDER CREDENTIAL IS READ AGAIN FOR EACH SESSION, from the one file
- * the supervisor is handed, whatever slot the session's task names it by, as
- * the owner the supervisor is told it has, so a credential renewed in place
- * is the next session's and the supervisor reads nothing that owner could
- * not. The owner is never the one a look at the file reports, which a share
+ * ITS PROVIDER CREDENTIAL IS READ AGAIN FOR EACH SESSION, from the file the
+ * supervisor is handed for the credential its `Start` names, or the one file
+ * it is handed where it names none, whatever slot the session's task names it
+ * by, as the owner the supervisor is told it has, so a credential renewed in
+ * place is the next session's and the supervisor reads nothing that owner
+ * could not. A `Start` naming a credential the supervisor holds no file for
+ * is refused before anything is made for it. A session is told its
+ * credential's type and name, never its value, as a job is
+ * (`./agentCredentialSet.mjs`). The owner is never the one a look at the file reports, which a share
  * from another machine can report as whoever last looked. It is checked as
  * the session would check it and copied into the session's minted
  * directory, where only the session reads it; every kind that names a file
@@ -100,6 +104,7 @@ import {
   chatLineReader,
   chatMintedVariable,
 } from "./chatChannel.mjs";
+import { agentCredentialCarried } from "./agentCredentialSet.mjs";
 import { chatAbortable } from "./chatCheckout.mjs";
 import { claudeCredentialPrepared } from "./claude.mjs";
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
@@ -785,27 +790,58 @@ async function chatSessionDirectories(state, place) {
 }
 
 /**
- * The session's copy of the provider credential the supervisor is handed,
- * read as the owner it is told the file has and checked as the session will
- * check it, and every secret it holds.
+ * The file of the credential `named` names among the set the supervisor is
+ * handed, of that agent and type, and what the session is told of it; the
+ * one file it is handed where `named` names none. Refused where it holds no
+ * such file, which no other credential stands in for.
+ *
+ * @param {{credentialFile?: string, credentials?: readonly import("./agentCredentialSet.mjs").AgentCredential[]}} settings
+ * @param {import("@chuggy/worker-contract/chatHost").ChatHostCredential | undefined} named
+ * @returns {{file: string, carried: Record<string, string>}}
  */
-async function chatSessionCredential(state, place) {
-  const { credentialFile, credentialOwner } = state.settings;
+function chatSessionCredentialHeld(settings, named) {
+  if (named === undefined) {
+    if (settings.credentialFile === undefined)
+      throw new Error(
+        "its Start names no credential, and this supervisor is handed no one file to run it on",
+      );
+    return { file: settings.credentialFile, carried: {} };
+  }
+  const held = (settings.credentials ?? []).find(
+    ({ agent, type, name }) =>
+      agent === named.agent && type === named.type && name === named.name,
+  );
+  if (held === undefined)
+    throw new Error(
+      `its Start names the ${named.agent} ${named.type} credential ${named.name}, which this supervisor holds no file for`,
+    );
+  return { file: held.file, carried: agentCredentialCarried(held) };
+}
+
+/**
+ * The session's copy of the provider credential `held` is, read as the owner
+ * the supervisor is told the file has and checked as the session will check
+ * it, and every secret it holds.
+ */
+async function chatSessionCredential(state, place, held) {
   const text = await state.system.credentialRead(
-    credentialFile,
-    credentialOwner,
+    held.file,
+    state.settings.credentialOwner,
   );
   const file = join(place.minted, chatSessionCredentialName);
   const prepared = claudeCredentialPrepared(text.trim(), {
     path: file,
-    environment: state.settings.environment,
+    environment: { ...state.settings.environment, ...held.carried },
   });
   await state.system.credentialWritten(file, text, place.uid);
   return { file, secrets: [text.trim(), ...prepared.secrets] };
 }
 
-/** What a session's process is started with of the supervisor's environment and its own places. */
-function chatSessionEnvironment(state, place, checkout) {
+/**
+ * What a session's process is started with of the supervisor's environment,
+ * what it is told of its credential, and its own places.
+ */
+function chatSessionEnvironment(state, place, launch) {
   const inherited = state.settings.environment;
   return {
     ...Object.fromEntries(
@@ -813,12 +849,13 @@ function chatSessionEnvironment(state, place, checkout) {
         inherited[name] === undefined ? [] : [[name, inherited[name]]],
       ),
     ),
+    ...launch.carried,
     HOME: place.home,
     TMPDIR: place.temporary,
     [workerWorkspaceVariable]: place.workspace,
     [chatChannelVariable]: String(chatChannelDescriptor),
     [chatMintedVariable]: place.minted,
-    [chatCheckoutVariable]: chatCheckoutCarried(checkout),
+    [chatCheckoutVariable]: chatCheckoutCarried(launch.checkout),
   };
 }
 
@@ -893,7 +930,7 @@ function chatSessionSpawned(state, place, launch) {
   );
   const child = state.system.spawn(program, args, {
     cwd: place.workspace,
-    env: chatSessionEnvironment(state, place, launch.checkout),
+    env: chatSessionEnvironment(state, place, launch),
     stdio: ["ignore", "pipe", "pipe", "pipe"],
   });
   return new Promise((resolve, reject) => {
@@ -906,7 +943,7 @@ function chatSessionSpawned(state, place, launch) {
 }
 
 /** Every step of a session's preparation, and its process started. */
-async function chatSessionMade(state, place, envelope, signal) {
+async function chatSessionMade(state, place, held, envelope, signal) {
   const { settings, system } = state;
   if ((await system.freeBytes(settings.sessionsRoot)) < settings.freeBytesMin)
     throw new Error(`${settings.sessionsRoot} has too little free space`);
@@ -915,7 +952,7 @@ async function chatSessionMade(state, place, envelope, signal) {
   const fetched = await chatAbortable(signal, state.task(envelope));
   if (fetched.mode !== "Session")
     throw new Error("the worker plane answered a task that is not a session's");
-  const credential = await chatSessionCredential(state, place);
+  const credential = await chatSessionCredential(state, place, held);
   signal.throwIfAborted();
   const { checkout, group } = await state.checkout(
     { ...fetched.answer, workerPlane: { url: envelope.callbackUrl } },
@@ -934,23 +971,35 @@ async function chatSessionMade(state, place, envelope, signal) {
     envelope: { ...envelope, providerCredentialFile: credential.file },
     checkout,
     group,
+    carried: held.carried,
     scrub: credentialScrub([envelope.bearer, ...credential.secrets]),
   });
 }
 
 /**
  * The session `envelope` stands for, prepared and started as a user of its
- * own, or the reason it was not, with everything made for it gone. `signal`
- * cancels the preparation, whose refusal is then its reason.
+ * own on the credential `named` names, or the reason it was not, with
+ * everything made for it gone; one naming a credential the supervisor holds
+ * no file for is refused before anything is. `signal` cancels the
+ * preparation, whose refusal is then its reason.
  */
-async function chatSessionPrepared(state, assignment, envelope, signal) {
+async function chatSessionPrepared(state, assignment, envelope, signal, named) {
+  let held;
+  try {
+    held = chatSessionCredentialHeld(state.settings, named);
+  } catch (failure) {
+    state.log(
+      `a session was not prepared: ${failure instanceof Error ? failure.message : String(failure)}\n`,
+    );
+    throw failure;
+  }
   const place = chatSessionPlace(
     state.settings,
     chatSessionUid(state),
     assignment,
   );
   try {
-    return await chatSessionMade(state, place, envelope, signal);
+    return await chatSessionMade(state, place, held, envelope, signal);
   } catch (failure) {
     if (!signal.aborted)
       state.log(
@@ -1022,7 +1071,8 @@ async function chatSessionsUsersNamed(settings, system) {
  * The sessions a supervisor runs on `system`: refused unless its image names
  * every user of its range, then its roots made, every session user's
  * processes a predecessor left killed, the places every user writes found,
- * and what it left removed. `prepared` starts one for an assignment; `holding`
+ * and what it left removed. `prepared` starts one for an assignment, on the
+ * credential its `Start` names where it names one; `holding`
  * is whether any session's directory is there, which a mirror's prune waits
  * on.
  *
@@ -1050,8 +1100,8 @@ export async function chatSessionsOpened(settings, seams) {
   await chatSessionsLeftCleared(state, settings.mintedRoot);
   await chatSessionsLeftCleared(state, settings.supervisorMinted);
   return {
-    prepared: (assignment, envelope, signal) =>
-      chatSessionPrepared(state, assignment, envelope, signal),
+    prepared: (assignment, envelope, signal, credential) =>
+      chatSessionPrepared(state, assignment, envelope, signal, credential),
     holding: async () =>
       (await system.listed(settings.sessionsRoot)).length > 0,
   };
