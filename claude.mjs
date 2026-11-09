@@ -149,10 +149,9 @@ export function claudeResult(events) {
 /**
  * What Claude Code is started with of its credential, read as `text` from the
  * file at `path`: the variables set, the ones withheld from what it would
- * otherwise inherit, and every secret the file holds. Where `environment`
- * names no kind the file is a subscription's token and nothing is withheld,
- * which is every Claude run there was before a kind could be named; where it
- * names one, that kind is the only one in force (`./claudeCredential.mjs`).
+ * otherwise inherit, and every secret the file holds. The kind `environment`
+ * names is the only one in force (`./claudeCredential.mjs`), and where it
+ * names none the file is a subscription's token, as it always was.
  *
  * @param {string} text
  * @param {{path?: string, environment?: Readonly<Record<string, string | undefined>>}} [given]
@@ -160,13 +159,9 @@ export function claudeResult(events) {
  */
 export function claudeCredentialPrepared(text, given = {}) {
   const { path = "", environment = {} } = given;
-  const setting = claudeCredentialNamed(environment);
-  if (setting === undefined)
-    return {
-      environment: { ...claudeEnvironment, CLAUDE_CODE_OAUTH_TOKEN: text },
-      withheld: [],
-      secrets: [text],
-    };
+  const setting = claudeCredentialNamed(environment) ?? {
+    kind: "Subscription",
+  };
   const refused = claudeCredentialRefusal(setting, text, path);
   if (refused !== undefined) throw new Error(refused);
   return {

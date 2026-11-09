@@ -159,13 +159,54 @@ export function codexResult(events) {
 }
 
 /**
- * The credential a Codex run reads, written to a Codex home of its own under
- * the image's HOME, which is the directory a job's check has found writable.
+ * The variables Codex 0.165.0 reads a credential from ahead of a home's
+ * `auth.json`, which a run withholds whichever type it runs on.
  */
-export async function prepareCodexCredential(
-  auth,
-  home = join(homedir(), ".chuggy-codex-home"),
-) {
+export const codexCredentialVariables = [
+  "OPENAI_API_KEY",
+  "CODEX_API_KEY",
+  "CODEX_ACCESS_TOKEN",
+];
+
+/** What names the type of Codex credential a workload's file is. */
+export const codexCredentialVariable = "CHUG_WORKER_CODEX_CREDENTIAL";
+
+/**
+ * The type of Codex credential a workload's environment names, OAuth's
+ * `auth.json` where it names none; one this core cannot read is refused.
+ *
+ * @param {Readonly<Record<string, string | undefined>>} environment
+ * @returns {"OAuth" | "ApiKey"}
+ */
+export function codexCredentialNamed(environment) {
+  const carried = environment[codexCredentialVariable];
+  if (carried === undefined) return "OAuth";
+  let document;
+  try {
+    document = JSON.parse(carried);
+  } catch {
+    document = undefined;
+  }
+  const kind = document?.kind;
+  if (
+    Object.keys(document ?? {}).length !== 1 ||
+    !["OAuth", "ApiKey"].includes(kind)
+  )
+    throw new Error(
+      `${codexCredentialVariable} names a Codex credential this core cannot read`,
+    );
+  return kind;
+}
+
+/**
+ * Every secret a ChatGPT login's `auth.json` holds: the document, each of its
+ * tokens and the API key it may carry; or a throw where `auth` is no such
+ * document.
+ *
+ * @param {string} auth
+ * @returns {string[]}
+ */
+export function codexAuthSecrets(auth) {
   let document;
   try {
     document = JSON.parse(auth);
@@ -174,19 +215,50 @@ export async function prepareCodexCredential(
   }
   if (document === null || typeof document !== "object")
     throw new Error("Codex OAuth credential is not an auth.json document");
+  return [
+    auth,
+    ...[
+      ...Object.values(document.tokens ?? {}),
+      document.OPENAI_API_KEY,
+    ].filter((value) => typeof value === "string"),
+  ];
+}
+
+/**
+ * The credential a Codex run reads, in a Codex home of its own under the
+ * image's HOME, which is the directory a job's check has found writable: a
+ * ChatGPT login's `auth.json` written there, or an API key in `CODEX_API_KEY`,
+ * which `codex exec` reads ahead of any `auth.json`, with none written. The
+ * type is the one `environment` names, a login's where it names none.
+ *
+ * @param {string} text
+ * @param {{environment?: Readonly<Record<string, string | undefined>>}} [given]
+ * @param {string} [home]
+ */
+export async function prepareCodexCredential(
+  text,
+  given = {},
+  home = join(homedir(), ".chuggy-codex-home"),
+) {
+  const type = codexCredentialNamed(given.environment ?? {});
+  const withheld = [...codexCredentialVariables, codexCredentialVariable];
+  if (type === "ApiKey") {
+    if (text === "" || /[\r\n]/u.test(text))
+      throw new Error("Codex API key file does not hold one key alone");
+    await mkdir(home, { recursive: false });
+    return {
+      environment: { CODEX_HOME: home, CODEX_API_KEY: text },
+      withheld,
+      secrets: [text],
+    };
+  }
+  const secrets = codexAuthSecrets(text);
   await mkdir(home, { recursive: false });
-  await writeFile(`${home}/auth.json`, `${auth}\n`, {
+  await writeFile(`${home}/auth.json`, `${text}\n`, {
     flag: "wx",
     mode: 0o600,
   });
-  const tokens = [
-    ...Object.values(document.tokens ?? {}),
-    document.OPENAI_API_KEY,
-  ].filter((value) => typeof value === "string");
-  return {
-    environment: { CODEX_HOME: home },
-    secrets: [auth, ...tokens],
-  };
+  return { environment: { CODEX_HOME: home }, withheld, secrets };
 }
 
 /**
@@ -273,7 +345,7 @@ export const codexAgent = {
   frame: codexFrame,
   ended: codexEnded,
   declared: codexDeclared,
-  prepareCredential: (auth) => prepareCodexCredential(auth),
+  prepareCredential: (text, given) => prepareCodexCredential(text, given),
   prepareShell: prepareCodexShell,
   prepareEnvironment: prepareCodexEnvironment,
   configuration: codexConfiguration,

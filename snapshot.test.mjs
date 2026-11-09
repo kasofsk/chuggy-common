@@ -58,6 +58,7 @@ async function snapshotOf(files, options = {}) {
       cwd,
       home,
       scrub: options.scrub ?? ((text) => text),
+      credential: options.credential,
     },
     services,
   );
@@ -207,6 +208,16 @@ test("a file past the per-file bound is truncated and keeps its whole digest", a
     createHash("sha256").update(oversized).digest("hex"),
     "the digest is a reference to the file, not to the excerpt kept",
   );
+});
+
+/** Catches a snapshot that does not name the credential its run was told it ran on, or names one it was not told. */
+test("the snapshot names the credential the run ran on as it was told it, and none where it was told none", async () => {
+  const credential = { agent: "Codex", type: "ApiKey", name: "openai-1" };
+  assert.deepEqual(
+    (await snapshotOf({}, { credential })).credential,
+    credential,
+  );
+  assert.ok(!Object.hasOwn(await snapshotOf({}), "credential"));
 });
 
 test("the argv and the init event are scrubbed before they are uploaded", async () => {

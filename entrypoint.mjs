@@ -112,6 +112,13 @@ import {
 
 import { workerAgent } from "./agent.mjs";
 import {
+  agentCredentialNameVariable,
+  agentCredentialReported,
+  agentCredentialsScrubbedNamed,
+  agentCredentialsScrubbedVariable,
+} from "./agentCredentialSet.mjs";
+import { codexAuthSecrets } from "./codex.mjs";
+import {
   chatChannelOpened,
   chatChannelVariable,
   chatCheckoutRead,
@@ -481,6 +488,7 @@ async function captureConfiguration(context, { argv, brief }, init) {
     cwd: context.directory,
     home: process.env.HOME,
     scrub: context.scrub,
+    credential: context.agentCredential,
   });
   await context.evidence.configuration(snapshot);
 }
@@ -533,16 +541,17 @@ async function agentImages(context) {
 
 /**
  * What an agent's own process is started with: the pod's inherited
- * environment less what the agent's credential withholds, the credential's
- * environment and its shell's, and what the agent adds to them once it has
- * seen the whole of it.
+ * environment less what the agent's credential withholds and what names the
+ * credential's name and its set's files, the credential's environment and its
+ * shell's, and what the agent adds to them once it has seen the whole of it.
  */
 async function runAgentEnvironment(context, shell) {
   const environment = {
-    ...workerEnvironmentWithout(
-      workerAgentEnvironment(process.env),
-      context.agentWithheld ?? [],
-    ),
+    ...workerEnvironmentWithout(workerAgentEnvironment(process.env), [
+      ...(context.agentWithheld ?? []),
+      agentCredentialNameVariable,
+      agentCredentialsScrubbedVariable,
+    ]),
     ...context.agentEnvironment,
     ...shell.environment,
   };
@@ -1372,16 +1381,53 @@ async function credentialValues(mounted) {
   return values;
 }
 
-/** The agent's credential as its file and the pod's environment prepare it. */
+/**
+ * The agent's credential as its file and the pod's environment prepare it,
+ * and what the run reports of it.
+ */
 async function agentCredential(credentialFiles, agent) {
   const credentialFile = credentialFiles[agent.credential];
   if (typeof credentialFile !== "string")
     throw new Error(`worker credential ${agent.credential} is not mounted`);
   const token = (await readFile(credentialFile, "utf8")).trim();
-  return agent.prepareCredential(token, {
+  const prepared = await agent.prepareCredential(token, {
     path: credentialFile,
     environment: process.env,
   });
+  return {
+    ...prepared,
+    reported: agentCredentialReported(process.env, agent.name),
+  };
+}
+
+/**
+ * Every secret of each file of its runner's credential sets a job is told
+ * of, which a job on its runner's host could read beside the one it runs on.
+ * A file that cannot be read is said and skipped, as a mounted one is.
+ */
+async function agentCredentialsScrubbed(environment) {
+  const secrets = [];
+  for (const { agent, type, file } of agentCredentialsScrubbedNamed(
+    environment,
+  )) {
+    let text;
+    try {
+      text = (await readFile(file, "utf8")).trim();
+    } catch {
+      process.stderr.write(`worker credential ${file} could not be read\n`);
+      continue;
+    }
+    try {
+      secrets.push(
+        ...(agent === "Codex" && type === "OAuth"
+          ? codexAuthSecrets(text)
+          : [text]),
+      );
+    } catch {
+      secrets.push(text);
+    }
+  }
+  return secrets;
 }
 
 /**
@@ -1408,10 +1454,10 @@ export async function workerRun({
   const { scrub, keepSecret, held } = credentialScrubbing([
     ...prepared.secrets.map((value) => ({ kind: agentKind, value })),
     { kind: workerSecretKinds.bearer, value: bearer },
-    ...(await credentialValues(mounted)).map((value) => ({
-      kind: workerSecretKinds.mounted,
-      value,
-    })),
+    ...[
+      ...(await credentialValues(mounted)),
+      ...(await agentCredentialsScrubbed(process.env)),
+    ].map((value) => ({ kind: workerSecretKinds.mounted, value })),
   ]);
   activeScrub = scrub;
   const evidence = runEvidenceRecorder(task, bearer, scrub, {
@@ -1421,6 +1467,7 @@ export async function workerRun({
   return {
     agentEnvironment: prepared.environment,
     agentWithheld: prepared.withheld ?? [],
+    agentCredential: prepared.reported,
     scrub,
     keepSecret,
     held,
@@ -1759,6 +1806,7 @@ async function workerAttemptWorked(attempt, workspace, git) {
       images: workspace.images,
       agentEnvironment: attempt.agentEnvironment,
       agentWithheld: attempt.agentWithheld,
+      agentCredential: attempt.agentCredential,
       scrub,
       evidence,
       agent: attempt.agent,

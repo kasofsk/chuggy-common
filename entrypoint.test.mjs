@@ -3297,12 +3297,16 @@ test("a work attempt whose commit carries its Claude credential fails and pushes
 /**
  * A stand-in for Claude Code that writes its process's whole environment to
  * `dump` and fails with `summary` read from the variable it names, so nothing
- * is pushed and the plane is told what it printed.
+ * is pushed and the plane is told what it printed; where `init` is set, it
+ * says first that it started, as Claude Code's init event does.
  */
-function environmentDumpingAgent(dump, summary) {
+function environmentDumpingAgent(dump, summary, init = false) {
   const script = [
     `const { writeFileSync } = await import("node:fs");`,
     `writeFileSync(process.argv[1], JSON.stringify(process.env));`,
+    ...(init
+      ? [`console.log(JSON.stringify({ type: "system", subtype: "init" }));`]
+      : []),
     `const summary = String(process.env[process.argv[2]]);`,
     `console.log(JSON.stringify({ type: "result", structured_output: { verdict: "Fail", summary } }));`,
   ].join("\n");
@@ -3318,9 +3322,9 @@ function environmentDumpingAgent(dump, summary) {
  * One agent work attempt launched from an envelope mounting `credential` as
  * its Claude credential file, the pod holding `holds`: the environment its
  * agent was started with, as the agent read it, and everything the plane was
- * sent, as text.
+ * sent, as text. Where `init` is set, its agent says it started.
  */
-async function credentialAttempt(t, credential, holds, summary) {
+async function credentialAttempt(t, credential, holds, summary, init = false) {
   const root = await suiteDirectory(t, "chuggy-credential-attempt-");
   const providerCredentialFile = join(root, "claude-code");
   await writeFile(providerCredentialFile, credential);
@@ -3366,7 +3370,7 @@ async function credentialAttempt(t, credential, holds, summary) {
       minted: root,
       write: async () => undefined,
       clone: async () => directory,
-      agent: environmentDumpingAgent(dump, summary),
+      agent: environmentDumpingAgent(dump, summary, init),
     }),
   );
   return {
@@ -3383,12 +3387,11 @@ async function credentialAttempt(t, credential, holds, summary) {
 
 /**
  * Catches a site pool's agent, whose runner names no kind of credential,
- * started on anything but the environment every agent was before a kind
- * could be named: the pod's, a subscription's token and the run's switches
- * over it, and its shell's, nothing the pod holds withheld beyond what it
- * always was.
+ * started beside a key or an endpoint the pod's environment left, which would
+ * outrank its token or send it elsewhere: it runs on the token as a
+ * subscription's, the only credential in force.
  */
-test("an agent whose runner names no kind of credential is started as every agent was before one could be named", async (t) => {
+test("an agent whose runner names no kind of credential is started on its token alone", async (t) => {
   const run = await credentialAttempt(
     t,
     `${secret}\n`,
@@ -3397,15 +3400,60 @@ test("an agent whose runner names no kind of credential is started as every agen
   );
 
   assert.deepEqual(run.environment, {
-    ...workerAgentEnvironment(process.env),
+    ...workerEnvironmentWithout(
+      workerAgentEnvironment(process.env),
+      decidingFor("Subscription"),
+    ),
     ...claudeEnvironment,
+    CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: "1",
     CLAUDE_CODE_OAUTH_TOKEN: secret,
   });
-  for (const [name, value] of Object.entries(strayEnvironment))
-    if (name !== "CLAUDE_CODE_OAUTH_TOKEN")
-      assert.equal(run.environment[name], value, name);
+  assert.deepEqual(strayLeftFor("Subscription", run.environment), []);
   assert.ok(run.reported);
   assert.ok(!run.sent.includes(secret));
+});
+
+/**
+ * Catches a run that does not report the credential it ran on, or reports
+ * more of it than its agent, type and name, and a secret of another
+ * credential of its runner's sets, which a job on its runner's host could
+ * read, reaching the plane.
+ */
+test("a run reports the credential it ran on by name, and every credential of its runner's sets is scrubbed", async (t) => {
+  const other = await suiteDirectory(t, "chuggy-credential-set-");
+  const otherKey = "sk-ant-api03-another-credential-of-the-set-0123";
+  const otherFile = join(other, "api-key");
+  await writeFile(otherFile, `${otherKey}\n`);
+  const run = await credentialAttempt(
+    t,
+    `${secret}\n`,
+    {
+      ...strayEnvironment,
+      [claudeCredentialVariable]: JSON.stringify({ kind: "Subscription" }),
+      CHUG_WORKER_CREDENTIAL_NAME: "personal-1",
+      CHUG_WORKER_CREDENTIALS_SCRUBBED: JSON.stringify([
+        { agent: "Claude", type: "ApiKey", file: otherFile },
+      ]),
+      CHUG_SUITE_PROBE: otherKey,
+    },
+    "CHUG_SUITE_PROBE",
+    true,
+  );
+
+  assert.ok(
+    run.sent.includes(
+      `"credential":${JSON.stringify({ agent: "Claude", type: "OAuth", name: "personal-1" })}`,
+    ),
+    run.sent,
+  );
+  assert.ok(!run.sent.includes(secret));
+  assert.ok(!run.sent.includes(otherKey));
+  assert.ok(run.sent.includes("[redacted credential]"));
+  for (const name of [
+    "CHUG_WORKER_CREDENTIAL_NAME",
+    "CHUG_WORKER_CREDENTIALS_SCRUBBED",
+  ])
+    assert.ok(!Object.hasOwn(run.environment, name), name);
 });
 
 /**

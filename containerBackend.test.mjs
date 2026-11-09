@@ -24,6 +24,10 @@ import {
   workerWorkspaceDirectory,
 } from "@chuggy/worker-contract/workerEnvironment";
 
+import {
+  agentCredentialSelector,
+  agentCredentialSets,
+} from "./agentCredentialSet.mjs";
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import {
   checkedContainerBackendSettings,
@@ -1407,6 +1411,118 @@ test("a job requiring an agent mounts that agent's credential file and is told t
     [settings.tokenFile, "Claude"],
     [settings.tokenFile, "Claude"],
   ]);
+});
+
+/** A runner's selector over two Claude subscriptions in turn and one Codex API key. */
+function rotatingSelector() {
+  return agentCredentialSelector(
+    agentCredentialSets({
+      claudeCredential: {
+        prefer: "PreferOAuth",
+        oauth: {
+          order: "RoundRobin",
+          credentials: [
+            { name: "max-1", tokenFile: "/home/op/.claude/max-1" },
+            { name: "max-2", tokenFile: "/home/op/.claude/max-2" },
+          ],
+        },
+      },
+      codexCredential: {
+        prefer: "ApiKeyOnly",
+        apiKey: {
+          order: "InOrder",
+          credentials: [{ name: "openai-1", apiKeyFile: "/home/op/openai" }],
+        },
+      },
+    }),
+  );
+}
+
+/**
+ * Catches a workload mounting a credential its runner's selector did not
+ * choose, told another's type or name, or a rotation that does not
+ * advance from one workload to the next, jobs and sessions alike.
+ */
+test("each workload mounts the credential the runner's selector chooses for its agent, told its type and name", async (t) => {
+  const selector = rotatingSelector();
+  const { backend, state, tokenFilesAsked } = await harness(t, {
+    tokenFile: undefined,
+    credentials: selector,
+    images: [{ image, capabilities: ["Agent:Claude", "Agent:Codex"] }],
+  });
+  state.images.add(image);
+  const required = (assignmentId, agent) =>
+    assignment({
+      assignment: assignmentId,
+      image: undefined,
+      capabilities: ["Platform:Linux:Amd64", agent],
+    });
+  await backend.place(required("asg-1", "Agent:Claude"), "Job");
+  await backend.place(required("asg-codex", "Agent:Codex"), "Job");
+  await backend.place(
+    assignment({ assignment: "ses-1", capabilities: [] }),
+    "Session",
+  );
+  await backend.place(required("asg-2", "Agent:Claude"), "Job");
+  await backend.settled();
+  const handed = (assignmentId) => {
+    const { argv, envFile } = ranWith(state, assignmentId);
+    return [
+      argv
+        .find((argument) =>
+          argument.endsWith(`,target=${jobProviderCredentialFile},readonly`),
+        )
+        ?.split(",")[1],
+      envFile
+        .split("\n")
+        .filter((line) =>
+          /^CHUG_WORKER_(CLAUDE_CREDENTIAL|CODEX_CREDENTIAL|CREDENTIAL_NAME)=/u.test(
+            line,
+          ),
+        )
+        .toSorted(),
+    ];
+  };
+  assert.deepEqual(handed("asg-1"), [
+    "source=/home/op/.claude/max-1",
+    [
+      `${claudeCredentialVariable}={"kind":"Subscription"}`,
+      "CHUG_WORKER_CREDENTIAL_NAME=max-1",
+    ],
+  ]);
+  assert.deepEqual(handed("asg-codex"), [
+    "source=/home/op/openai",
+    [
+      'CHUG_WORKER_CODEX_CREDENTIAL={"kind":"ApiKey"}',
+      "CHUG_WORKER_CREDENTIAL_NAME=openai-1",
+    ],
+  ]);
+  assert.equal(handed("ses-1")[0], "source=/home/op/.claude/max-2");
+  assert.equal(handed("asg-2")[0], "source=/home/op/.claude/max-1");
+  assert.deepEqual(
+    tokenFilesAsked.map(([file]) => file),
+    [
+      "/home/op/.claude/max-1",
+      "/home/op/openai",
+      "/home/op/.claude/max-2",
+      "/home/op/.claude/max-1",
+    ],
+  );
+});
+
+/** Catches a runner handing both a fixed credential file and a selector, of which a workload would mount one unsaid. */
+test("a selector beside a credential file is refused", () => {
+  assert.throws(
+    () =>
+      checkedContainerBackendSettings(
+        /** @type {any} */ ({
+          pool,
+          tokenFile: "/home/op/token",
+          credentials: rotatingSelector(),
+        }),
+      ),
+    /^RangeError: tokenFile names a credential, and so does the runner's selector; keep the selector$/u,
+  );
 });
 
 /**

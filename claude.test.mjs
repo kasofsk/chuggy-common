@@ -20,7 +20,6 @@ import {
   claudeAgent,
   claudeBrief,
   claudeCredentialPrepared,
-  claudeEnvironment,
   claudeInvocation,
   claudeResult,
   claudeResumeInvocation,
@@ -342,22 +341,52 @@ function composed(inherited, prepared) {
 }
 
 /**
- * Catches a site pool's Claude Code, whose runner names no kind, given any
- * environment but the one every run had before a kind could be named: a token
- * and the two switches over everything inherited, a stray key included.
+ * Catches an inherited API key outranking the token a run was handed: a site
+ * pool's runner names no kind, and a runner's selector names a subscription's,
+ * and either way the token is the only credential Claude Code finds.
  */
-test("where no kind is named, a Claude run's credential is a subscription's token over an untouched environment", () => {
-  const prepared = claudeCredentialPrepared(token, {
-    path: "/var/run/chuggy/credentials/claude-code",
-    environment: strayEnvironment,
-  });
+test("a Claude OAuth run, named or not, runs on its token alone whatever key it inherits", () => {
+  const inherited = { ...strayEnvironment, ANTHROPIC_API_KEY: key };
+  for (const environment of [
+    inherited,
+    { ...inherited, [claudeCredentialVariable]: '{"kind":"Subscription"}' },
+  ]) {
+    const prepared = claudeCredentialPrepared(token, {
+      path: "/var/run/chuggy/credentials/claude-code",
+      environment,
+    });
+    const ran = composed(inherited, prepared);
 
-  assert.deepEqual(prepared, {
-    environment: { ...claudeEnvironment, CLAUDE_CODE_OAUTH_TOKEN: token },
-    withheld: [],
-    secrets: [token],
-  });
-  assert.deepEqual(claudeAgent.prepareCredential(token), prepared);
+    assert.deepEqual(
+      decidingVariables.filter((name) => Object.hasOwn(ran, name)),
+      ["CLAUDE_CODE_OAUTH_TOKEN"],
+    );
+    assert.equal(ran.CLAUDE_CODE_OAUTH_TOKEN, token);
+    assert.deepEqual(prepared.secrets, [token]);
+  }
+  assert.deepEqual(
+    claudeAgent.prepareCredential(token).withheld,
+    claudeCredentialPrepared(token, {
+      environment: { [claudeCredentialVariable]: '{"kind":"Subscription"}' },
+    }).withheld,
+  );
+});
+
+/** Catches an inherited token outranked by, or outranking, the API key a run was handed. */
+test("a Claude API-key run runs on its key alone whatever token it inherits", () => {
+  const inherited = { ...strayEnvironment, CLAUDE_CODE_OAUTH_TOKEN: token };
+  const ran = composed(
+    inherited,
+    claudeCredentialPrepared(key, {
+      environment: { [claudeCredentialVariable]: '{"kind":"ApiKey"}' },
+    }),
+  );
+
+  assert.deepEqual(
+    decidingVariables.filter((name) => Object.hasOwn(ran, name)),
+    ["ANTHROPIC_API_KEY"],
+  );
+  assert.equal(ran.ANTHROPIC_API_KEY, key);
 });
 
 /** Each kind as its setting, its file, and what it sets that decides the credential Claude Code runs on. */

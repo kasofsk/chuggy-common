@@ -25,6 +25,7 @@
   },
   "files": [
     "agent.mjs",
+    "agentCredentialSet.mjs",
     "boundedResponse.mjs",
     "chatChannel.mjs",
     "chatCheckout.mjs",

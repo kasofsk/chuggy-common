@@ -27,7 +27,14 @@ import {
 import { poolEnvelopeSchema } from "@chuggy/worker-contract/workerTask";
 
 import { workerJobVariables } from "./checks.mjs";
-import { claudeCredentialVariable } from "./claudeCredential.mjs";
+import {
+  agentCredentialCarried,
+  agentCredentialVariables,
+} from "./agentCredentialSet.mjs";
+import {
+  claudeCredentialCarried,
+  claudeCredentialVariable,
+} from "./claudeCredential.mjs";
 import { hostJobVariable } from "./coreRuntime.mjs";
 
 /**
@@ -92,20 +99,41 @@ export function jobAgentCapability(agent) {
 }
 
 /**
- * @typedef {object} JobCredentialFiles a runner's credential files, by the agent each is for
- * @property {string} tokenFile Claude's
- * @property {Readonly<Record<string, string>>} [agentCredentialFiles] each other agent's, by its name; none, and no other agent has one
+ * @typedef {import("./agentCredentialSet.mjs").AgentCredential} AgentCredential
+ * @typedef {import("./agentCredentialSet.mjs").AgentCredentialSelector} AgentCredentialSelector
  *
- * @typedef {{agent: string, file: string}} JobCredential the file a workload is handed, and the agent that reads it
+ * @typedef {object} JobCredentialFiles a runner's credential files, by the agent each is for
+ * @property {string} [tokenFile] Claude's, where no selector is given
+ * @property {import("./claudeCredential.mjs").ClaudeCredentialSetting} [claudeCredential] the kind of credential `tokenFile` is; none, and a workload's core reads it as a subscription's token
+ * @property {Readonly<Record<string, string>>} [agentCredentialFiles] each other agent's, by its name; none, and no other agent has one
+ * @property {AgentCredentialSelector} [credentials] the runner's selector, which chooses each workload's credential in place of the three above
+ *
+ * @typedef {object} JobCredential the file a workload is handed, and the agent that reads it
+ * @property {string} agent
+ * @property {string} file
+ * @property {Record<string, string>} carried what the workload is told of the credential, never its value
+ * @property {AgentCredential} [credential] the one the selector chose
  */
 
 /**
  * The files as given, or a throw naming what is wrong with them: Claude's is
- * `tokenFile` alone.
+ * `tokenFile` alone, and a selector chooses in place of every file.
  *
  * @param {JobCredentialFiles} files
  */
 export function jobCredentialFilesChecked(files) {
+  if (files.credentials !== undefined) {
+    const named = [
+      "tokenFile",
+      "claudeCredential",
+      "agentCredentialFiles",
+    ].find((key) => files[key] !== undefined);
+    if (named !== undefined)
+      throw new RangeError(
+        `${named} names a credential, and so does the runner's selector; keep the selector`,
+      );
+    return files;
+  }
   if (Object.hasOwn(files.agentCredentialFiles ?? {}, jobClaudeAgent))
     throw new RangeError(
       `agentCredentialFiles names ${jobClaudeAgent}, whose credential file is tokenFile`,
@@ -115,9 +143,11 @@ export function jobCredentialFilesChecked(files) {
 
 /**
  * The credential a workload is handed: that of the one agent its assignment
- * requires by an `Agent:` capability, or `tokenFile` as Claude's where it
- * requires none or one this runner holds no file for. An assignment requiring
- * several agents is refused, since its job is handed one agent's credential.
+ * requires by an `Agent:` capability, or Claude's where it requires none or
+ * one this runner holds no credential for. Where the runner gives a selector,
+ * it chooses the credential, and each call is the next workload's choice;
+ * otherwise Claude's is `tokenFile`. An assignment requiring several agents is
+ * refused, since its job is handed one agent's credential.
  *
  * @param {JobCredentialFiles} files
  * @param {readonly string[]} capabilities the assignment's
@@ -136,10 +166,46 @@ export function jobCredential(files, capabilities) {
       refused: `the assignment requires ${required.join(" and ")}, and a job is handed one agent's credential, so this runner cannot tell which; require one agent`,
     };
   const agent = required[0]?.slice(jobAgentCapabilityPrefix.length);
+  if (files.credentials !== undefined)
+    return jobCredentialChosen(files.credentials, agent);
   const others = files.agentCredentialFiles ?? {};
   return agent !== undefined && Object.hasOwn(others, agent)
-    ? { agent, file: others[agent] }
-    : { agent: jobClaudeAgent, file: files.tokenFile };
+    ? { agent, file: others[agent], carried: {} }
+    : {
+        agent: jobClaudeAgent,
+        file: /** @type {string} */ (files.tokenFile),
+        carried: claudeCredentialCarried(files.claudeCredential),
+      };
+}
+
+/**
+ * The credential `selector` chooses for a workload requiring `agent`, Claude's
+ * where it holds no set for that agent, or why it chose none.
+ *
+ * @param {AgentCredentialSelector} selector
+ * @param {string | undefined} agent
+ * @returns {JobCredential | {refused: string}}
+ */
+function jobCredentialChosen(selector, agent) {
+  const named =
+    agent !== undefined && selector.agents.some((held) => held === agent)
+      ? agent
+      : jobClaudeAgent;
+  const credential = selector.chosen(named);
+  if (credential === undefined)
+    return {
+      refused: `this runner holds no ${named} credential its policy allows that is available`,
+    };
+  if (credential.agent !== named)
+    throw new Error(
+      `the selector chose ${credential.agent}'s ${credential.name} for ${named}`,
+    );
+  return {
+    agent: named,
+    file: credential.file,
+    carried: agentCredentialCarried(credential),
+    credential,
+  };
 }
 
 /**
@@ -149,13 +215,17 @@ export function jobCredential(files, capabilities) {
  *
  * @param {JobCredentialFiles} files
  * @param {readonly string[]} capabilities the assignment's
- * @param {(file: string, agent: string) => Promise<string | undefined>} refusal the runner's, of the file and the agent it is for
+ * @param {(file: string, agent: string, credential?: AgentCredential) => Promise<string | undefined>} refusal the runner's, of the file, the agent it is for and the credential the selector chose
  * @returns {Promise<JobCredential | {refused: string}>}
  */
 export async function jobCredentialHanded(files, capabilities, refusal) {
   const credential = jobCredential(files, capabilities);
   if ("refused" in credential) return credential;
-  const refused = await refusal(credential.file, credential.agent);
+  const refused = await refusal(
+    credential.file,
+    credential.agent,
+    credential.credential,
+  );
   return refused === undefined ? credential : { refused };
 }
 
@@ -214,7 +284,8 @@ export const jobEngineSocketVariables = [
 /**
  * The variables a workload's environment may not name: the envelope, the one
  * the core sets from the mounted token, which a value here would shadow, the
- * kind of Claude credential the runner mounts, which the runner sets, the
+ * kind of Claude credential the runner mounts and the type and name of the
+ * credential it chose, which the runner sets, the
  * workspace a job started through chuggy's runtime is checked at, which a
  * value here would move off the one its envelope names, and those the core
  * tells a job's shells which job they are in by, over any value here.
@@ -223,6 +294,7 @@ export const reservedJobVariables = [
   workerTaskVariable,
   "CLAUDE_CODE_OAUTH_TOKEN",
   claudeCredentialVariable,
+  ...agentCredentialVariables,
   workerWorkspaceVariable,
   hostJobVariable,
   ...Object.values(workerJobVariables),

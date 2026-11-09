@@ -11,7 +11,6 @@ import {
 import { poolEnvelopeSchema } from "@chuggy/worker-contract/workerTask";
 
 import { workerImageVariable } from "./checks.mjs";
-import { claudeEnvironment } from "./claude.mjs";
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import { strayEnvironment, strayLeftFor } from "./claudeCredential.fixture.mjs";
 import { poolHeldSessionAnswer as answer } from "./envelope.fixture.mjs";
@@ -173,21 +172,23 @@ test("an envelope's session leaves the envelope out of the runtime's environment
 
 /**
  * Catches a site pool's session, whose runner names no kind of credential,
- * opened on anything but the environment every session was before a kind
- * could be named: everything the pod inherited, a subscription's token and
- * the run's switches over it, and where its configuration is.
+ * opened beside a key or an endpoint the pod inherited, which would outrank
+ * its token or send it elsewhere: it is opened on the token as a
+ * subscription's, the only credential in force.
  */
-test("an envelope's session whose runner names no kind of credential is opened as every session was before one could be named", async () => {
+test("an envelope's session whose runner names no kind of credential is opened on its token alone", async () => {
   const runner = { ...site, ...strayEnvironment };
   const ran = await envelopeRun(answer, runner);
 
   assert.equal(ran.code, 0, ran.warned.join(""));
-  assert.deepEqual(ran.seen.options.env, {
-    ...sessionEnvelopeServices(envelope, answer, runner).environment,
-    ...claudeEnvironment,
-    CLAUDE_CODE_OAUTH_TOKEN: token,
-    [sessionConfigDirectoryVariable]: join(envelope.workspace, ".claude"),
-  });
+  const { env } = ran.seen.options;
+  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, token);
+  assert.deepEqual(strayLeftFor("Subscription", env), []);
+  assert.equal(env.SITE_VARIABLE, site.SITE_VARIABLE);
+  assert.equal(
+    env[sessionConfigDirectoryVariable],
+    join(envelope.workspace, ".claude"),
+  );
 });
 
 /**
