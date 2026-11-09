@@ -19,6 +19,13 @@
  * a `Duplicate`, and once no entry is left `Drained` is written and the
  * supervisor exits.
  *
+ * A SESSION RUNS ON THE CREDENTIAL ITS `Start` NAMES, the file the host
+ * handed for that name in `CHUG_CHAT_CREDENTIALS`, and a `Start` naming one
+ * it was handed no file for is refused `Unprepared`, never run on another. A
+ * host that hands one file in `CHUG_CHAT_CREDENTIAL` instead names none, and
+ * every session runs on that file, as each did under protocol 1, whose
+ * `Start` names none.
+ *
  * THE END OF ITS INPUT ENDS EVERYTHING. Every preparation is cancelled and
  * refused `Stopped`, every session is stopped and its `Ended` written, and
  * the supervisor exits. A line longer than a frame, or one that is not a
@@ -59,6 +66,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  chatHostCredentialSchema,
   chatProtocolFrameBytesMax,
   chatProtocolLine,
   chatProtocolVersion,
@@ -66,7 +74,12 @@ import {
 } from "@chuggy/worker-contract/chatHost";
 import { workerContractRelease } from "@chuggy/worker-contract/workerContract";
 import { workerRepositoriesVariable } from "@chuggy/worker-contract/workerEnvironment";
+import { z } from "zod";
 
+import {
+  agentCredentialTypes,
+  agentCredentialsMax,
+} from "./agentCredentialSet.mjs";
 import { chatLineReader, chatLineText } from "./chatChannel.mjs";
 import {
   chatCheckout,
@@ -88,6 +101,7 @@ import {
   chatSupervisorMintedDirectory,
   chatSystem,
 } from "./chatSession.mjs";
+import { claudeCredentialSettingSchema } from "./claudeCredential.mjs";
 import { envelopeTask } from "./entrypoint.mjs";
 import { planeCredential, sessionCredentialPath } from "./planeCredential.mjs";
 import { workerRepositories } from "./repository.mjs";
@@ -97,7 +111,13 @@ import { sessionRequest } from "./sessionTransport.mjs";
  * The protocols this supervisor speaks, newest last: the version, and in a
  * release window the one before it, as the module says.
  */
-export const chatSupervisorProtocols = Object.freeze([chatProtocolVersion]);
+export const chatSupervisorProtocols = Object.freeze([
+  chatProtocolVersion - 1,
+  chatProtocolVersion,
+]);
+
+/** The first protocol whose `Start` may name the credential its session runs on. */
+const chatSupervisorCredentialProtocol = 2;
 
 /** Where the host names the protocol it speaks, which it sets beside every other variable. */
 export const chatSupervisorProtocolVariable = "CHUG_CHAT_PROTOCOL";
@@ -138,6 +158,7 @@ export const chatSupervisorVariables = {
   groupFirst: "CHUG_CHAT_MIRROR_GROUP_FIRST",
   groupCount: "CHUG_CHAT_MIRROR_GROUP_COUNT",
   credential: "CHUG_CHAT_CREDENTIAL",
+  credentials: "CHUG_CHAT_CREDENTIALS",
   credentialUid: "CHUG_CHAT_CREDENTIAL_UID",
   credentialGid: "CHUG_CHAT_CREDENTIAL_GID",
 };
@@ -155,14 +176,66 @@ function chatSupervisorCount(environment, name, fallback, least) {
 }
 
 /**
- * The provider credential's file and the owner it is read as, as
- * `environment` names them, refused where it names either not at all, or an
- * owner a session is run as, who could then read it.
+ * The Claude credentials a host hands in `chatSupervisorVariables.credentials`,
+ * each named as a `Start` names it, with its file in this container and its
+ * setting, which is of its type, and each name once.
+ */
+const chatSupervisorCredentialsSchema = z
+  .array(
+    z.strictObject({
+      ...chatHostCredentialSchema.shape,
+      agent: z.literal("Claude"),
+      file: z.string().startsWith("/"),
+      setting: claudeCredentialSettingSchema,
+    }),
+  )
+  .min(1)
+  .max(agentCredentialTypes.length * agentCredentialsMax)
+  .superRefine((credentials, context) => {
+    const names = new Set(credentials.map(({ name }) => name));
+    if (names.size !== credentials.length)
+      context.addIssue({ code: "custom", message: "names a credential twice" });
+    for (const { type, setting } of credentials)
+      if (setting.kind !== (type === "OAuth" ? "Subscription" : type))
+        context.addIssue({
+          code: "custom",
+          message: `names a ${type} credential of the kind ${setting.kind}`,
+        });
+  });
+
+/** The credentials `carried` names, refused where it is no list `chatSupervisorCredentialsSchema` reads. */
+function chatSupervisorCredentialsNamed(carried) {
+  let document;
+  try {
+    document = JSON.parse(carried);
+  } catch {
+    document = undefined;
+  }
+  const read = chatSupervisorCredentialsSchema.safeParse(document);
+  if (!read.success)
+    throw new RangeError(
+      `${chatSupervisorVariables.credentials} names credentials this supervisor cannot read`,
+    );
+  return read.data;
+}
+
+/**
+ * The provider credential's file, or the set of them, and the owner each is
+ * read as, as `environment` names them, refused where it names both a file
+ * and a set or neither, or an owner a session is run as, who could then read
+ * them.
  */
 function chatSupervisorCredential(environment, uidFirst, uidCount) {
   const names = chatSupervisorVariables;
   const credentialFile = environment[names.credential] ?? "";
-  if (!credentialFile.startsWith("/"))
+  const carried = environment[names.credentials] ?? "";
+  if (credentialFile.length > 0 && carried.length > 0)
+    throw new RangeError(
+      `${names.credential} and ${names.credentials} each name the provider credential; name one`,
+    );
+  const credentials =
+    carried.length > 0 ? chatSupervisorCredentialsNamed(carried) : undefined;
+  if (credentials === undefined && !credentialFile.startsWith("/"))
     throw new RangeError(
       `${names.credential} must name the provider credential's file by its absolute path`,
     );
@@ -176,7 +249,10 @@ function chatSupervisorCredential(environment, uidFirst, uidCount) {
     throw new RangeError(
       `the credential's owner ${String(uid)} is among the users a session is run as`,
     );
-  return { credentialFile, credentialOwner: { uid, gid } };
+  return {
+    ...(credentials === undefined ? { credentialFile } : { credentials }),
+    credentialOwner: { uid, gid },
+  };
 }
 
 /**
@@ -239,11 +315,17 @@ function chatSupervisorSettled(state) {
 }
 
 /** An entry's preparation, then its session, answered and ended as its frames say. */
-async function chatSupervisorPrepared(state, assignment, envelope, entry) {
+async function chatSupervisorPrepared(state, start, entry) {
+  const { assignment, envelope, credential } = start;
   const { signal } = entry.cancel;
   let running;
   try {
-    running = await state.sessions.prepared(assignment, envelope, signal);
+    running = await state.sessions.prepared(
+      assignment,
+      envelope,
+      signal,
+      credential,
+    );
   } catch {
     running = undefined;
   }
@@ -268,7 +350,8 @@ async function chatSupervisorPrepared(state, assignment, envelope, entry) {
 }
 
 /** A `Start`, answered at once where it is refused, and prepared where it is not. */
-function chatSupervisorStart(state, { assignment, envelope }) {
+function chatSupervisorStart(state, start) {
+  const { assignment } = start;
   if (state.entries.has(assignment))
     return chatSupervisorRefused(state, assignment, "Duplicate");
   if (state.draining)
@@ -280,7 +363,7 @@ function chatSupervisorStart(state, { assignment, envelope }) {
     running: undefined,
   };
   state.entries.set(assignment, entry);
-  void chatSupervisorPrepared(state, assignment, envelope, entry);
+  void chatSupervisorPrepared(state, start, entry);
   return undefined;
 }
 
@@ -318,7 +401,17 @@ function chatSupervisorHeard(state, bytes) {
       "the host wrote a line that is not a frame",
     );
   }
-  if (frame.frame === "Start") return chatSupervisorStart(state, frame);
+  if (frame.frame === "Start") {
+    if (
+      frame.credential !== undefined &&
+      state.protocol < chatSupervisorCredentialProtocol
+    )
+      return chatSupervisorUnfollowed(
+        state,
+        `the host speaks protocol ${String(state.protocol)} and wrote a Start naming a credential, which that protocol's does not`,
+      );
+    return chatSupervisorStart(state, frame);
+  }
   if (frame.frame === "Stop") {
     const entry = state.entries.get(frame.assignment);
     if (entry !== undefined) chatSupervisorStopped(entry);
@@ -331,7 +424,8 @@ function chatSupervisorHeard(state, bytes) {
 /**
  * A supervisor speaking the protocol on `input` and `output` over `sessions`,
  * which prepares and runs one (`./chatSession.mjs`'s `prepared`), at most
- * `sessionsMax` at once: `Ready` first, then each frame the host's call for.
+ * `sessionsMax` at once, to a host speaking `protocol`, the newest it speaks
+ * where none is given: `Ready` first, then each frame the host's call for.
  * It settles with the code the supervisor exits with, once it has nothing
  * left to answer; `closed` is a signal taken as the end of `input`.
  */
@@ -342,8 +436,10 @@ export function chatSupervised({
   sessions,
   sessionsMax,
   closed,
+  protocol = chatProtocolVersion,
 }) {
   const state = {
+    protocol,
     output,
     log,
     sessions,
@@ -447,6 +543,7 @@ export async function chatSupervisorMain(environment = process.env) {
     sessions,
     sessionsMax: settings.sessionsMax,
     closed: closed.signal,
+    protocol: Number(environment[chatSupervisorProtocolVariable]),
   });
   await new Promise((written) =>
     process.stdout.write("", () => written(undefined)),

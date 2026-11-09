@@ -15,6 +15,10 @@ import test from "node:test";
 import { setTimeout as wait } from "node:timers/promises";
 
 import { workerJobVariables } from "./checks.mjs";
+import {
+  agentCredentialSelector,
+  agentCredentialSets,
+} from "./agentCredentialSet.mjs";
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import {
   checkedHostBackendSettings,
@@ -505,6 +509,47 @@ test("a job requiring an agent reads that agent's credential file, or the Claude
     );
     assert.deepEqual(tokenFilesAsked, [[file, agent]]);
   }
+});
+
+/**
+ * Catches a host job reading a credential its runner's selector did not
+ * choose, told another's type or name, or not told of the set's other files,
+ * which it could read as the runner's user and must scrub.
+ */
+test("a job reads the credential the runner's selector chooses, told its type and name and where every file of the set is", async (t) => {
+  const sets = agentCredentialSets({
+    claudeCredential: {
+      prefer: "PreferOAuth",
+      oauth: {
+        order: "InOrder",
+        credentials: [{ name: "max-1", tokenFile: "/Users/o/.claude/max-1" }],
+      },
+      apiKey: {
+        order: "InOrder",
+        credentials: [{ name: "key-1", apiKeyFile: "/Users/o/.claude/key" }],
+      },
+    },
+  });
+  const { backend, seen } = await harness(t, "sleep", {
+    tokenFile: undefined,
+    credentials: agentCredentialSelector(
+      sets,
+      (credential) => credential.type === "ApiKey",
+    ),
+  });
+  await backend.place(assignment(), "Job");
+  const { env } = await seen();
+
+  assert.equal(
+    JSON.parse(env.CHUG_WORKER_TASK).providerCredentialFile,
+    "/Users/o/.claude/key",
+  );
+  assert.equal(env[claudeCredentialVariable], '{"kind":"ApiKey"}');
+  assert.equal(env.CHUG_WORKER_CREDENTIAL_NAME, "key-1");
+  assert.deepEqual(JSON.parse(env.CHUG_WORKER_CREDENTIALS_SCRUBBED), [
+    { agent: "Claude", type: "OAuth", file: "/Users/o/.claude/max-1" },
+    { agent: "Claude", type: "ApiKey", file: "/Users/o/.claude/key" },
+  ]);
 });
 
 /**

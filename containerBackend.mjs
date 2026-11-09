@@ -186,7 +186,6 @@ import {
   enginePullRefused,
 } from "./engineErrors.mjs";
 import {
-  jobClaudeAgent,
   jobCredentialFilesChecked,
   jobCredentialHanded,
   jobEngineSocketEnvironment,
@@ -262,9 +261,10 @@ import {
  * @typedef {object} ContainerBackendSettings
  * @property {"docker" | "podman"} engine
  * @property {PoolIdentity} pool
- * @property {string} tokenFile the Claude credential file, which each workload mounts but one whose job requires another agent `agentCredentialFiles` names
+ * @property {string} [tokenFile] the Claude credential file, which each workload mounts but one whose job requires another agent `agentCredentialFiles` names; required where no selector is given
  * @property {import("./claudeCredential.mjs").ClaudeCredentialSetting} [claudeCredential] the kind of credential `tokenFile` is; none, and a workload's core reads it as a subscription's token, as it does a site pool's
  * @property {Readonly<Record<string, string>>} [agentCredentialFiles] the credential file of each agent but Claude, by the name its `Agent:` capability gives it, which a job requiring that agent mounts in place of `tokenFile`; none, and such a job mounts `tokenFile`
+ * @property {import("./agentCredentialSet.mjs").AgentCredentialSelector} [credentials] the runner's selector, which chooses the credential each job and session mounts in place of the three above
  * @property {string | undefined} registryHost the one registry the pool's token is presented to
  * @property {string | undefined} dockerHost the endpoint docker's context names, which a pull of the pool's registry is told; docker's alone
  * @property {number} timeoutSecsMax
@@ -296,7 +296,7 @@ import {
  * @typedef {object} ContainerBackendSeams
  * @property {Engine} engine
  * @property {WorkerPoolTokens} tokens the pool's own, which the loop shares
- * @property {(file: string, agent: string) => Promise<string | undefined>} tokenFileRefusal why this machine cannot hand a job the credential file the backend mounts, which is `agent`'s, or nothing: the runner's to judge, since whether a job can read it turns on how its engine maps users
+ * @property {(file: string, agent: string, credential?: import("./agentCredentialSet.mjs").AgentCredential) => Promise<string | undefined>} tokenFileRefusal why this machine cannot hand a job the credential file the backend mounts, which is `agent`'s and the credential the selector chose where it chose one, or nothing: the runner's to judge, since whether a job can read it turns on how its engine maps users
  * @property {() => number} nowMs
  * @property {(ms: number, signal: AbortSignal) => Promise<void>} sleep
  * @property {(line: string) => void} log
@@ -2255,10 +2255,10 @@ function workloadEngineSocket(settings, placement) {
 
 /**
  * The environment a workload's env file carries beside its envelope: the
- * runner's, then the kind of Claude credential where it mounts Claude's and
- * the runner names one, what a job handed this machine's engine is told of
- * it, and for a job started through chuggy's runtime the workspace its check
- * is to find writable, which is the one its envelope names.
+ * runner's, then what the workload is told of the credential it mounts, its
+ * type and name and never its value, what a job handed this machine's engine
+ * is told of it, and for a job started through chuggy's runtime the workspace
+ * its check is to find writable, which is the one its envelope names.
  *
  * @param {ContainerBackendSettings} settings
  * @param {Placement} placement
@@ -2267,9 +2267,7 @@ function workloadEnvironment(settings, placement) {
   const socket = workloadEngineSocket(settings, placement);
   return {
     ...settings.environment,
-    ...(placement.credential.agent === jobClaudeAgent
-      ? claudeCredentialCarried(settings.claudeCredential)
-      : {}),
+    ...placement.credential.carried,
     ...(socket === undefined
       ? {}
       : jobEngineSocketEnvironment(settings.engine, socket.path)),

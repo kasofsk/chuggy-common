@@ -1,6 +1,7 @@
 /**
  * The effective configuration one run was given: the resolved argv, the brief
- * where argv does not carry it, the runtime's own init event, and the
+ * where argv does not carry it, the credential it ran on by its agent, type
+ * and name where its runner named one, the runtime's own init event, and the
  * instruction, settings and plugin files it named, gathered once and uploaded
  * whole.
  *
@@ -228,7 +229,7 @@ function frameBytes(value) {
   return Buffer.byteLength(JSON.stringify(value));
 }
 
-function snapshotFrame({ argv, brief }, init, agent, scrub) {
+function snapshotFrame({ argv, brief, credential }, init, agent, scrub) {
   const scrubbedInit = JSON.parse(scrub(JSON.stringify(init ?? null)));
   const claudeVersion = scrubbedInit?.claude_code_version;
   const codexVersion = scrubbedInit?.codexVersion;
@@ -242,6 +243,7 @@ function snapshotFrame({ argv, brief }, init, agent, scrub) {
     ...(typeof claudeVersion === "string" ? { claudeVersion } : {}),
     ...(typeof codexVersion === "string" ? { codexVersion } : {}),
     ...(typeof model === "string" ? { model } : {}),
+    ...(credential === undefined ? {} : { credential }),
     init: scrubbedInit,
     files: [],
     dropped: [],
@@ -280,12 +282,12 @@ function droppedReference(entry) {
  * three figures sum to the files that were found.
  */
 export async function runConfigurationSnapshot(
-  { argv, brief, init, task, cwd, home, scrub },
+  { argv, brief, init, task, cwd, home, scrub, credential },
   services = { readFile, readdir, stat },
 ) {
   const walked = await walkInstructionFiles(cwd, services);
   const snapshot = snapshotFrame(
-    { argv, brief },
+    { argv, brief, credential },
     init,
     task?.worker?.mode?.agent,
     scrub,

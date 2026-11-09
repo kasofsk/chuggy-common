@@ -42,10 +42,10 @@ import { fileURLToPath, URL } from "node:url";
 
 import { workerTaskVariable } from "@chuggy/worker-contract/workerEnvironment";
 
+import { agentCredentialsScrubbedCarried } from "./agentCredentialSet.mjs";
 import { claudeCredentialCarried } from "./claudeCredential.mjs";
 import { hostJobVariable } from "./coreRuntime.mjs";
 import {
-  jobClaudeAgent,
   jobCredentialFilesChecked,
   jobCredentialHanded,
   jobEnvelope,
@@ -70,9 +70,10 @@ import { savedLogTrimmed } from "./savedLog.mjs";
  * @property {readonly string[]} platforms the platform tokens this host is
  * @property {string} directory where each job's directory is made, this pool's alone
  * @property {string} logDir where each ended job's output is kept
- * @property {string} tokenFile the Claude credential file, which a job reads where it is unless it requires another agent `agentCredentialFiles` names
+ * @property {string} [tokenFile] the Claude credential file, which a job reads where it is unless it requires another agent `agentCredentialFiles` names; required where no selector is given
  * @property {import("./claudeCredential.mjs").ClaudeCredentialSetting} [claudeCredential] the kind of credential `tokenFile` is; none, and a job's core reads it as a subscription's token
  * @property {Readonly<Record<string, string>>} [agentCredentialFiles] the credential file of each agent but Claude, by the name its `Agent:` capability gives it, which a job requiring that agent reads in place of `tokenFile`; none, and such a job reads `tokenFile`
+ * @property {import("./agentCredentialSet.mjs").AgentCredentialSelector} [credentials] the runner's selector, which chooses the credential each job reads in place of the three above; a job is told where every file of its sets is, since it can read them, and scrubs what they hold
  * @property {number} timeoutSecsMax
  * @property {number} outputBytesMax
  * @property {Readonly<Record<string, string>>} environment the owner's, over the runner's own
@@ -85,7 +86,7 @@ import { savedLogTrimmed } from "./savedLog.mjs";
  * @property {(pid: number, signal: NodeJS.Signals) => void} [kill] signals a process group
  * @property {Readonly<Record<string, string | undefined>>} [environment] the runner's own, which a job inherits
  * @property {(onExit: () => void) => void} [atExit] runs `onExit` as the runner ends, `hostExitWatched` where absent
- * @property {(file: string, agent: string) => Promise<string | undefined>} tokenFileRefusal why a job cannot read the credential file, which is `agent`'s, or nothing
+ * @property {(file: string, agent: string, credential?: import("./agentCredentialSet.mjs").AgentCredential) => Promise<string | undefined>} tokenFileRefusal why a job cannot read the credential file, which is `agent`'s and the credential the selector chose where it chose one, or nothing
  * @property {(line: string) => void} log
  * @property {() => number} [nowMs]
  *
@@ -510,10 +511,10 @@ async function hostJobDirectory(state, assignment, credentialFile) {
  * @param {State} state
  * @param {string} name
  * @param {{directory: string, envelope: string}} made
- * @param {string} agent whose credential file the job reads
+ * @param {Record<string, string>} carried what the job is told of its credential, never its value
  * @returns {Promise<{child: ChildProcess, log: import("node:fs/promises").FileHandle} | undefined>}
  */
-async function hostJobSpawned(state, name, made, agent) {
+async function hostJobSpawned(state, name, made, carried) {
   const log = await open(
     join(state.settings.logDir, `${name}.log`),
     "a",
@@ -527,9 +528,10 @@ async function hostJobSpawned(state, name, made, agent) {
         state.inherited,
         {
           ...state.settings.environment,
-          ...(agent === jobClaudeAgent
-            ? claudeCredentialCarried(state.settings.claudeCredential)
-            : {}),
+          ...carried,
+          ...(state.settings.credentials === undefined
+            ? {}
+            : agentCredentialsScrubbedCarried(state.settings.credentials.sets)),
         },
         made.directory,
         made.envelope,
@@ -625,7 +627,7 @@ async function hostPlaced(state, assignment, kind) {
   const made = await hostJobDirectory(state, assignment, credential.file);
   if ("refused" in made) return { placed: "Refused", evidence: made.refused };
   const name = hostJobName(assignment.assignment);
-  const started = await hostJobSpawned(state, name, made, credential.agent);
+  const started = await hostJobSpawned(state, name, made, credential.carried);
   if (started === undefined) return { placed: "Unavailable" };
   const deadlineSecs = hostJobDeadlineSecs(settings, assignment);
   const startedMs = (seams.nowMs ?? Date.now)();
