@@ -182,6 +182,8 @@ const agentSdkModule = "@anthropic-ai/claude-agent-sdk";
 const zodModule = "zod";
 const readStatus = 200;
 const acceptedStatus = 204;
+/** Claude Code's effort variable, which it ranks above the query's `effort`. */
+const sessionEffortVariable = "CLAUDE_CODE_EFFORT_LEVEL";
 const executeFile = promisify(execFile);
 
 /** The capability that admits the runtime's shell. */
@@ -598,6 +600,10 @@ function sessionTakesStops(facts) {
  * settings that outrank the tree's own. `CLAUDE_CODE_AUTO_COMPACT_WINDOW` would
  * override it, so this module never sets that variable.
  *
+ * `model` AND `effort` ARE THE FACTS' WHERE THEY NAME THEM, the model otherwise
+ * the site's. `CLAUDE_CODE_EFFORT_LEVEL` outranks `effort`, so the runtime's
+ * environment leaves it out wherever the facts name an effort.
+ *
  * `git` is the configuration every git the runtime starts is handed, which is
  * nothing where the session serves no reads, and `credential` is the runtime's
  * as `claudeCredentialPrepared` makes it.
@@ -615,14 +621,17 @@ export function sessionQueryOptions(
   const { allowedTools, disallowedTools } = sessionAllowedTools(
     facts.capabilities,
   );
-  const model = environment[sessionModelVariable];
+  const model = facts.model ?? environment[sessionModelVariable];
   const fork = sessionForkFrom(facts);
   return {
     sessionStore: store,
     sessionStoreFlush: "eager",
     cwd: checkout?.directory ?? workspace,
     env: {
-      ...workerEnvironmentWithout(environment, credential.withheld),
+      ...workerEnvironmentWithout(environment, [
+        ...credential.withheld,
+        ...(facts.effort === undefined ? [] : [sessionEffortVariable]),
+      ]),
       ...credential.environment,
       [sessionConfigDirectoryVariable]: sessionConfigDirectory(
         environment,
@@ -645,6 +654,7 @@ export function sessionQueryOptions(
         ? { resume: facts.agentReference }
         : {}),
     ...(typeof model === "string" && model.length > 0 ? { model } : {}),
+    ...(facts.effort === undefined ? {} : { effort: facts.effort }),
     ...(facts.autoCompactWindow !== undefined
       ? { settings: { autoCompactWindow: facts.autoCompactWindow } }
       : {}),

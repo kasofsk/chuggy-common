@@ -1208,6 +1208,63 @@ test("a session whose facts name no compaction window is given no settings", asy
   assert.ok(!("settings" in seen.options), "settings were given");
 });
 
+test("a session whose facts name a model runs on it over the site's", async () => {
+  const plane = planeOf([], { ...leadFacts, model: "claude-sonnet-5-5" });
+  const { seen, query } = queryOf(() => []);
+
+  await run({
+    request: plane.request,
+    query,
+    environment: { ...environment, [sessionModelVariable]: "opus" },
+  });
+
+  assert.equal(seen.options.model, "claude-sonnet-5-5");
+});
+
+test("a session whose facts name no model runs on the site's", async () => {
+  const plane = planeOf([], leadFacts);
+  const { seen, query } = queryOf(() => []);
+
+  await run({
+    request: plane.request,
+    query,
+    environment: { ...environment, [sessionModelVariable]: "opus" },
+  });
+
+  assert.equal(seen.options.model, "opus");
+});
+
+test("a session whose facts name an effort runs at it, unoutranked by the effort variable", async () => {
+  const plane = planeOf([], { ...leadFacts, effort: "medium" });
+  const { seen, query } = queryOf(() => []);
+
+  await run({
+    request: plane.request,
+    query,
+    environment: { ...environment, CLAUDE_CODE_EFFORT_LEVEL: "high" },
+  });
+
+  assert.equal(seen.options.effort, "medium");
+  assert.ok(
+    !("CLAUDE_CODE_EFFORT_LEVEL" in seen.options.env),
+    "the variable that outranks the effort was left in",
+  );
+});
+
+test("a session whose facts name no effort is given none and keeps the effort variable", async () => {
+  const plane = planeOf([], leadFacts);
+  const { seen, query } = queryOf(() => []);
+
+  await run({
+    request: plane.request,
+    query,
+    environment: { ...environment, CLAUDE_CODE_EFFORT_LEVEL: "high" },
+  });
+
+  assert.ok(!("effort" in seen.options), "an effort was given");
+  assert.equal(seen.options.env.CLAUDE_CODE_EFFORT_LEVEL, "high");
+});
+
 test("an observation answered with decision tools posts the document they composed", async () => {
   const plane = planeOf([observationTurn], leadFacts);
   const { query } = queryOf((_asked, _index, options) => [
