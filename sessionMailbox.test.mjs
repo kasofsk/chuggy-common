@@ -70,6 +70,30 @@ test("a second turn is not claimed until the first one settled", async () => {
   assert.equal(calls.length, 2);
 });
 
+test("an ask is yielded into the turn in flight, claiming nothing and settling nothing", async () => {
+  const { calls, mailbox } = mailboxOf([claimed("turn-1"), claimed("turn-2")]);
+
+  const turns = mailbox.turns();
+  await turns.next();
+  const asked = turns.next();
+  mailbox.ask("decide");
+
+  assert.equal((await asked).value.message.content, "decide");
+  assert.equal(mailbox.claimed().turn, "turn-1");
+  const second = turns.next();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(calls.length, 1, "the ask claimed a turn");
+  mailbox.settled();
+  assert.equal((await second).value.message.content, "ask turn-2");
+});
+
+test("an ask with no turn in flight is refused", () => {
+  const { mailbox } = mailboxOf([{ status: 204 }]);
+
+  assert.throws(() => mailbox.ask("decide"), /no turn to ask in/u);
+});
+
 test("an empty mailbox is polled until the idle bound and then ends the iterable", async () => {
   const { calls, mailbox } = mailboxOf([{ status: 204 }]);
 
