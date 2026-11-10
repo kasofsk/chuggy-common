@@ -422,7 +422,8 @@ function runningTotal() {
  * What the runtime spent, gathered as it says it. The model, the tokens and the
  * cost outlive one turn because the runtime reports each per query rather than
  * per turn, so what one turn spent is what its total moved by; the duration is
- * already the turn's and the tools are this turn's alone.
+ * the sum of the turn's results' own durations and the tools are this turn's
+ * alone.
  *
  * A FAILED TURN IS NEVER MEASURED, AND ITS SPEND IS NOT LOST. Only an answered
  * turn asks for an envelope, so a failed one leaves both marks where they stood
