@@ -196,3 +196,31 @@ test("a result whose text is a JSON decision is never asked", async () => {
   assert.deepEqual(asked, [observationTurn.input]);
   assert.equal(answers[0].result, decision);
 });
+
+test("a turn that saw a mirror_error is never asked, and fails StoreRefused", async () => {
+  const mirrorError = {
+    type: "system",
+    subtype: "mirror_error",
+    error: "gave up on batch 3",
+  };
+  const prose = result("success", { result: "prose" });
+  const cases = {
+    before: [init, mirrorError, prose],
+    after: [init, prose, mirrorError],
+  };
+  for (const [name, messages] of Object.entries(cases)) {
+    const { asked, answers, failures } = await ran(
+      observationTurn,
+      leadFacts,
+      () => messages,
+    );
+
+    assert.deepEqual(asked, [observationTurn.input], name);
+    assert.deepEqual(answers, [], name);
+    assert.deepEqual(
+      failures,
+      [{ turn: "turn-1", failure: "StoreRefused" }],
+      name,
+    );
+  }
+});
