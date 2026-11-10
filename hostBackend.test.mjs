@@ -584,6 +584,18 @@ test("a credential outcome handed a host backend benches the credential its job 
     state: "BenchedUntilRestart",
   });
   assert.deepEqual(credentials.benchOf("max-2"), { state: "Available" });
+  assert.deepEqual(backend.capabilitiesWithheld(), []);
+  await backend.place(assignment({ assignment: "asg-2" }), "Job");
+  backend.credentialOutcomesTaken([
+    { assignment: "asg-2", outcome: "CreditsExhausted" },
+  ]);
+  assert.deepEqual(backend.capabilitiesWithheld(), ["Agent:Claude"]);
+});
+
+/** Catches a host backend without a selector withholding a capability its runner was built with. */
+test("a host backend without a selector withholds nothing", async (t) => {
+  const { backend } = await harness(t, "sleep");
+  assert.deepEqual(backend.capabilitiesWithheld(), []);
 });
 
 /**
@@ -936,6 +948,25 @@ test("a host beside a container backend takes its own jobs, and everything else 
   calls.splice(0);
   await routed.settled();
   assert.deepEqual(calls, ["container.settled", "host.settled"]);
+});
+
+/** Catches a host beside a container backend dropping either one's withheld capabilities, or naming one twice. */
+test("a host beside a container backend withholds what either withholds, each once", () => {
+  const routed = hostRoutedBackend(
+    /** @type {never} */ ({
+      ...recording([], "container"),
+      capabilitiesWithheld: () => ["Agent:Claude"],
+    }),
+    /** @type {never} */ ({
+      ...recording([], "host"),
+      capabilitiesWithheld: () => ["Agent:Codex", "Agent:Claude"],
+    }),
+    ["Platform:MacOS:Arm64"],
+  );
+  assert.deepEqual(routed.capabilitiesWithheld?.(), [
+    "Agent:Claude",
+    "Agent:Codex",
+  ]);
 });
 
 test("a job whose process exited 0 is named as one that succeeded", async (t) => {

@@ -350,12 +350,13 @@ test("a runner the contract cannot name is refused at once, and a release it can
 });
 
 /**
- * The header each poll of a client given `capabilities` sends, as the plane
- * reads it.
+ * The header each poll of a client given `capabilities` sends under `terms`,
+ * as the plane reads it.
  *
  * @param {readonly string[] | undefined} capabilities
+ * @param {import("./poolLoop.mjs").WorkerPoolPollTerms} [terms]
  */
-async function capabilitiesNamed(capabilities) {
+async function capabilitiesNamed(capabilities, terms = {}) {
   const headers = [];
   const plane = poolPlaneClient(
     capabilities === undefined
@@ -369,8 +370,8 @@ async function capabilitiesNamed(capabilities) {
       );
     },
   );
-  await plane.poll("pool-token", [], 1);
-  await plane.poll("pool-token", [], 1);
+  await plane.poll("pool-token", [], 1, 0, terms);
+  await plane.poll("pool-token", [], 1, 0, terms);
   return headers.map((sent) => ({
     present: workerRunnerCapabilitiesHeader in sent,
     named: workerRunnerCapabilitiesOf(sent[workerRunnerCapabilitiesHeader]),
@@ -397,6 +398,32 @@ test("a runner's every poll names its capabilities as a set the plane reads, eac
       }),
       JSON.stringify(given),
     );
+});
+
+/**
+ * Catches a withheld capability reaching a poll, one the client was not given
+ * added, or a client given none naming a set because its poll withholds one.
+ */
+test("a poll names the capabilities its client was given less those its terms withhold, and adds none", async () => {
+  const given = ["Platform:Linux:Amd64", "Agent:Claude", "Tool:Bazel"];
+  for (const [withheld, set] of [
+    [["Agent:Claude"], ["Platform:Linux:Amd64", "Tool:Bazel"]],
+    [["Agent:Codex"], given],
+    [[], given],
+    [given, []],
+  ])
+    assert.deepEqual(
+      await capabilitiesNamed(given, { withheld }),
+      Array(2).fill({
+        present: true,
+        named: { named: "Set", capabilities: set },
+      }),
+      JSON.stringify(withheld),
+    );
+  assert.deepEqual(
+    await capabilitiesNamed(undefined, { withheld: ["Agent:Claude"] }),
+    Array(2).fill({ present: false, named: { named: "None" } }),
+  );
 });
 
 /** Catches a client given no capabilities naming a set, which would replace the one its registration recorded. */

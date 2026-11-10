@@ -15,7 +15,9 @@
  * A runner names its package and version on the poll, and the answer may name
  * the release chuggy pins for that package. A runner may name its capabilities
  * on the poll too, whose set replaces the one its registration recorded, and a
- * client given none names none, leaving that set as it is.
+ * client given none names none, leaving that set as it is. A poll names that
+ * set less what its terms withhold, so it never names a capability the client
+ * was not given.
  *
  * A poll may name the memory room the pool offers jobs and its ceiling for
  * one, each only where the contract reads it, since a plane refuses a poll
@@ -351,7 +353,11 @@ async function poolPlanePolled(
   let answered;
   try {
     const url = poolPlaneAssignmentsUrl(settings, held, wanted, wantedSessions);
-    const { runner, capabilities } = settings;
+    const { runner } = settings;
+    const withheld = new Set(terms.withheld);
+    const capabilities = settings.capabilities?.filter(
+      (capability) => !withheld.has(capability),
+    );
     answered = await fetcher(url, {
       method: "GET",
       signal: globalThis.AbortSignal.timeout(settings.pollTimeoutMs),

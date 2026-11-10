@@ -46,6 +46,7 @@ import { agentCredentialsScrubbedCarried } from "./agentCredentialSet.mjs";
 import { claudeCredentialCarried } from "./claudeCredential.mjs";
 import { hostJobVariable } from "./coreRuntime.mjs";
 import {
+  jobCapabilitiesWithheld,
   jobCredentialFilesChecked,
   jobCredentialHanded,
   jobEnvelope,
@@ -749,6 +750,7 @@ export function hostBackend(settings, seams) {
     ended: async () => state.ready.splice(0),
     credentialOutcomesTaken: (outcomes) =>
       settings.credentials?.outcomesTaken(outcomes),
+    capabilitiesWithheld: () => jobCapabilitiesWithheld(settings.credentials),
     holds: (assignment) => state.jobs.has(assignment),
     measured: () => state.measures.measured(),
     inFlight: () =>
@@ -801,6 +803,13 @@ export function hostRoutedBackend(container, host, platforms) {
       container.credentialOutcomesTaken?.(outcomes);
       host.credentialOutcomesTaken?.(outcomes);
     },
+    capabilitiesWithheld: () => [
+      ...new Set(
+        [container, host].flatMap(
+          (backend) => backend.capabilitiesWithheld?.() ?? [],
+        ),
+      ),
+    ],
     inFlight: () => [...container.inFlight(), ...host.inFlight()],
     measured: () =>
       runnerMeasuredSum(

@@ -405,8 +405,8 @@ test("PreferOAuth falls to API keys while every OAuth credential is benched, and
 
 /**
  * Catches a selector answering nothing, or a credential whose bench ends
- * later, while every credential its policy allows is benched: no job is
- * dropped, and the runner's refusing the agent is another ticket's.
+ * later, while every credential its policy allows is benched: a job offered
+ * before the runner's polls leave the agent out is not dropped.
  */
 test("with every credential benched the selector answers the one whose bench ends soonest", () => {
   const { selector, clock } = benchedSelector(claudeSet("PreferOAuth"));
@@ -432,6 +432,58 @@ test("with every credential benched the selector answers the one whose bench end
     restarted.outcomesTaken([{ assignment, outcome: "CreditsExhausted" }]);
   }
   assert.equal(chosenAs(restarted, "job-3"), "max-1");
+});
+
+/** A selector over Claude's set under OAuthOnly and one Codex API key, on a clock the test moves. */
+function twoAgentSelector() {
+  const clock = { nowMs: 1_000_000 };
+  const selector = agentCredentialSelector(
+    agentCredentialSets({
+      claudeCredential: claudeSet("OAuthOnly"),
+      codexCredential: {
+        prefer: "ApiKeyOnly",
+        apiKey: {
+          order: "InOrder",
+          credentials: [{ name: "openai-1", apiKeyFile: "/c/openai-1" }],
+        },
+      },
+    }),
+    () => clock.nowMs,
+  );
+  return { selector, clock };
+}
+
+/**
+ * Catches an agent left out while a credential its policy allows is
+ * available, counted available on a credential its policy does not allow, or
+ * kept out once its earliest bench has ended.
+ */
+test("an agent is unavailable while every credential its policy allows is benched, and available once the earliest bench ends", () => {
+  const { selector, clock } = twoAgentSelector();
+  const earliestMs = clock.nowMs + 60_000;
+  assert.equal(chosenAs(selector, "job-1"), "max-1");
+  selector.outcomesTaken([usageLimited("job-1", clock.nowMs + 120_000)]);
+  assert.deepEqual(selector.unavailable(), []);
+  assert.equal(chosenAs(selector, "job-2"), "max-2");
+  selector.outcomesTaken([usageLimited("job-2", earliestMs)]);
+  assert.deepEqual(selector.unavailable(), ["Claude"]);
+  assert.equal(selector.chosen("Codex", "job-3")?.name, "openai-1");
+  clock.nowMs = earliestMs - 1;
+  assert.deepEqual(selector.unavailable(), ["Claude"]);
+  clock.nowMs = earliestMs;
+  assert.deepEqual(selector.unavailable(), []);
+});
+
+/** Catches an agent whose every credential's credits are exhausted counted available again before a restart. */
+test("an agent whose every credential is benched until restart stays unavailable", () => {
+  const { selector, clock } = twoAgentSelector();
+  for (const assignment of ["job-1", "job-2"]) {
+    chosenAs(selector, assignment);
+    selector.outcomesTaken([{ assignment, outcome: "CreditsExhausted" }]);
+  }
+  clock.nowMs += 365 * 24 * 3_600_000;
+  assert.deepEqual(selector.unavailable(), ["Claude"]);
+  assert.deepEqual(twoAgentSelector().selector.unavailable(), []);
 });
 
 /** Catches exhausted credits benched for a time, or a later usage limit shortening that bench. */

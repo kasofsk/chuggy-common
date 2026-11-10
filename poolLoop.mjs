@@ -12,7 +12,9 @@
  *
  * A CREDENTIAL OUTCOME IS TAKEN BEFORE ANYTHING IS PLACED. The backend's
  * selector benches the credential it chose for each assignment an answer names
- * an outcome for, so what that answer offers runs on another.
+ * an outcome for, so what that answer offers runs on another. Each poll
+ * withholds the capabilities the backend withholds then, which is how an
+ * agent none of whose credentials is available stops being offered jobs.
  *
  * A JOB AND A SESSION ARE COUNTED APART. Each kind has its own ceiling, its
  * own room on the poll and its own offers, so a session never takes a job's
@@ -106,6 +108,7 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @property {() => Promise<readonly WorkerPoolHeld[]>} held every workload of either kind, each with the kind it was placed as
  * @property {() => Promise<readonly WorkerPoolEnded[]>} ended each one once, after `held` stopped naming it; never one this pool stopped
  * @property {(outcomes: readonly WorkerPoolCredentialOutcome[]) => void} [credentialOutcomesTaken] benches the credential each outcome's assignment ran on, where its selector chose it; none for a backend that holds no selector
+ * @property {() => readonly string[]} [capabilitiesWithheld] the capabilities a poll leaves out now: each agent's of which its selector has no credential available; none for a backend that holds no selector
  * @property {(byRoom: boolean) => boolean} [jobsTaken] whether it takes a job now, as its last `held` found, from a plane that claims by room or one that does not; false while its machine's disk is low or its engine's memory has no room for it, and true for a backend that keeps neither
  * @property {() => WorkerPoolMemoryRoom | undefined} [memoryRoom] its engine's memory as its last `held` found; none for a backend that keeps no budget
  * @property {() => Promise<(() => Promise<void>) | undefined>} [claimed] takes its engine's claim without waiting: what lets it go, or nothing while another pool holds it; none for a backend that keeps no claim lock
@@ -123,6 +126,7 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @typedef {object} WorkerPoolPollTerms what a poll names beside its query
  * @property {WorkerPoolMemoryRoom} [memory] the room it offers jobs, and its ceiling
  * @property {number} [waitSecs] the longest the plane may wait before it answers; none, and the plane's own
+ * @property {readonly string[]} [withheld] the capabilities it leaves out of those its plane client names
  *
  * @typedef {"Settled" | "Lost" | "Stale" | "Denied" | "Unavailable"} WorkerPoolSettled
  *
@@ -699,7 +703,9 @@ async function workerPoolClientReconciled(client, token, held, taking, terms) {
     taking.sessions
       ? workerPoolClientRoom(client.settings, held, "Session")
       : 0,
-    terms,
+    client.backend.capabilitiesWithheld === undefined
+      ? terms
+      : { ...terms, withheld: client.backend.capabilitiesWithheld() },
   );
   if (polled.polled === "Stale") {
     client.tokens.invalidate(token);

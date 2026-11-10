@@ -99,6 +99,17 @@ export function jobAgentCapability(agent) {
 }
 
 /**
+ * The capabilities a runner's polls leave out now: each agent's of which
+ * `selector` has no credential available, and none where there is no selector.
+ *
+ * @param {import("./agentCredentialSet.mjs").AgentCredentialSelector | undefined} selector
+ * @returns {string[]}
+ */
+export function jobCapabilitiesWithheld(selector) {
+  return (selector?.unavailable() ?? []).map(jobAgentCapability);
+}
+
+/**
  * @typedef {import("./agentCredentialSet.mjs").AgentCredential} AgentCredential
  * @typedef {import("./agentCredentialSet.mjs").AgentCredentialSelector} AgentCredentialSelector
  *
