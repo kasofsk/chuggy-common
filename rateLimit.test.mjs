@@ -17,7 +17,10 @@ import test from "node:test";
 import { workerRunUsageSchema } from "@chuggy/worker-contract/workerPlane";
 
 import {
+  creditsDepletedSnapshot,
+  creditsDepletedTypes,
   fiveHourResetsAtSecs,
+  limitReachedTypes,
   limitSnapshot,
   ordinarySnapshot,
   rolloutObservedAtSecs,
@@ -339,6 +342,59 @@ test("a Codex rollout is a hold on a reached type, a used-up window or a usage l
       true,
       JSON.stringify(declared),
     );
+});
+
+/**
+ * Catches a workspace's depleted credits read as a limit a reset reopens, a
+ * limit's reached type read as depleted credits, or credits read from anything
+ * but the reached type's exact declared value.
+ */
+test("a Codex rollout's credits are exhausted exactly where its last snapshot names a depleted reached type", () => {
+  for (const reached of creditsDepletedTypes)
+    for (const declared of [
+      { snapshot: creditsDepletedSnapshot(reached) },
+      {
+        snapshot: creditsDepletedSnapshot(reached),
+        errorInfo: "usage_limit_exceeded",
+      },
+      { snapshot: { ...limitSnapshot, rate_limit_reached_type: reached } },
+    ])
+      assert.equal(
+        creditsExhausted(seenInRollout(declared)),
+        true,
+        JSON.stringify(declared),
+      );
+
+  for (const reached of [
+    ...limitReachedTypes,
+    "WORKSPACE_OWNER_CREDITS_DEPLETED",
+    "credits_depleted",
+  ]) {
+    const seen = seenInRollout({
+      snapshot: { ...limitSnapshot, rate_limit_reached_type: reached },
+    });
+    assert.equal(creditsExhausted(seen), false, reached);
+    assert.equal(rateLimited(seen), true, reached);
+    assert.deepEqual(seen.reset, {
+      resetsAtSecs: weeklyResetsAtSecs,
+      window: "seven_day",
+    });
+  }
+
+  assert.equal(
+    creditsExhausted(
+      seenInRollout({
+        snapshot: windowlessSnapshot,
+        errorInfo: "usage_limit_exceeded",
+      }),
+    ),
+    false,
+  );
+  assert.equal(
+    creditsExhausted(seenInRollout({ errorInfo: "usage_limit_exceeded" })),
+    false,
+  );
+  assert.deepEqual(seenInRollout({}), rateLimitSightings());
 });
 
 test("a Codex limit reopens at the latest reset a used-up window names, under that window's name", () => {

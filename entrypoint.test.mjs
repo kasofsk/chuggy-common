@@ -79,6 +79,8 @@ import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import { codexAgent } from "./codex.mjs";
 import {
   fiveHourResetsAtSecs,
+  creditsDepletedSnapshot,
+  creditsDepletedTypes,
   limitSnapshot,
   ordinarySnapshot,
   rolloutFolder,
@@ -5739,6 +5741,48 @@ test("a Codex limit whose rollout named no reset ends rate-limited, saying the r
     "When the limit resets is unknown.",
     "The run was not held: this agent cannot resume a conversation.",
   ]);
+});
+
+/**
+ * A workspace's depleted Codex credits through a real pod. Catches the run
+ * ended as a limit to wait out, or with a text naming no credential.
+ */
+test("a Codex run whose workspace credits are depleted ends RunCreditsExhausted, its text naming the credential", async (t) => {
+  for (const reached of creditsDepletedTypes)
+    await inCheckout(async (checkout) => {
+      await targetPushed(checkout);
+      const carried = envelopeCarried();
+      const { ran, plane } = await launchedStandIn(
+        t,
+        checkout,
+        codexRuns({
+          lines: [
+            rolloutLine(tokenCount(creditsDepletedSnapshot(reached))),
+            rolloutLine(usageLimitComplete),
+          ],
+        }),
+        async (given) => ({
+          ...(await carried(given)),
+          CHUG_WORKER_CREDENTIAL_NAME: "codex-1",
+        }),
+        codexLaunched,
+      );
+
+      assert.equal(ran.code, 1, ran.stderr);
+      assert.deepEqual(planeBodies(plane, "runEnded"), [
+        { evidence: "RunCreditsExhausted" },
+      ]);
+      const [uploaded] = planeBodies(plane, "artifact");
+      assert.deepEqual(
+        Buffer.from(uploaded).toString("utf8").split("\n").slice(0, 3),
+        [
+          "Codex exited 1",
+          usageLimitSentence,
+          "The credits of the credential codex-1 are exhausted, so the run was not held.",
+        ],
+        reached,
+      );
+    });
 });
 
 /** Catches a missing rollout failing the run in its own way, or read as a limit. */

@@ -30,9 +30,11 @@
  *
  * EXHAUSTED CREDITS ARE THE SAME FRAME'S `billing_error`, which the same
  * closed set declares and the runtime sets where the account has no credit
- * left. It is no hold: no window reopens. Codex declares no such signal, its
- * exhausted quota and its usage not included both being
- * `usage_limit_exceeded`, so a Codex run's credits are never read as exhausted.
+ * left. It is no hold: no window reopens. Codex declares exhausted credits
+ * only for a ChatGPT workspace, as a snapshot's `rate_limit_reached_type`
+ * of `workspace_owner_credits_depleted` or `workspace_member_credits_depleted`.
+ * An API key's exhausted balance is `usage_limit_exceeded`, as is a used-up
+ * quota, so it is never read as exhausted credits.
  *
  * THE LATEST STATUS IS THE ONE THAT COUNTS, for that same reason: a run rejected
  * at one point and allowed again later was not being held when it ended.
@@ -89,6 +91,10 @@ const rateLimitErrorKind = "rate_limit";
 const creditsExhaustedErrorKind = "billing_error";
 
 const codexUsageLimitErrorInfo = "usage_limit_exceeded";
+const codexCreditsDepletedTypes = new Set([
+  "workspace_owner_credits_depleted",
+  "workspace_member_credits_depleted",
+]);
 const codexUsedPercentFull = 100;
 const codexTimestampPattern =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u;
@@ -172,7 +178,8 @@ function codexResetOf(snapshot) {
 /**
  * Folds what a Codex rollout declared — `snapshot`, its last `token_count`'s
  * `rate_limits`, and `errorInfo`, its `task_complete`'s `codex_error_info` —
- * into the sightings, where it says the account was refused.
+ * into the sightings, where it says the account was refused, and whether a
+ * workspace's credits were depleted.
  */
 export function observeCodexRollout(sightings, { snapshot, errorInfo }) {
   const reached =
@@ -180,6 +187,8 @@ export function observeCodexRollout(sightings, { snapshot, errorInfo }) {
     codexWindowsFull(snapshot).length > 0;
   if (!reached && errorInfo !== codexUsageLimitErrorInfo) return sightings;
   sightings.refused = true;
+  if (codexCreditsDepletedTypes.has(snapshot?.rate_limit_reached_type))
+    sightings.creditsExhausted = true;
   sightings.reset = codexResetOf(snapshot);
   return sightings;
 }

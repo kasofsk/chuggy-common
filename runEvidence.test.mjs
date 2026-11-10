@@ -4,7 +4,10 @@ import test from "node:test";
 import { setImmediate } from "node:timers";
 
 import {
+  creditsDepletedSnapshot,
+  creditsDepletedTypes,
   fiveHourResetsAtSecs,
+  limitReachedTypes,
   limitSnapshot,
   rolloutObservedAtSecs,
   rolloutTimestamp,
@@ -53,6 +56,7 @@ import {
   truncatedEvent,
 } from "./runEvidence.mjs";
 import {
+  observeCodexRollout,
   observeRateLimit,
   rateLimitReadings,
   rateLimitSightings,
@@ -1183,6 +1187,38 @@ test("exhausted credits end a run RunCreditsExhausted only to a plane whose rele
     endedEvidence(creditsResult, false, seen, runTimedOut, takes),
     runTimedOut,
   );
+});
+
+/** Catches a workspace whose Codex credits are depleted labelled a limit, or a Codex limit labelled exhausted credits. */
+test("a Codex rollout naming depleted credits ends RunCreditsExhausted, and one naming a limit RunRateLimited", () => {
+  const takes = workerContractCredentialOutcome;
+  const ended = (snapshot) =>
+    endedEvidence(
+      undefined,
+      false,
+      observeCodexRollout(rateLimitSightings(), {
+        snapshot,
+        errorInfo: "usage_limit_exceeded",
+      }),
+      undefined,
+      takes,
+    );
+  for (const reached of creditsDepletedTypes) {
+    assert.equal(
+      ended(creditsDepletedSnapshot(reached)),
+      "RunCreditsExhausted",
+    );
+    assert.equal(
+      ended({ ...limitSnapshot, rate_limit_reached_type: reached }),
+      "RunCreditsExhausted",
+    );
+  }
+  for (const reached of limitReachedTypes)
+    assert.equal(
+      ended({ ...limitSnapshot, rate_limit_reached_type: reached }),
+      "RunRateLimited",
+    );
+  assert.equal(ended(undefined), "RunRateLimited");
 });
 
 test("the recorder folds the frames it ships, so the ending reads the whole run", async () => {
