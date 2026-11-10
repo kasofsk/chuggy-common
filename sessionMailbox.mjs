@@ -6,7 +6,8 @@
  * yielding a turn it blocks until the pod says that turn settled, so the runtime
  * cannot be handed a second turn while the first is still being answered — and
  * so nothing belonging to a later turn can arrive while the pod is draining the
- * current one's messages.
+ * current one's messages. The one thing it yields in that wait is the pod's ask
+ * of the turn in flight, which claims nothing: it is that turn's own message.
  *
  * BOTH LOOPS ARE BOUNDED. One request is bounded by the plane's own long poll,
  * and the loop as a whole by the idle bound the pod was launched with: a
@@ -75,13 +76,14 @@ export function sessionMailbox(task, bearer, services = {}) {
   } = services;
   let held;
   let stopped = false;
-  let settle = () => undefined;
-  let awaitSettled = Promise.resolve();
+  let release = () => undefined;
+  let released = Promise.resolve();
   let idleSince;
 
+  /** Blocks the generator until the turn settles, or until the pod asks in it. */
   function hold() {
-    awaitSettled = new Promise((resolve) => {
-      settle = resolve;
+    released = new Promise((resolve) => {
+      release = resolve;
     });
   }
 
@@ -104,19 +106,31 @@ export function sessionMailbox(task, bearer, services = {}) {
     /** What the pod calls once a turn is answered or failed, releasing the next. */
     settled() {
       held = undefined;
-      settle();
+      release();
+    },
+
+    /** One more message into the turn in flight, yielded before it settles. */
+    ask(input) {
+      if (held === undefined)
+        throw new Error("the session mailbox holds no turn to ask in");
+      release(sessionUserMessage(input));
     },
 
     /** What ends the iterable, and with it the query, without another claim. */
     stop() {
       stopped = true;
-      settle();
+      release();
     },
 
     async *turns() {
       for (;;) {
-        await awaitSettled;
+        const asked = await released;
         if (stopped) return;
+        if (asked !== undefined) {
+          hold();
+          yield asked;
+          continue;
+        }
         const turn = await claim();
         if (turn === "Stop") return;
         if (turn === undefined) {

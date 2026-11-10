@@ -1439,8 +1439,9 @@ test("a composed decision is scrubbed of what the pod was handed, exactly as pro
 test("a project tool reaches the API under the session's own bearer", async () => {
   const plane = planeOf([observationTurn], leadFacts);
   const seenApi = [];
-  const { query } = queryOf((_asked, _index, options) => [
+  const { query } = queryOf((_asked, index, options) => [
     async () => {
+      if (index > 0) return;
       await options.mcpServers.chuggy.tools
         .find((tool) => tool.name === "read_ticket")
         .handler({ ticket: 4 });

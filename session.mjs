@@ -65,6 +65,13 @@
  * at `summary` detail, since `full` spends a token-count call per category. A
  * reading the contract would refuse, or a window the runtime does not answer
  * within `sessionContextUsageWaitMs`, is left out, never the answer.
+ *
+ * A LEAD'S OBSERVATION THAT ENDS WITH NO DECISION IS ASKED FOR ONE, ONCE, IN
+ * THE SAME TURN, because the selector refuses its prose. A result that staged
+ * nothing, failed nothing, and is not a decision written as text is answered
+ * with `sessionDecisionAsk` through the mailbox, and the turn settles on its
+ * next result: one store turn and one measurement, whose duration adds both
+ * results' own.
  */
 
 import { execFile } from "node:child_process";
@@ -87,6 +94,7 @@ import {
 } from "@chuggy/worker-contract/sessionPlane";
 import { chuggyToolServerName } from "@chuggy/worker-contract/sessionTools";
 import { workerContractSessionContext } from "@chuggy/worker-contract/workerContract";
+import { leadDecisionDocumentSchema } from "@chuggy/worker-contract/workerDocuments";
 import {
   mintedCredentialDirectory,
   sessionConfigDirectoryVariable,
@@ -188,6 +196,13 @@ const executeFile = promisify(execFile);
 
 /** The capability that admits the runtime's shell. */
 const runCommands = rosterLabel(sessionCapabilities, "RunCommands");
+
+/** The capability that admits the lead's decision tools. */
+const leadDecision = rosterLabel(sessionCapabilities, "LeadDecision");
+
+/** What a lead's observation turn that decided nothing is asked in that turn. */
+export const sessionDecisionAsk =
+  "This turn ended without a decision, and the decision tools are how it is answered.";
 
 /** What each secret this session holds is. */
 const sessionSecretKinds = {
@@ -407,7 +422,8 @@ function runningTotal() {
  * What the runtime spent, gathered as it says it. The model, the tokens and the
  * cost outlive one turn because the runtime reports each per query rather than
  * per turn, so what one turn spent is what its total moved by; the duration is
- * already the turn's and the tools are this turn's alone.
+ * the sum of the turn's results' own durations and the tools are this turn's
+ * alone.
  *
  * A FAILED TURN IS NEVER MEASURED, AND ITS SPEND IS NOT LOST. Only an answered
  * turn asks for an envelope, so a failed one leaves both marks where they stood
@@ -429,10 +445,16 @@ export function sessionMeasure() {
   const tokensSince = runningTotal();
   let calls = new Map();
   let awaiting = new Map();
+  let askedMs = 0;
   return {
     startTurn() {
       calls = new Map();
       awaiting = new Map();
+      askedMs = 0;
+    },
+    /** A result the turn was asked past, whose duration is the turn's too. */
+    asked(result) {
+      askedMs += measuredCount(result?.duration_ms);
     },
     saw(message) {
       if (message.type === "system" && message.subtype === "init") {
@@ -471,7 +493,7 @@ export function sessionMeasure() {
         costMicros: measuredCount(
           dollarsSince(result.total_cost_usd) * microsPerDollar,
         ),
-        durationMs: measuredCount(result.duration_ms),
+        durationMs: askedMs + measuredCount(result.duration_ms),
         tools: [...calls]
           .filter(([, call]) => call.refused < call.made)
           .map(([name]) => name),
@@ -746,12 +768,49 @@ async function observe(context, message) {
   if (message.subtype === "mirror_error") context.mirrored = true;
 }
 
-/** One turn's messages, read to its result and then drained past it, unless its member stopped the turn. */
+/**
+ * One turn's messages, read to its result and then drained past it, unless its
+ * member stopped the turn, and read once more where the turn is asked for the
+ * decision it did not make.
+ */
 export async function runSessionTurn(context) {
   context.store.startTurn();
   context.sightings = rateLimitSightings();
   context.compactions = [];
   context.measure.startTurn();
+  const read = await runSessionTurnRead(context);
+  if (!runSessionTurnAsks(context, read)) return read;
+  context.measure.asked(read.result);
+  context.mailbox.ask(sessionDecisionAsk);
+  return await runSessionTurnRead(context);
+}
+
+/** Whether a turn's text is itself a decision, which the prose arm answers with. */
+function runSessionTurnTextDecides(text) {
+  try {
+    return leadDecisionDocumentSchema.safeParse(JSON.parse(text)).success;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether a lead's observation turn ended in a result that decided nothing and failed nothing. */
+function runSessionTurnAsks(context, { result, ended }) {
+  const turn = context.mailbox.claimed();
+  return (
+    !ended &&
+    context.leadDecides === true &&
+    turn?.inputKind === "Observation" &&
+    !context.staging.staged() &&
+    !context.mirrored &&
+    !context.stops?.stopped(turn.turn) &&
+    sessionTurnFailure(result, context.sightings) === undefined &&
+    !runSessionTurnTextDecides(sessionResultText(result, context.scrub))
+  );
+}
+
+/** The turn's messages to its next result and through the drain after it. */
+async function runSessionTurnRead(context) {
   let result;
   for (;;) {
     const { message } = await context.reader.next();
@@ -1310,6 +1369,7 @@ function sessionStopHeard(context, stopped) {
 async function sessionRun(context, facts, opened) {
   const { pause, warn } = opened;
   context.inquiry = facts.kind === "Inquiry";
+  context.leadDecides = (facts.capabilities ?? []).includes(leadDecision);
   context.store = sessionStoreAdapter(context.task, context.bearer, {
     request: context.request,
     retain: !context.inquiry,
