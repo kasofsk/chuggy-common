@@ -37,7 +37,10 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 
-import { workerContractRunContext } from "@chuggy/worker-contract/workerContract";
+import {
+  workerContractCredentialOutcome,
+  workerContractRunContext,
+} from "@chuggy/worker-contract/workerContract";
 import {
   nativeHttpPageItemsMax,
   runContextPageReadingsMax,
@@ -56,6 +59,7 @@ import {
 } from "@chuggy/worker-contract/workerPlane";
 
 import {
+  creditsExhausted,
   observeCodexReadings,
   observeCodexRollout,
   observeRateLimit,
@@ -102,9 +106,16 @@ const runContextPagesMax = Math.ceil(
 );
 
 /** The plane's labels for how a run ended, each refused as this module loads where the contract no longer has it. */
-const [runFailed, runRateLimited, runTurnsExhausted, runUploadRefused] = [
+const [
+  runFailed,
+  runRateLimited,
+  runCreditsExhausted,
+  runTurnsExhausted,
+  runUploadRefused,
+] = [
   "RunFailed",
   "RunRateLimited",
+  "RunCreditsExhausted",
   "RunTurnsExhausted",
   "RunUploadRefused",
 ].map((label) => rosterLabel(runEndedEvidences, label));
@@ -485,10 +496,20 @@ function runTotalsSoFar(state) {
  * A hold outranks the account, because a run that exhausted its turns while the
  * provider was refusing every request never had the turns to spend. What counts
  * as a hold is `rateLimit.mjs`'s, folded from the frames as they went past.
+ *
+ * Exhausted credits outrank a hold, since no reset brings them back, and are
+ * labelled so only to a plane whose answers named `version` at or past the
+ * one that takes the label; to another, the run is labelled as though its
+ * credits had not run out.
  */
-export function endedEvidence(result, planeRefused, sightings, step) {
+export function endedEvidence(result, planeRefused, sightings, step, version) {
   const subtype = typeof result?.subtype === "string" ? result.subtype : "";
   if (step !== undefined) return step;
+  if (
+    creditsExhausted(sightings) &&
+    versionReaches(version, workerContractCredentialOutcome)
+  )
+    return runCreditsExhausted;
   if (rateLimited(sightings)) return runRateLimited;
   if (subtype === turnsExhaustedSubtype) return runTurnsExhausted;
   if (result !== null && result !== undefined) return runFailed;
@@ -527,6 +548,7 @@ function runEndedBody(state, step) {
     state.planeRefused,
     state.sightings,
     step,
+    state.version,
   );
   const limit =
     evidence === runRateLimited ? runLimit(state.sightings.reset) : undefined;

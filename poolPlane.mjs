@@ -29,6 +29,9 @@
  * sit idle, where its client is given that, and the answer names it the
  * image its sessions run in, which is passed on.
  *
+ * An answer may name how the credential stopped each job it stops, which is
+ * passed on.
+ *
  * A runner's report of itself is posted under the token it is given, and is
  * taken only where the plane answers 204; the client keeps the version the
  * last poll's answer named, none where it named none, which is how its
@@ -312,7 +315,7 @@ async function poolPlaneReconciled(answered) {
       polled: "Unavailable",
       evidence: "the plane answered no reconciliation this pool can read",
     };
-  const { release, jobsWaiting, chatImage } = read.data;
+  const { release, jobsWaiting, chatImage, credentialOutcomes } = read.data;
   const waiting = poolPlaneClaimsByRoom(answered) ? jobsWaiting : undefined;
   return {
     polled: "Reconciled",
@@ -322,6 +325,7 @@ async function poolPlaneReconciled(answered) {
     ...(release === undefined ? {} : { release }),
     ...(waiting === undefined ? {} : { jobsWaiting: waiting }),
     ...(chatImage === undefined ? {} : { chatImage }),
+    ...(credentialOutcomes === undefined ? {} : { credentialOutcomes }),
   };
 }
 

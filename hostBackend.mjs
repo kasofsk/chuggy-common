@@ -621,6 +621,7 @@ async function hostPlaced(state, assignment, kind) {
     settings,
     assignment.capabilities,
     seams.tokenFileRefusal,
+    assignment.assignment,
   );
   if ("refused" in credential)
     return { placed: "Refused", evidence: credential.refused };
@@ -746,6 +747,8 @@ export function hostBackend(settings, seams) {
     stop: (assignment) => hostStopped(state, assignment),
     held: () => hostHeld(state),
     ended: async () => state.ready.splice(0),
+    credentialOutcomesTaken: (outcomes) =>
+      settings.credentials?.outcomesTaken(outcomes),
     holds: (assignment) => state.jobs.has(assignment),
     measured: () => state.measures.measured(),
     inFlight: () =>
@@ -794,6 +797,10 @@ export function hostRoutedBackend(container, host, platforms) {
         : container.stop(assignment),
     held: async () => [...(await container.held()), ...(await host.held())],
     ended: async () => [...(await container.ended()), ...(await host.ended())],
+    credentialOutcomesTaken: (outcomes) => {
+      container.credentialOutcomesTaken?.(outcomes);
+      host.credentialOutcomesTaken?.(outcomes);
+    },
     inFlight: () => [...container.inFlight(), ...host.inFlight()],
     measured: () =>
       runnerMeasuredSum(

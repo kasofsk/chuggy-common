@@ -14,8 +14,17 @@
  *
  * THE SELECTOR IS PURE OVER ITS STATE. `agentCredentialChosen` answers the
  * credential and the state after it from the state before; the runner holds
- * that state for the life of its process in `agentCredentialSelector`. Whether
- * a credential is available is a hook, always true where none is given.
+ * that state for the life of its process in `agentCredentialSelector`.
+ *
+ * A CREDENTIAL IS AVAILABLE UNLESS IT IS BENCHED. The runner's selector
+ * remembers which credential it chose for each assignment, and a poll's
+ * credential outcome for one of them benches that credential: until the reset
+ * a usage limit names, or, for exhausted credits, until the runner restarts. A
+ * usage limit naming no reset benches nothing. Benches are the process's
+ * alone, keyed by credential name, and nothing is written. Where every
+ * credential an agent's policy allows is benched, the selector still answers
+ * the one whose bench ends soonest, so no job goes without one; a runner
+ * refusing that agent's jobs instead is chuggy-common ticket 421's.
  *
  * A WORKLOAD IS TOLD THE CREDENTIAL'S TYPE AND NAME, never its value: Claude's
  * kind in `claudeCredentialVariable`, Codex's type in
@@ -51,6 +60,9 @@ export const agentCredentialPreferred = {
 
 /** The most credentials of one type a set holds. */
 export const agentCredentialsMax = 32;
+
+/** The most assignments a selector remembers the credential of, the oldest forgotten first. */
+export const agentCredentialAssignmentsMax = 1024;
 
 /** What names the credential a workload runs on. */
 export const agentCredentialNameVariable = "CHUG_WORKER_CREDENTIAL_NAME";
@@ -170,6 +182,9 @@ export const agentCredentialSetKeys = {
  * @typedef {AgentCredentialPolicySet | AgentCredentialFixedSet} AgentCredentialSet
  * @typedef {Partial<Record<AgentCredentialAgent, AgentCredentialSet>>} AgentCredentialSets
  * @typedef {Partial<Record<AgentCredentialAgent, Partial<Record<"OAuth" | "ApiKey", string>>>>} AgentCredentialState the name each type of each agent last chose
+ * @typedef {{until: number} | {untilRestart: true}} AgentCredentialBench `until` in Unix milliseconds
+ * @typedef {{state: "Available"} | {state: "Benched", until: number} | {state: "BenchedUntilRestart"}} AgentCredentialBenchState
+ * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolCredentialOutcome} WorkerPoolCredentialOutcome
  */
 
 /** A Claude credential of one kind as the credential of a set of one. */
@@ -389,46 +404,190 @@ export function agentCredentialChosen(
 }
 
 /**
+ * The bench a credential outcome puts its credential on, or none: a usage
+ * limit until the reset it names, and exhausted credits until the runner
+ * restarts.
+ *
+ * @param {WorkerPoolCredentialOutcome} outcome
+ * @returns {AgentCredentialBench | undefined}
+ */
+export function agentCredentialBenched(outcome) {
+  switch (outcome.outcome) {
+    case "UsageLimited":
+      return outcome.resetsAt === undefined
+        ? undefined
+        : { until: outcome.resetsAt * 1_000 };
+    case "CreditsExhausted":
+      return { untilRestart: true };
+    default:
+      throw new TypeError(
+        `a credential outcome named ${String(/** @type {{outcome: unknown}} */ (outcome).outcome)}, which is none`,
+      );
+  }
+}
+
+/**
+ * The later of two benches, a restart's being later than any instant.
+ *
+ * @param {AgentCredentialBench | undefined} held
+ * @param {AgentCredentialBench} next
+ * @returns {AgentCredentialBench}
+ */
+function agentCredentialBenchLater(held, next) {
+  if (held === undefined) return next;
+  if ("untilRestart" in held || "untilRestart" in next)
+    return { untilRestart: true };
+  return { until: Math.max(held.until, next.until) };
+}
+
+/**
+ * Where a credential's bench stands at `nowMs`: available where it has none
+ * or its `until` has passed.
+ *
+ * @param {AgentCredentialBench | undefined} bench
+ * @param {number} nowMs
+ * @returns {AgentCredentialBenchState}
+ */
+export function agentCredentialBenchState(bench, nowMs) {
+  if (bench === undefined) return { state: "Available" };
+  if ("untilRestart" in bench) return { state: "BenchedUntilRestart" };
+  return bench.until > nowMs
+    ? { state: "Benched", until: bench.until }
+    : { state: "Available" };
+}
+
+/** When a bench state ends, a restart's never and an available one's at once. */
+function agentCredentialBenchEndsMs(state) {
+  switch (state.state) {
+    case "Available":
+      return -Infinity;
+    case "Benched":
+      return state.until;
+    case "BenchedUntilRestart":
+      return Infinity;
+    default:
+      throw new TypeError("a bench state is none of a bench's");
+  }
+}
+
+/**
+ * Of every credential `agent`'s policy allows, in the order it prefers them,
+ * the first whose bench ends soonest; none where the runner holds no set for
+ * `agent`.
+ *
+ * @param {AgentCredentialSets} sets
+ * @param {string} agent
+ * @param {(credential: AgentCredential) => AgentCredentialBenchState} benchOf
+ * @returns {AgentCredential | undefined}
+ */
+export function agentCredentialSoonest(sets, agent, benchOf) {
+  const set = Object.hasOwn(sets, agent) ? sets[agent] : undefined;
+  if (set === undefined) return undefined;
+  const allowed =
+    "fixed" in set
+      ? [set.fixed]
+      : agentCredentialPreferred[set.prefer].flatMap(
+          (type) => set.pools[type]?.credentials ?? [],
+        );
+  let soonest;
+  let soonestMs = Infinity;
+  for (const credential of allowed) {
+    const endsMs = agentCredentialBenchEndsMs(benchOf(credential));
+    if (soonest === undefined || endsMs < soonestMs) {
+      soonest = credential;
+      soonestMs = endsMs;
+    }
+  }
+  return soonest;
+}
+
+/**
  * @typedef {object} AgentCredentialSelector
  * @property {readonly AgentCredentialAgent[]} agents the agents it holds a set for
  * @property {AgentCredentialSets} sets
- * @property {(agent: string) => AgentCredential | undefined} chosen the credential `agent`'s next workload runs on, as `agentCredentialChosen` answers it
+ * @property {(agent: string, assignment?: string) => AgentCredential | undefined} chosen the credential `agent`'s next workload runs on, remembered as `assignment`'s where one is named: an available one as `agentCredentialChosen` answers it, else the one whose bench ends soonest
+ * @property {(outcomes: readonly WorkerPoolCredentialOutcome[]) => void} outcomesTaken benches the credential each outcome's assignment was chosen, where it remembers one
+ * @property {(name: string) => AgentCredentialBenchState} benchOf where the bench of the credential `name` stands now
+ * @property {() => ReturnType<typeof agentCredentialsDescribed>} described each credential as `agentCredentialsDescribed` describes it, with its bench now
  */
 
 /**
  * The selector a runner holds over its sets for the life of its process.
  *
  * @param {AgentCredentialSets} sets
- * @param {(credential: AgentCredential) => boolean} [available]
+ * @param {() => number} [nowMs] the clock a bench's end is read by
  * @returns {AgentCredentialSelector}
  */
-export function agentCredentialSelector(sets, available = () => true) {
+export function agentCredentialSelector(sets, nowMs = Date.now) {
   /** @type {AgentCredentialState} */
   let state = {};
+  /** @type {Map<string, AgentCredentialBench>} */
+  const benches = new Map();
+  /** @type {Map<string, string>} the credential name each assignment was chosen */
+  const chosenFor = new Map();
+  const benchOf = (name) =>
+    agentCredentialBenchState(benches.get(name), nowMs());
+  const remembered = (assignment, name) => {
+    chosenFor.delete(assignment);
+    chosenFor.set(assignment, name);
+    if (chosenFor.size > agentCredentialAssignmentsMax)
+      chosenFor.delete(chosenFor.keys().next().value);
+  };
   return {
     agents: agentCredentialAgents.filter((agent) => sets[agent] !== undefined),
     sets,
-    chosen(agent) {
-      const next = agentCredentialChosen(sets, state, agent, available);
+    chosen(agent, assignment) {
+      const next = agentCredentialChosen(
+        sets,
+        state,
+        agent,
+        (credential) => benchOf(credential.name).state === "Available",
+      );
       state = next.state;
-      return next.credential;
+      const credential =
+        next.credential ??
+        agentCredentialSoonest(sets, agent, (held) => benchOf(held.name));
+      if (credential !== undefined && assignment !== undefined)
+        remembered(assignment, credential.name);
+      return credential;
     },
+    outcomesTaken(outcomes) {
+      for (const outcome of outcomes) {
+        const name = chosenFor.get(outcome.assignment);
+        const bench = agentCredentialBenched(outcome);
+        if (name === undefined || bench === undefined) continue;
+        benches.set(name, agentCredentialBenchLater(benches.get(name), bench));
+      }
+    },
+    benchOf,
+    described: () => agentCredentialsDescribed(sets, benchOf),
   };
 }
 
 /**
- * Each credential of the sets as `doctor` prints it: its name, agent, type
- * and file, never what the file holds.
+ * Each credential of the sets as `doctor` prints it: its name, agent, type,
+ * file and where its bench stands, never what the file holds. Every one is
+ * available where no bench is given.
  *
  * @param {AgentCredentialSets} sets
- * @returns {{name: string, agent: AgentCredentialAgent, type: AgentCredentialType, file: string}[]}
+ * @param {(name: string) => AgentCredentialBenchState} [benchOf]
+ * @returns {{name: string, agent: AgentCredentialAgent, type: AgentCredentialType, file: string, bench: AgentCredentialBenchState}[]}
  */
-export function agentCredentialsDescribed(sets) {
+export function agentCredentialsDescribed(
+  sets,
+  benchOf = () => ({ state: "Available" }),
+) {
   return agentCredentialAgents.flatMap((agent) =>
     sets[agent] === undefined
       ? []
       : agentCredentialSetCredentials(sets[agent]).map(
-          ({ name, type, file }) => ({ name, agent, type, file }),
+          ({ name, type, file }) => ({
+            name,
+            agent,
+            type,
+            file,
+            bench: benchOf(name),
+          }),
         ),
   );
 }

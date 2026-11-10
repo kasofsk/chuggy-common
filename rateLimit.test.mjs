@@ -31,6 +31,7 @@ import {
   observeRateLimit,
   observeRateLimitReadings,
   rateLimitReadings,
+  creditsExhausted,
   rateLimitSightings,
   rateLimited,
 } from "./rateLimit.mjs";
@@ -127,6 +128,36 @@ test("a frame that carries no status of its own leaves the last one standing", (
     { type: "rate_limit_event", rate_limit_info: { status: 7 } },
   ])
     assert.equal(rateLimited(seenBy(rateLimitEvent("rejected"), event)), true);
+});
+
+/** Catches exhausted credits read from anything but the assistant frame's declared `billing_error`, or read as a hold. */
+test("exactly one of the declared assistant errors is exhausted credits, and it is no hold", () => {
+  assert.deepEqual(
+    declaredErrors.filter((error) =>
+      creditsExhausted(seenBy({ type: "assistant", error })),
+    ),
+    ["billing_error"],
+  );
+  assert.equal(
+    rateLimited(seenBy({ type: "assistant", error: "billing_error" })),
+    false,
+  );
+  assert.equal(
+    creditsExhausted(
+      seenBy({ type: "system", subtype: "api_retry", error: "billing_error" }),
+    ),
+    false,
+  );
+  assert.equal(
+    creditsExhausted(
+      seenBy({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "billing_error" }] },
+      }),
+    ),
+    false,
+  );
+  assert.equal(creditsExhausted(rateLimitSightings()), false);
 });
 
 /**
@@ -558,6 +589,7 @@ test("only a rate-limit frame carries readings", () => {
 test("readings and sightings are folded apart", () => {
   const sightings = observeRateLimit(rateLimitSightings(), limitRejected);
   assert.deepEqual(Object.keys(sightings).sort(), [
+    "creditsExhausted",
     "refused",
     "reset",
     "status",

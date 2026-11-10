@@ -3,6 +3,8 @@ import test from "node:test";
 
 import { observeRateLimit, rateLimitSightings } from "./rateLimit.mjs";
 import {
+  creditsRefused,
+  creditsResult,
   limitFrames,
   limitRejected,
   limitRefused,
@@ -148,5 +150,43 @@ test("the text of a limit the frames gave no reset for does not make one up", ()
       "When the limit resets is unknown.",
       "The run was not held: the frames gave no reset time.",
     ].join("\n"),
+  );
+});
+
+/** A run whose credits ran out while a window also refused it, with every other condition of a hold met. */
+const exhausted = {
+  ...stopped,
+  sightings: seenBy([limitRejected, creditsRefused, creditsResult]),
+  credential: "max-1",
+};
+
+/** Catches a run whose credits ran out held for a reset that cannot bring them back. */
+test("a run whose credits ran out is never held, whatever a window said", () => {
+  assert.deepEqual(runHoldDecided(exhausted), {
+    exhausted: { credential: "max-1" },
+  });
+});
+
+/** Catches the text of exhausted credits naming no credential, or a reset that is not theirs. */
+test("the text of a run whose credits ran out names the credential and that it was not held", () => {
+  assert.equal(
+    runEndedText(
+      "Claude Code exited 1",
+      creditsResult.result,
+      runHoldDecided(exhausted),
+    ),
+    [
+      "Claude Code exited 1",
+      creditsResult.result,
+      "The credits of the credential max-1 are exhausted, so the run was not held.",
+    ].join("\n"),
+  );
+  assert.equal(
+    runEndedText(
+      "Claude Code exited 1",
+      undefined,
+      runHoldDecided({ ...exhausted, credential: undefined }),
+    ),
+    "Claude Code exited 1\nThe credits of this run's credential are exhausted, so the run was not held.",
   );
 });

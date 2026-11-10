@@ -530,12 +530,14 @@ test("a job reads the credential the runner's selector chooses, told its type an
       },
     },
   });
+  const credentials = agentCredentialSelector(sets);
+  credentials.chosen("Claude", "earlier");
+  credentials.outcomesTaken([
+    { assignment: "earlier", outcome: "CreditsExhausted" },
+  ]);
   const { backend, seen } = await harness(t, "sleep", {
     tokenFile: undefined,
-    credentials: agentCredentialSelector(
-      sets,
-      (credential) => credential.type === "ApiKey",
-    ),
+    credentials,
   });
   await backend.place(assignment(), "Job");
   const { env } = await seen();
@@ -550,6 +552,38 @@ test("a job reads the credential the runner's selector chooses, told its type an
     { agent: "Claude", type: "OAuth", file: "/Users/o/.claude/max-1" },
     { agent: "Claude", type: "ApiKey", file: "/Users/o/.claude/key" },
   ]);
+});
+
+/** Catches a credential outcome a host backend is handed reaching no selector, or benching another than the one its job read. */
+test("a credential outcome handed a host backend benches the credential its job read", async (t) => {
+  const credentials = agentCredentialSelector(
+    agentCredentialSets({
+      claudeCredential: {
+        prefer: "OAuthOnly",
+        oauth: {
+          order: "InOrder",
+          credentials: [
+            { name: "max-1", tokenFile: "/Users/o/.claude/max-1" },
+            { name: "max-2", tokenFile: "/Users/o/.claude/max-2" },
+          ],
+        },
+      },
+    }),
+  );
+  const { backend, seen } = await harness(t, "sleep", {
+    tokenFile: undefined,
+    credentials,
+  });
+  await backend.place(assignment(), "Job");
+  const { env } = await seen();
+  backend.credentialOutcomesTaken([
+    { assignment: assignment().assignment, outcome: "CreditsExhausted" },
+  ]);
+  assert.equal(env.CHUG_WORKER_CREDENTIAL_NAME, "max-1");
+  assert.deepEqual(credentials.benchOf("max-1"), {
+    state: "BenchedUntilRestart",
+  });
+  assert.deepEqual(credentials.benchOf("max-2"), { state: "Available" });
 });
 
 /**

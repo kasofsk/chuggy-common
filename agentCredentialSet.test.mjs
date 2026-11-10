@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  agentCredentialAssignmentsMax,
   agentCredentialCarried,
   agentCredentialChosen,
   agentCredentialReported,
@@ -266,42 +267,250 @@ test("each policy takes its type and each order its credential, across workloads
     }
 });
 
+/** The name each credential the pure choice takes for `agent`, `count` workloads in turn from no state, under `available`. */
+function chosenPurely(sets, agent, count, available) {
+  let state = {};
+  return Array.from({ length: count }, () => {
+    const next = agentCredentialChosen(sets, state, agent, available);
+    state = next.state;
+    return next.credential?.name;
+  });
+}
+
 /**
  * Catches a policy that prefers OAuth taking an API key while an OAuth
  * credential is available, or none once none is, and an order that takes one
- * that is not available; "available" is the hook a runner fills.
+ * that is not available.
  */
 test("a policy preferring OAuth takes an API key only while no OAuth credential is available, and each order skips what is not", () => {
   const sets = agentCredentialSets({
     claudeCredential: claudeSet("PreferOAuth", "RoundRobin"),
   });
-  const away = new Set(["max-1"]);
-  const selector = agentCredentialSelector(
-    sets,
-    (credential) => !away.has(credential.name),
-  );
-  assert.deepEqual(chosenNames(selector, "Claude", 2), ["max-2", "max-2"]);
-  away.add("max-2");
-  assert.deepEqual(chosenNames(selector, "Claude", 3), [
+  const without =
+    (...away) =>
+    (credential) =>
+      !away.includes(credential.name);
+  assert.deepEqual(chosenPurely(sets, "Claude", 2, without("max-1")), [
+    "max-2",
+    "max-2",
+  ]);
+  assert.deepEqual(chosenPurely(sets, "Claude", 3, without("max-1", "max-2")), [
     "key-1",
     "key-2",
     "key-1",
   ]);
-  away.delete("max-1");
-  assert.deepEqual(chosenNames(selector, "Claude", 1), ["max-1"]);
-  away.add("max-1").add("key-1").add("key-2");
-  assert.equal(selector.chosen("Claude"), undefined);
+  assert.deepEqual(
+    chosenPurely(
+      sets,
+      "Claude",
+      1,
+      without("max-1", "max-2", "key-1", "key-2"),
+    ),
+    [undefined],
+  );
+  assert.deepEqual(
+    chosenPurely(
+      agentCredentialSets({ claudeCredential: claudeSet("OAuthOnly") }),
+      "Claude",
+      1,
+      (credential) => credential.type !== "OAuth",
+    ),
+    [undefined],
+  );
+  assert.deepEqual(
+    chosenPurely(
+      agentCredentialSets({ claudeCredential: claudeSet("ApiKeyOnly") }),
+      "Claude",
+      2,
+      without("key-1"),
+    ),
+    ["key-2", "key-2"],
+  );
+});
 
-  const onlyOAuth = agentCredentialSelector(
-    agentCredentialSets({ claudeCredential: claudeSet("OAuthOnly") }),
-    (credential) => credential.type !== "OAuth",
+/** A selector over `document`'s Claude set on a clock the test moves. */
+function benchedSelector(document) {
+  const clock = { nowMs: 1_000_000 };
+  const selector = agentCredentialSelector(
+    agentCredentialSets({ claudeCredential: document }),
+    () => clock.nowMs,
   );
-  assert.equal(onlyOAuth.chosen("Claude"), undefined);
-  const inOrder = agentCredentialSelector(
-    agentCredentialSets({ claudeCredential: claudeSet("ApiKeyOnly") }),
-    (credential) => credential.name !== "key-1",
+  return { selector, clock };
+}
+
+/** The credential `selector` chooses for a Claude job as `assignment`, by name. */
+function chosenAs(selector, assignment) {
+  return selector.chosen("Claude", assignment)?.name;
+}
+
+/** A usage-limited outcome for `assignment`, reset at `resetsAtMs`. */
+function usageLimited(assignment, resetsAtMs) {
+  return {
+    assignment,
+    outcome: "UsageLimited",
+    resetsAt: Math.floor(resetsAtMs / 1_000),
+  };
+}
+
+/** Catches InOrder staying on a benched credential, or not coming back to it once its reset has passed. */
+test("InOrder moves to the second credential once the first is benched, and back once its reset passes", () => {
+  const { selector, clock } = benchedSelector(claudeSet("OAuthOnly"));
+  assert.equal(chosenAs(selector, "job-1"), "max-1");
+  const resetMs = clock.nowMs + 3_600_000;
+  selector.outcomesTaken([usageLimited("job-1", resetMs)]);
+  assert.deepEqual(selector.benchOf("max-1"), {
+    state: "Benched",
+    until: resetMs,
+  });
+  assert.equal(chosenAs(selector, "job-2"), "max-2");
+  assert.equal(chosenAs(selector, "job-3"), "max-2");
+  clock.nowMs = resetMs;
+  assert.deepEqual(selector.benchOf("max-1"), { state: "Available" });
+  assert.equal(chosenAs(selector, "job-4"), "max-1");
+});
+
+/** Catches RoundRobin taking a benched credential in its turn. */
+test("RoundRobin skips a benched credential", () => {
+  const { selector } = benchedSelector({
+    prefer: "ApiKeyOnly",
+    apiKey: {
+      order: "RoundRobin",
+      credentials: ["key-1", "key-2", "key-3"].map((name) => ({
+        name,
+        apiKeyFile: `/c/${name}`,
+      })),
+    },
+  });
+  assert.equal(chosenAs(selector, "job-1"), "key-1");
+  selector.outcomesTaken([
+    { assignment: "job-1", outcome: "CreditsExhausted" },
+  ]);
+  assert.deepEqual(
+    ["job-2", "job-3", "job-4", "job-5"].map((job) => chosenAs(selector, job)),
+    ["key-2", "key-3", "key-2", "key-3"],
   );
-  assert.deepEqual(chosenNames(inOrder, "Claude", 2), ["key-2", "key-2"]);
+});
+
+/** Catches PreferOAuth not falling to API keys while every OAuth credential is benched, or not returning after a reset. */
+test("PreferOAuth falls to API keys while every OAuth credential is benched, and returns once a reset passes", () => {
+  const { selector, clock } = benchedSelector(claudeSet("PreferOAuth"));
+  assert.equal(chosenAs(selector, "job-1"), "max-1");
+  selector.outcomesTaken([usageLimited("job-1", clock.nowMs + 60_000)]);
+  assert.equal(chosenAs(selector, "job-2"), "max-2");
+  selector.outcomesTaken([usageLimited("job-2", clock.nowMs + 120_000)]);
+  assert.equal(chosenAs(selector, "job-3"), "key-1");
+  clock.nowMs += 60_000;
+  assert.equal(chosenAs(selector, "job-4"), "max-1");
+});
+
+/**
+ * Catches a selector answering nothing, or a credential whose bench ends
+ * later, while every credential its policy allows is benched: no job is
+ * dropped, and the runner's refusing the agent is another ticket's.
+ */
+test("with every credential benched the selector answers the one whose bench ends soonest", () => {
+  const { selector, clock } = benchedSelector(claudeSet("PreferOAuth"));
+  const soonestMs = clock.nowMs + 60_000;
+  const benched = [
+    ["max-1", { assignment: "job-1", outcome: "CreditsExhausted" }],
+    ["max-2", usageLimited("job-2", clock.nowMs + 600_000)],
+    ["key-1", usageLimited("job-3", soonestMs)],
+    ["key-2", usageLimited("job-4", clock.nowMs + 300_000)],
+  ];
+  for (const [name, outcome] of benched) {
+    assert.equal(chosenAs(selector, outcome.assignment), name);
+    selector.outcomesTaken([outcome]);
+  }
+  assert.equal(chosenAs(selector, "job-5"), "key-1");
+  assert.equal(chosenAs(selector, "job-6"), "key-1");
+  clock.nowMs = soonestMs;
+  assert.equal(chosenAs(selector, "job-7"), "key-1");
+
+  const { selector: restarted } = benchedSelector(claudeSet("OAuthOnly"));
+  for (const assignment of ["job-1", "job-2"]) {
+    chosenAs(restarted, assignment);
+    restarted.outcomesTaken([{ assignment, outcome: "CreditsExhausted" }]);
+  }
+  assert.equal(chosenAs(restarted, "job-3"), "max-1");
+});
+
+/** Catches exhausted credits benched for a time, or a later usage limit shortening that bench. */
+test("a credits-exhausted outcome benches its credential until restart", () => {
+  const { selector, clock } = benchedSelector(claudeSet("OAuthOnly"));
+  chosenAs(selector, "job-1");
+  selector.outcomesTaken([
+    { assignment: "job-1", outcome: "CreditsExhausted" },
+  ]);
+  selector.outcomesTaken([usageLimited("job-1", clock.nowMs + 60_000)]);
+  clock.nowMs += 365 * 24 * 3_600_000;
+  assert.deepEqual(selector.benchOf("max-1"), {
+    state: "BenchedUntilRestart",
+  });
+  assert.equal(chosenAs(selector, "job-2"), "max-2");
+});
+
+/** Catches a usage limit with no reset benching its credential for a figure made up here. */
+test("a usage-limited outcome with no reset time benches nothing", () => {
+  const { selector } = benchedSelector(claudeSet("OAuthOnly"));
+  chosenAs(selector, "job-1");
+  selector.outcomesTaken([{ assignment: "job-1", outcome: "UsageLimited" }]);
+  assert.deepEqual(selector.benchOf("max-1"), { state: "Available" });
+  assert.equal(chosenAs(selector, "job-2"), "max-1");
+});
+
+/** Catches an outcome for an assignment this selector chose nothing for benching a credential anyway. */
+test("an outcome for a job the runner did not run is ignored", () => {
+  const { selector } = benchedSelector(claudeSet("OAuthOnly"));
+  chosenAs(selector, "job-1");
+  selector.chosen("Claude");
+  selector.outcomesTaken([
+    { assignment: "someone-else", outcome: "CreditsExhausted" },
+  ]);
+  for (const { bench } of selector.described())
+    assert.deepEqual(bench, { state: "Available" });
+  assert.equal(chosenAs(selector, "job-2"), "max-1");
+});
+
+/** Catches the record of what each assignment ran on growing past its bound, or forgetting the newest first. */
+test("a selector remembers the credential of its latest assignments, up to its bound", () => {
+  const { selector } = benchedSelector(claudeSet("OAuthOnly"));
+  for (let index = 0; index <= agentCredentialAssignmentsMax; index += 1)
+    chosenAs(selector, `job-${String(index)}`);
+  selector.outcomesTaken([
+    { assignment: "job-0", outcome: "CreditsExhausted" },
+  ]);
+  assert.deepEqual(selector.benchOf("max-1"), { state: "Available" });
+  selector.outcomesTaken([
+    {
+      assignment: `job-${String(agentCredentialAssignmentsMax)}`,
+      outcome: "CreditsExhausted",
+    },
+  ]);
+  assert.deepEqual(selector.benchOf("max-1"), {
+    state: "BenchedUntilRestart",
+  });
+});
+
+/** Catches `doctor` told anything but where each credential's bench stands now. */
+test("each credential is described with its bench: available, benched until a time, or until restart", () => {
+  const { selector, clock } = benchedSelector(claudeSet("PreferOAuth"));
+  const resetMs = clock.nowMs + 60_000;
+  chosenAs(selector, "job-1");
+  selector.outcomesTaken([usageLimited("job-1", resetMs)]);
+  chosenAs(selector, "job-2");
+  selector.outcomesTaken([
+    { assignment: "job-2", outcome: "CreditsExhausted" },
+  ]);
+  const benches = () =>
+    selector.described().map(({ name, bench }) => [name, bench]);
+  assert.deepEqual(benches(), [
+    ["max-1", { state: "Benched", until: resetMs }],
+    ["max-2", { state: "BenchedUntilRestart" }],
+    ["key-1", { state: "Available" }],
+    ["key-2", { state: "Available" }],
+  ]);
+  clock.nowMs = resetMs;
+  assert.deepEqual(benches()[0], ["max-1", { state: "Available" }]);
 });
 
 /** Catches one agent's or one type's turn moving another's, and a choice that reads anything but the state it is given. */
@@ -341,21 +550,36 @@ test("a credential is described and carried by its name, agent, type and file, a
     claudeCredential: { kind: "Vertex", ...claudeSingles[4] },
     codexCredential: codexSet,
   });
+  const available = { state: "Available" };
   assert.deepEqual(agentCredentialsDescribed(sets), [
-    { name: "claude", agent: "Claude", type: "Vertex", file: "/c/gcp.json" },
+    {
+      name: "claude",
+      agent: "Claude",
+      type: "Vertex",
+      file: "/c/gcp.json",
+      bench: available,
+    },
     {
       name: "chatgpt-1",
       agent: "Codex",
       type: "OAuth",
       file: "/x/auth-1.json",
+      bench: available,
     },
     {
       name: "chatgpt-2",
       agent: "Codex",
       type: "OAuth",
       file: "/x/auth-2.json",
+      bench: available,
     },
-    { name: "openai-1", agent: "Codex", type: "ApiKey", file: "/x/openai-1" },
+    {
+      name: "openai-1",
+      agent: "Codex",
+      type: "ApiKey",
+      file: "/x/openai-1",
+      bench: available,
+    },
   ]);
   const key = agentCredentialSelector(
     agentCredentialSets({ claudeCredential: claudeSet("ApiKeyOnly") }),

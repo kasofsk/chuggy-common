@@ -101,6 +101,8 @@ import { pausedClock } from "./clock.fixture.mjs";
 import { contextWindow } from "./contextReading.mjs";
 import { contextUsage } from "./contextUsage.fixture.mjs";
 import {
+  creditsRefused,
+  creditsResult,
   limitFrames,
   limitRefused,
   limitRejected,
@@ -5114,6 +5116,60 @@ test("an evaluation neither restores a checkpoint nor leaves one", async (t) => 
     assert.equal(after, before);
   });
 });
+
+/**
+ * Exhausted credits through the real path, beside a window that would
+ * otherwise be waited out. Catches the run held for a reset that cannot bring
+ * its credits back, ended under another label, or ended with a text naming no
+ * credential.
+ */
+test(
+  "a Claude run whose credits ran out is not held, ends RunCreditsExhausted, and its text names the credential",
+  { timeout: 60_000 },
+  async (t) => {
+    await inCheckout(async (checkout) => {
+      await targetPushed(checkout);
+      const reopenedSecs = Math.floor(Date.now() / 1_000) - 120;
+      const rejected = {
+        ...limitRejected,
+        rate_limit_info: {
+          ...limitRejected.rate_limit_info,
+          resetsAt: reopenedSecs,
+        },
+      };
+      const carried = envelopeCarried({ timeoutSecsMax: limitFitsSecs });
+
+      const { ran, plane, runtime } = await launchedStandIn(
+        t,
+        checkout,
+        [
+          { ...limitRun(), frames: [rejected, creditsRefused, creditsResult] },
+          verdictRun(),
+        ],
+        async (given) => ({
+          ...(await carried(given)),
+          CHUG_WORKER_CREDENTIAL_NAME: "max-1",
+        }),
+      );
+
+      assert.equal(ran.code, 1, ran.stderr);
+      assert.equal((await runtime.starts()).length, 1);
+      assert.deepEqual(planeBodies(plane, "runEnded"), [
+        { evidence: "RunCreditsExhausted" },
+      ]);
+      assert.ok(!ran.stderr.includes("chuggy_run_held"));
+      const [uploaded] = planeBodies(plane, "artifact");
+      assert.deepEqual(
+        Buffer.from(uploaded).toString("utf8").split("\n").slice(0, 3),
+        [
+          "Claude Code exited 1",
+          creditsResult.result,
+          "The credits of the credential max-1 are exhausted, so the run was not held.",
+        ],
+      );
+    });
+  },
+);
 
 /**
  * The whole of a hold through the real path. Catches a run not held, a second
