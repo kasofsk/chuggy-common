@@ -1436,6 +1436,19 @@ test("a credential outcome handed the backend benches the credential its assignm
     state: "BenchedUntilRestart",
   });
   assert.deepEqual(selector.benchOf("max-2"), { state: "Available" });
+  assert.deepEqual(backend.capabilitiesWithheld(), []);
+  await backend.place(claude("asg-2"), "Job");
+  backend.credentialOutcomesTaken([
+    { assignment: "asg-2", outcome: "CreditsExhausted" },
+  ]);
+  assert.deepEqual(backend.capabilitiesWithheld(), ["Agent:Claude"]);
+  await backend.settled();
+});
+
+/** Catches a container backend without a selector withholding a capability its runner was built with. */
+test("a container backend without a selector withholds nothing", async (t) => {
+  const { backend } = await harness(t);
+  assert.deepEqual(backend.capabilitiesWithheld(), []);
   await backend.settled();
 });
 

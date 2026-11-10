@@ -22,9 +22,11 @@
  * a usage limit names, or, for exhausted credits, until the runner restarts. A
  * usage limit naming no reset benches nothing. Benches are the process's
  * alone, keyed by credential name, and nothing is written. Where every
- * credential an agent's policy allows is benched, the selector still answers
- * the one whose bench ends soonest, so no job goes without one; a runner
- * refusing that agent's jobs instead is chuggy-common ticket 421's.
+ * credential an agent's policy allows is benched, the agent is unavailable:
+ * the runner's polls leave out its `Agent:` capability, where they name it,
+ * until one is available again. A job an answer offers beside the outcome
+ * benching the last of them still runs, on the credential whose bench ends
+ * soonest, and may fail once.
  *
  * A WORKLOAD IS TOLD THE CREDENTIAL'S TYPE AND NAME, never its value: Claude's
  * kind in `claudeCredentialVariable`, Codex's type in
@@ -502,12 +504,26 @@ export function agentCredentialSoonest(sets, agent, benchOf) {
 }
 
 /**
+ * Whether no credential `agent`'s policy allows is available now; false where
+ * the runner holds no set for `agent`.
+ *
+ * @param {AgentCredentialSets} sets
+ * @param {string} agent
+ * @param {(credential: AgentCredential) => AgentCredentialBenchState} benchOf
+ */
+export function agentCredentialUnavailable(sets, agent, benchOf) {
+  const soonest = agentCredentialSoonest(sets, agent, benchOf);
+  return soonest !== undefined && benchOf(soonest).state !== "Available";
+}
+
+/**
  * @typedef {object} AgentCredentialSelector
  * @property {readonly AgentCredentialAgent[]} agents the agents it holds a set for
  * @property {AgentCredentialSets} sets
  * @property {(agent: string, assignment?: string) => AgentCredential | undefined} chosen the credential `agent`'s next workload runs on, remembered as `assignment`'s where one is named: an available one as `agentCredentialChosen` answers it, else the one whose bench ends soonest
  * @property {(outcomes: readonly WorkerPoolCredentialOutcome[]) => void} outcomesTaken benches the credential each outcome's assignment was chosen, where it remembers one
  * @property {(name: string) => AgentCredentialBenchState} benchOf where the bench of the credential `name` stands now
+ * @property {() => AgentCredentialAgent[]} unavailable the agents it holds a set for of which no credential its policy allows is available now
  * @property {() => ReturnType<typeof agentCredentialsDescribed>} described each credential as `agentCredentialsDescribed` describes it, with its bench now
  */
 
@@ -533,8 +549,11 @@ export function agentCredentialSelector(sets, nowMs = Date.now) {
     if (chosenFor.size > agentCredentialAssignmentsMax)
       chosenFor.delete(chosenFor.keys().next().value);
   };
+  const agents = agentCredentialAgents.filter(
+    (agent) => sets[agent] !== undefined,
+  );
   return {
-    agents: agentCredentialAgents.filter((agent) => sets[agent] !== undefined),
+    agents,
     sets,
     chosen(agent, assignment) {
       const next = agentCredentialChosen(
@@ -560,6 +579,10 @@ export function agentCredentialSelector(sets, nowMs = Date.now) {
       }
     },
     benchOf,
+    unavailable: () =>
+      agents.filter((agent) =>
+        agentCredentialUnavailable(sets, agent, (held) => benchOf(held.name)),
+      ),
     described: () => agentCredentialsDescribed(sets, benchOf),
   };
 }
