@@ -200,6 +200,141 @@ test("the attention one turn set outlives every later turn that names none", asy
   );
 });
 
+function seededAt(attention, overrides = {}) {
+  return observationOf({
+    seeding: {
+      handoffNote: null,
+      notificationCursor: 0,
+      refusals: [],
+      decisions: [{ ordinal: 1, decision: "d1", completedAt: "t", attention }],
+    },
+    ...overrides,
+  });
+}
+
+test("an unseeded turn starts from the attention its observation states", async () => {
+  const { staging, call } = stagingOn(
+    observationOf({ attention: "Attention" }),
+  );
+
+  await call("refuse", { ticket: 4, ticketVersion: 2, reason: "later" });
+
+  assert.equal(staging.document().attention, "Attention");
+});
+
+test("the observation's attention replaces the one the pod held", async () => {
+  const seeded = stagingOn(seededAt("Monitoring"));
+  seeded.reset(observationOf({ attention: "Attention" }));
+  await seeded.call("dispatch", { ticket: 4, expectedTicketVersion: 2 });
+
+  const set = stagingOn();
+  await set.call("set_attention", { attention: "Monitoring" });
+  set.reset(observationOf({ attention: "Attention" }));
+  await set.call("dispatch", { ticket: 4, expectedTicketVersion: 2 });
+
+  assert.equal(seeded.staging.document().attention, "Attention");
+  assert.equal(set.staging.document().attention, "Attention");
+});
+
+test("the observation's attention wins over the seeded one in the same turn", async () => {
+  const { staging, call } = stagingOn(
+    seededAt("Monitoring", { attention: "Attention" }),
+  );
+
+  await call("dispatch", { ticket: 4, expectedTicketVersion: 2 });
+
+  assert.equal(staging.document().attention, "Attention");
+});
+
+test("set_attention still moves the observation's attention within the turn", async () => {
+  const { staging, call } = stagingOn(observationOf({ attention: "Stopped" }));
+
+  await call("set_attention", { attention: "Monitoring" });
+
+  assert.equal(staging.document().attention, "Monitoring");
+});
+
+test("an attention outside the roster is ignored", async () => {
+  const unseeded = stagingOn(observationOf({ attention: "Urgent" }));
+  await unseeded.call("dispatch", { ticket: 4, expectedTicketVersion: 2 });
+
+  const seeded = stagingOn(seededAt("Attention", { attention: "Urgent" }));
+  await seeded.call("dispatch", { ticket: 4, expectedTicketVersion: 2 });
+
+  assert.equal(unseeded.staging.document().attention, "Monitoring");
+  assert.equal(seeded.staging.document().attention, "Attention");
+});
+
+test("a dispatch past the turn's budget is refused, and the staging stops there", async () => {
+  const candidates = [1, 2, 3].map((ticket) => ({ ticket, ticketVersion: 1 }));
+  const { staging, call } = stagingOn(
+    observationOf({ candidates, dispatchesMax: 2 }),
+  );
+
+  const first = await call("dispatch", { ticket: 1, expectedTicketVersion: 1 });
+  const second = await call("dispatch", {
+    ticket: 2,
+    expectedTicketVersion: 1,
+  });
+  const third = await call("dispatch", { ticket: 3, expectedTicketVersion: 1 });
+
+  assert.ok(!errored(first));
+  assert.ok(!errored(second));
+  assert.ok(errored(third));
+  assert.match(textOf(third), /budget of 2 is reached/);
+  assert.match(textOf(third), /wait for a later turn/);
+  assert.deepEqual(
+    staging.document().dispatches.map(({ ticket }) => ticket),
+    [1, 2],
+  );
+});
+
+test("a budget at the ceiling is named a budget", async () => {
+  const candidates = Array.from(
+    { length: leadDispatchesMax + 1 },
+    (_, index) => ({ ticket: index + 1, ticketVersion: 1 }),
+  );
+  const { staging, call } = stagingOn(
+    observationOf({ candidates, dispatchesMax: leadDispatchesMax }),
+  );
+
+  let refused;
+  for (const { ticket } of candidates)
+    refused = await call("dispatch", { ticket, expectedTicketVersion: 1 });
+
+  assert.match(textOf(refused), /dispatch budget/);
+  assert.equal(staging.document().dispatches.length, leadDispatchesMax);
+});
+
+test("a budget that is not a positive count bounds nothing past the ceiling", async () => {
+  for (const dispatchesMax of [0, -1, 1.5, "1", null]) {
+    const { staging, call } = stagingOn(observationOf({ dispatchesMax }));
+
+    await call("dispatch", { ticket: 4, expectedTicketVersion: 2 });
+    const answer = await call("dispatch", {
+      ticket: 5,
+      expectedTicketVersion: 1,
+    });
+
+    assert.ok(!errored(answer), String(dispatchesMax));
+    assert.equal(staging.document().dispatches.length, 2);
+  }
+});
+
+test("one turn's budget does not bound the next", async () => {
+  const held = stagingOn(observationOf({ dispatchesMax: 1 }));
+  await held.call("dispatch", { ticket: 4, expectedTicketVersion: 2 });
+  held.reset(observationOf());
+
+  await held.call("dispatch", { ticket: 4, expectedTicketVersion: 2 });
+  const answer = await held.call("dispatch", {
+    ticket: 5,
+    expectedTicketVersion: 1,
+  });
+
+  assert.ok(!errored(answer));
+});
+
 test("a ticket dispatched twice is an error the model sees, not a silent drop", async () => {
   const { staging, call } = stagingOn();
 
