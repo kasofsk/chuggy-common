@@ -151,9 +151,10 @@ export function jobCredentialFilesChecked(files) {
  *
  * @param {JobCredentialFiles} files
  * @param {readonly string[]} capabilities the assignment's
+ * @param {string} [assignment] the one the selector remembers its choice as
  * @returns {JobCredential | {refused: string}}
  */
-export function jobCredential(files, capabilities) {
+export function jobCredential(files, capabilities, assignment) {
   const required = [
     ...new Set(
       capabilities.filter((capability) =>
@@ -167,7 +168,7 @@ export function jobCredential(files, capabilities) {
     };
   const agent = required[0]?.slice(jobAgentCapabilityPrefix.length);
   if (files.credentials !== undefined)
-    return jobCredentialChosen(files.credentials, agent);
+    return jobCredentialChosen(files.credentials, agent, assignment);
   const others = files.agentCredentialFiles ?? {};
   return agent !== undefined && Object.hasOwn(others, agent)
     ? { agent, file: others[agent], carried: {} }
@@ -184,14 +185,15 @@ export function jobCredential(files, capabilities) {
  *
  * @param {AgentCredentialSelector} selector
  * @param {string | undefined} agent
+ * @param {string | undefined} assignment
  * @returns {JobCredential | {refused: string}}
  */
-function jobCredentialChosen(selector, agent) {
+function jobCredentialChosen(selector, agent, assignment) {
   const named =
     agent !== undefined && selector.agents.some((held) => held === agent)
       ? agent
       : jobClaudeAgent;
-  const credential = selector.chosen(named);
+  const credential = selector.chosen(named, assignment);
   if (credential === undefined)
     return {
       refused: `this runner holds no ${named} credential its policy allows that is available`,
@@ -216,10 +218,16 @@ function jobCredentialChosen(selector, agent) {
  * @param {JobCredentialFiles} files
  * @param {readonly string[]} capabilities the assignment's
  * @param {(file: string, agent: string, credential?: AgentCredential) => Promise<string | undefined>} refusal the runner's, of the file, the agent it is for and the credential the selector chose
+ * @param {string} [assignment] the one the selector remembers its choice as
  * @returns {Promise<JobCredential | {refused: string}>}
  */
-export async function jobCredentialHanded(files, capabilities, refusal) {
-  const credential = jobCredential(files, capabilities);
+export async function jobCredentialHanded(
+  files,
+  capabilities,
+  refusal,
+  assignment,
+) {
+  const credential = jobCredential(files, capabilities, assignment);
   if ("refused" in credential) return credential;
   const refused = await refusal(
     credential.file,

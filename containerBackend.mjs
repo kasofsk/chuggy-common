@@ -2834,6 +2834,7 @@ async function placed(state, assignment, kind) {
     settings,
     assignment.capabilities,
     seams.tokenFileRefusal,
+    assignment.assignment,
   );
   if ("refused" in credential)
     return { placed: "Refused", evidence: credential.refused };
@@ -3103,6 +3104,8 @@ export function containerBackend(settings, seams) {
     stop: (assignment) => stopped(state, assignment),
     held: () => heldAssignments(state),
     ended: async () => state.ends.ready.splice(0),
+    credentialOutcomesTaken: (outcomes) =>
+      state.settings.credentials?.outcomesTaken(outcomes),
     inFlight: () =>
       [...state.placements.values()].map((placement) => ({
         assignment: placement.assignment,

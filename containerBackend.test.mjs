@@ -1413,6 +1413,32 @@ test("a job requiring an agent mounts that agent's credential file and is told t
   ]);
 });
 
+/** Catches a credential outcome a backend is handed reaching no selector, or benching another than the one its assignment mounted. */
+test("a credential outcome handed the backend benches the credential its assignment mounted", async (t) => {
+  const selector = rotatingSelector();
+  const { backend, state } = await harness(t, {
+    tokenFile: undefined,
+    credentials: selector,
+    images: [{ image, capabilities: ["Agent:Claude"] }],
+  });
+  state.images.add(image);
+  const claude = (assignmentId) =>
+    assignment({
+      assignment: assignmentId,
+      image: undefined,
+      capabilities: ["Platform:Linux:Amd64", "Agent:Claude"],
+    });
+  await backend.place(claude("asg-1"), "Job");
+  backend.credentialOutcomesTaken([
+    { assignment: "asg-1", outcome: "CreditsExhausted" },
+  ]);
+  assert.deepEqual(selector.benchOf("max-1"), {
+    state: "BenchedUntilRestart",
+  });
+  assert.deepEqual(selector.benchOf("max-2"), { state: "Available" });
+  await backend.settled();
+});
+
 /** A runner's selector over two Claude subscriptions in turn and one Codex API key. */
 function rotatingSelector() {
   return agentCredentialSelector(

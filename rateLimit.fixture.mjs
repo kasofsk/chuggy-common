@@ -66,3 +66,24 @@ export const limitResult = {
 
 /** Every frame of it, in order. */
 export const limitFrames = [limitRejected, limitRefused, limitResult];
+
+/**
+ * The turn the runtime writes where the account's credits are exhausted:
+ * `limitRefused` with `error` the `billing_error` `sdk.d.ts` declares, which
+ * no real run of this suite's was captured carrying.
+ */
+export const creditsRefused = {
+  ...limitRefused,
+  message: {
+    ...limitRefused.message,
+    content: [{ type: "text", text: "Credit balance is too low" }],
+  },
+  error: "billing_error",
+};
+
+/** How that run ended: `success`, with no verdict in it, and the process exits 1. */
+export const creditsResult = {
+  ...limitResult,
+  api_error_status: 400,
+  result: "Credit balance is too low",
+};

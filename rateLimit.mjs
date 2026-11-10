@@ -28,6 +28,12 @@
  * changes — would price every API error as a hold and leave the retry budget
  * unenforceable.
  *
+ * EXHAUSTED CREDITS ARE THE SAME FRAME'S `billing_error`, which the same
+ * closed set declares and the runtime sets where the account has no credit
+ * left. It is no hold: no window reopens. Codex declares no such signal, its
+ * exhausted quota and its usage not included both being
+ * `usage_limit_exceeded`, so a Codex run's credits are never read as exhausted.
+ *
  * THE LATEST STATUS IS THE ONE THAT COUNTS, for that same reason: a run rejected
  * at one point and allowed again later was not being held when it ended.
  *
@@ -80,6 +86,7 @@ const rateLimitEventType = "rate_limit_event";
 const rateLimitRejectedStatus = "rejected";
 const assistantMessageType = "assistant";
 const rateLimitErrorKind = "rate_limit";
+const creditsExhaustedErrorKind = "billing_error";
 
 const codexUsageLimitErrorInfo = "usage_limit_exceeded";
 const codexUsedPercentFull = 100;
@@ -94,7 +101,12 @@ const codexWindowNames = new Map([
 
 /** What has been seen so far, which until a frame says otherwise is nothing. */
 export function rateLimitSightings() {
-  return { status: undefined, refused: false, reset: undefined };
+  return {
+    status: undefined,
+    refused: false,
+    reset: undefined,
+    creditsExhausted: false,
+  };
 }
 
 /** When the window a frame's `info` refuses reopens and which it is, or nothing where it refuses none or does not say. */
@@ -127,11 +139,10 @@ export function observeRateLimit(sightings, event) {
     }
     return sightings;
   }
-  if (
-    event?.type === assistantMessageType &&
-    event.error === rateLimitErrorKind
-  )
-    sightings.refused = true;
+  if (event?.type !== assistantMessageType) return sightings;
+  if (event.error === rateLimitErrorKind) sightings.refused = true;
+  if (event.error === creditsExhaustedErrorKind)
+    sightings.creditsExhausted = true;
   return sightings;
 }
 
@@ -178,6 +189,11 @@ export function rateLimited(sightings) {
   return (
     sightings?.refused === true || sightings?.status === rateLimitRejectedStatus
   );
+}
+
+/** Whether what was seen says the account's credits are exhausted. */
+export function creditsExhausted(sightings) {
+  return sightings?.creditsExhausted === true;
 }
 
 /** The latest reading of each window, which until a frame gives one is none. */

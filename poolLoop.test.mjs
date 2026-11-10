@@ -20,6 +20,11 @@ import {
   workerPoolUpdating,
 } from "./poolLoop.mjs";
 import { poolPlaneClient } from "./poolPlane.mjs";
+import {
+  agentCredentialSelector,
+  agentCredentialSets,
+} from "./agentCredentialSet.mjs";
+import { jobCredential } from "./job.mjs";
 
 const settings = { concurrencyMax: 1, outageBackoffMs: 1, passesMax: 1 };
 
@@ -1804,4 +1809,89 @@ test("a release at or below the runner's own is no update, and one the poll stop
     ],
   );
   assert.deepEqual(run.asked.update, []);
+});
+
+/** A runner's selector over two Claude subscription tokens, taken in order. */
+function tokensInOrder() {
+  return agentCredentialSelector(
+    agentCredentialSets({
+      claudeCredential: {
+        prefer: "OAuthOnly",
+        oauth: {
+          order: "InOrder",
+          credentials: [
+            { name: "max-1", tokenFile: "/c/max-1" },
+            { name: "max-2", tokenFile: "/c/max-2" },
+          ],
+        },
+      },
+    }),
+  );
+}
+
+/**
+ * A backend choosing each job's credential with `selector` as a runner's
+ * does, recording the name each placement ran on, and ending `ended` once.
+ */
+function choosing(selector, ended = []) {
+  const ran = [];
+  return {
+    ran,
+    backend: {
+      ...idle,
+      ended: async () => ended.splice(0),
+      place: async (offered) => {
+        const chosen = jobCredential(
+          { credentials: selector },
+          offered.capabilities,
+          offered.assignment,
+        );
+        ran.push(
+          "refused" in chosen ? chosen.refused : chosen.credential?.name,
+        );
+        return { placed: "Placed" };
+      },
+      credentialOutcomesTaken: (outcomes) => selector.outcomesTaken(outcomes),
+    },
+  };
+}
+
+/** Catches an outcome read off the wire and dropped, or taken only after the same answer's offers were placed on the credential it benches. */
+test("a poll's credential outcome benches the credential its job ran on before that answer's offers are placed", async () => {
+  const { ran, backend } = choosing(tokensInOrder());
+  const { plane } = planeNaming(workerContractRelease, [
+    reconciled([assignment("job-1")]),
+    {
+      ...reconciled([assignment("job-2")], ["job-1"]),
+      credentialOutcomes: [
+        { assignment: "job-1", outcome: "CreditsExhausted" },
+      ],
+    },
+  ]);
+  const pooled = client({ plane, backend });
+  await workerPoolClientPass(pooled);
+  await workerPoolClientPass(pooled);
+  assert.deepEqual(ran, ["max-1", "max-2"]);
+});
+
+/** Catches a failed, timed-out or stopped run, or an answer naming no outcome, benching the credential it ran on. */
+test("a run that failed, timed out or was stopped, under an answer without the field, benches nothing", async () => {
+  const attempt = { ...assignment("job-1") };
+  const { ran, backend } = choosing(tokensInOrder(), [
+    { kind: "Job", job: attempt, why: "exited 1", ran: "Failed" },
+    {
+      kind: "Job",
+      job: attempt,
+      why: "its deadline passed",
+      killed: "Deadline",
+    },
+  ]);
+  const { plane } = planeNaming(workerContractRelease, [
+    reconciled([assignment("job-1")]),
+    reconciled([assignment("job-2")], ["job-1"]),
+    reconciled([assignment("job-3")]),
+  ]);
+  const pooled = client({ plane, backend });
+  for (let pass = 0; pass < 3; pass += 1) await workerPoolClientPass(pooled);
+  assert.deepEqual(ran, ["max-1", "max-1", "max-1"]);
 });

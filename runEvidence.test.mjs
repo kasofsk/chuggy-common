@@ -25,6 +25,7 @@ import {
 } from "@chuggy/worker-contract/workerPlane";
 
 import {
+  workerContractCredentialOutcome,
   workerContractHeader,
   workerContractRelease,
 } from "@chuggy/worker-contract/workerContract";
@@ -59,7 +60,12 @@ import {
 } from "./rateLimit.mjs";
 import { contextWindow } from "./contextReading.mjs";
 import { contextUsage } from "./contextUsage.fixture.mjs";
-import { limitRejected, limitResetsAtSecs } from "./rateLimit.fixture.mjs";
+import {
+  creditsRefused,
+  creditsResult,
+  limitRejected,
+  limitResetsAtSecs,
+} from "./rateLimit.fixture.mjs";
 
 /** The sightings a run that saw exactly these frames, in this order, ends with. */
 function seenBy(...events) {
@@ -1138,6 +1144,44 @@ test("a hold outranks the turn count, because a held run had no turns to spend",
   assert.equal(
     endedEvidence({ subtype: "error_max_turns" }, false, seenBy(rejection)),
     "RunRateLimited",
+  );
+});
+
+/**
+ * Catches exhausted credits labelled for a plane whose release does not take
+ * the label, which would refuse the run's end, or labelled a hold, or outranking
+ * a step of the harness's own.
+ */
+test("exhausted credits end a run RunCreditsExhausted only to a plane whose release takes it, outranking a hold", () => {
+  const seen = seenBy(rejection, creditsRefused, creditsResult);
+  const takes = workerContractCredentialOutcome;
+  const before = { ...takes, minor: takes.minor - 1 };
+  assert.ok(runEndedEvidences.includes("RunCreditsExhausted"));
+  assert.equal(
+    endedEvidence(creditsResult, false, seen, undefined, takes),
+    "RunCreditsExhausted",
+  );
+  assert.equal(
+    endedEvidence(creditsResult, false, seen, undefined, before),
+    "RunRateLimited",
+  );
+  assert.equal(
+    endedEvidence(
+      creditsResult,
+      false,
+      seenBy(creditsRefused, creditsResult),
+      undefined,
+      before,
+    ),
+    "RunFailed",
+  );
+  assert.equal(
+    endedEvidence(creditsResult, false, seen, undefined, undefined),
+    "RunRateLimited",
+  );
+  assert.equal(
+    endedEvidence(creditsResult, false, seen, runTimedOut, takes),
+    runTimedOut,
   );
 });
 

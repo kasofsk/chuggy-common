@@ -673,6 +673,7 @@ function runAgentEnded(
       : runHoldDecided({
           resumable: agent.resumeInvocation !== undefined,
           sightings: context.evidence.sightings(),
+          credential: context.agentCredential?.name,
           session,
           nowMs: (context.clock ?? workerClock).now(),
           deadlineMs: context.runDeadlineMs,
