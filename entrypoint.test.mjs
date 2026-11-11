@@ -1340,6 +1340,25 @@ test("a check stage's shells are told the commit its input names the change star
 });
 
 /**
+ * Catches a reference kind the entrypoint does not read, such as the
+ * `ChangeIdentity` a plane pins for carrying a verdict, stopping a run or
+ * displacing the references it does read.
+ */
+test("a check stage runs as before beside an input reference of a kind it does not read", async () => {
+  let pinned;
+
+  const told = await evaluationPrinted((base) => {
+    pinned = base;
+    return [
+      { ordinal: 3, kind: "ChangeBase", reference: base },
+      { ordinal: 4, kind: "ChangeIdentity", reference: "a".repeat(40) },
+    ];
+  });
+
+  assert.deepEqual(told, { printed: pinned, setUp: pinned });
+});
+
+/**
  * Catches a stage told a base its bundle never named, which a check would
  * narrow to; unset, it runs everything.
  */

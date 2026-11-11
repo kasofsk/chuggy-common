@@ -3016,6 +3016,27 @@ test("list_executions takes only the states its route takes, named as read_execu
   );
 });
 
+/**
+ * Catches a carried execution's source being dropped on its way to the
+ * caller, or the description no longer saying where it is named.
+ */
+test("read_execution answers the execution a carried result came from, and says where it names it", async () => {
+  const body = JSON.stringify({
+    id: "e-2",
+    carriedFrom: { execution: "e-1", task: 3, workCycle: 1 },
+  });
+  const { call } = toolsOf({}, () => ({ status: 200, body }));
+
+  const answer = await call("read_execution", { execution: "e-2" });
+
+  assert.equal(textOf(answer), `HTTP 200\n${body}`);
+  assert.match(
+    chuggyProjectTools.find(({ name }) => name === "read_execution")
+      .description,
+    /carried from an earlier one, here and in list_executions, names that one in `carriedFrom`/,
+  );
+});
+
 test("list_tickets lists by recent activity on the server's own cursor, and by number unchanged without it", async () => {
   const { api, call } = toolsOf({}, () => ({ status: 200, body: "{}" }));
 

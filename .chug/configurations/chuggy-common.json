@@ -52,6 +52,7 @@
       "review": {
         "runner": "Agent",
         "purpose": "Review",
+        "reevaluate": "OnChange",
         "prompt": {
           "path": ".chug/prompts/review.md"
         },
