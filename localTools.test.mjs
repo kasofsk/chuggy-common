@@ -14,9 +14,10 @@ import {
   chuggySubmissionRepeatDescription,
 } from "./chuggyTools.mjs";
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath, URL } from "node:url";
 
 import {
   localToolAskRefusal,
@@ -27,7 +28,9 @@ import {
   localToolServe,
   localToolServed,
   localToolServer,
+  localToolReleasesBytesMax,
   localToolSignInFile,
+  localToolUpdated,
 } from "./localTools.mjs";
 
 function signInOf(tokens) {
@@ -477,4 +480,327 @@ test("each site's sign-in is a file of its own, named by its origin", () => {
     localToolSignInFile("/home/me/sign-ins", "https://chuggy.test/console"),
     "/home/me/sign-ins/https%3A%2F%2Fchuggy.test",
   );
+});
+
+const pinnedPackage = "chuggy-test";
+const pinnedPrefix =
+  "https://github.com/kasofsk/chuggy-test/releases/download/";
+
+function pinOf(version, packageName = pinnedPackage) {
+  return {
+    package: packageName,
+    version,
+    url: `${pinnedPrefix}v${version}/${packageName}-${version}.tgz`,
+    integrity: `sha512-${"A".repeat(86)}==`,
+  };
+}
+
+function pinsAnswered(releases) {
+  const asked = [];
+  return {
+    asked,
+    fetch: async (url, init) => {
+      asked.push({ url: String(url), init });
+      return globalThis.Response.json({ releases });
+    },
+  };
+}
+
+function updaterOf(
+  version,
+  answer = (release) => ({
+    updated: "Installed",
+    version: release.version,
+  }),
+) {
+  const updates = [];
+  return {
+    updates,
+    updater: {
+      runner: { package: pinnedPackage, version },
+      refusal: async () => undefined,
+      prove: async () => ({ proved: "Proved" }),
+      update: async (release) => {
+        updates.push(release);
+        return answer(release);
+      },
+    },
+  };
+}
+
+const updatesOn = {
+  on: true,
+  settings: {
+    runner: { package: pinnedPackage, version: "0.4.0" },
+    releasePrefix: pinnedPrefix,
+    installed: "/opt/chuggy-test",
+    lockPath: "/run/chuggy-test/update.lock",
+  },
+};
+
+test("the site's pin for this copy's package, read with no credential, is installed through its updater where it is above this copy", async () => {
+  const site = pinsAnswered([pinOf("9.9.9", "chuggy-other"), pinOf("0.5.0")]);
+  const { updater, updates } = updaterOf("0.4.0");
+  const lines = [];
+  await localToolUpdated("https://chuggy.test/console", updatesOn, {
+    fetch: site.fetch,
+    log: (line) => lines.push(line),
+    updater,
+  });
+  assert.deepEqual(
+    site.asked.map(({ url }) => url),
+    ["https://chuggy.test/api/v1/runner-releases"],
+  );
+  const { init } = site.asked[0];
+  assert.equal(init.redirect, "manual");
+  assert.ok(init.signal instanceof globalThis.AbortSignal);
+  assert.deepEqual(Object.keys(init.headers), ["accept"]);
+  assert.deepEqual(updates, [pinOf("0.5.0")]);
+  assert.deepEqual(lines, [
+    "chuggy-test 0.5.0 is installed, and this session serves 0.4.0 until the agent starts its next",
+  ]);
+});
+
+test("a pin at or below this copy, or none for its package, installs nothing and says nothing", async () => {
+  for (const releases of [
+    [pinOf("0.4.0")],
+    [pinOf("0.3.9")],
+    [pinOf("0.5.0", "chuggy-other")],
+    [],
+  ]) {
+    const { updater, updates } = updaterOf("0.4.0");
+    const lines = [];
+    await localToolUpdated("https://chuggy.test", updatesOn, {
+      fetch: pinsAnswered(releases).fetch,
+      log: (line) => lines.push(line),
+      updater,
+    });
+    assert.deepEqual(updates, [], JSON.stringify(releases));
+    assert.deepEqual(lines, [], JSON.stringify(releases));
+  }
+});
+
+test("updates not given, or given off, read nothing and install nothing", async () => {
+  for (const updates of [undefined, { ...updatesOn, on: false }]) {
+    const site = pinsAnswered([pinOf("0.5.0")]);
+    const { updater, updates: installed } = updaterOf("0.4.0");
+    const lines = [];
+    await localToolUpdated("https://chuggy.test", updates, {
+      fetch: site.fetch,
+      log: (line) => lines.push(line),
+      updater,
+    });
+    assert.deepEqual(site.asked, []);
+    assert.deepEqual(installed, []);
+    assert.deepEqual(lines, []);
+  }
+});
+
+test("a read that fails, or answers anything but the contract's pins, is said and installs nothing", async () => {
+  const answers = [
+    [() => Promise.reject(new Error("offline")), /: offline$/],
+    [() => new globalThis.Response("", { status: 404 }), /: it answered 404$/],
+    [
+      () =>
+        new globalThis.Response("", {
+          status: 302,
+          headers: { location: "https://elsewhere.test/" },
+        }),
+      /: it answered 302$/,
+    ],
+    [
+      () => new globalThis.Response(" ".repeat(localToolReleasesBytesMax + 1)),
+      /more than its answer is read to$/,
+    ],
+    [() => new globalThis.Response("{"), /not JSON$/],
+    [
+      () =>
+        globalThis.Response.json({ releases: [{ package: pinnedPackage }] }),
+      /not the contract's$/,
+    ],
+  ];
+  for (const [answer, said] of answers) {
+    const { updater, updates } = updaterOf("0.4.0");
+    const lines = [];
+    await localToolUpdated("https://chuggy.test", updatesOn, {
+      fetch: async () => answer(),
+      log: (line) => lines.push(line),
+      updater,
+    });
+    assert.deepEqual(updates, []);
+    assert.equal(lines.length, 1);
+    assert.match(
+      lines[0],
+      /^could not read the runner releases https:\/\/chuggy\.test pins: /,
+    );
+    assert.match(lines[0], said);
+  }
+});
+
+test("an install that fails is said with its reason, and one another service already made is said as installed", async () => {
+  const failed = updaterOf("0.4.0", () => ({
+    updated: "Failed",
+    reason: "its download answered 404",
+  }));
+  const already = updaterOf("0.4.0", () => ({
+    updated: "AlreadyInstalled",
+    version: "0.6.0",
+  }));
+  const lines = [];
+  for (const { updater } of [failed, already])
+    await localToolUpdated("https://chuggy.test", updatesOn, {
+      fetch: pinsAnswered([pinOf("0.5.0")]).fetch,
+      log: (line) => lines.push(line),
+      updater,
+    });
+  assert.deepEqual(lines, [
+    "did not update to chuggy-test 0.5.0: its download answered 404",
+    "chuggy-test 0.6.0 is installed, and this session serves 0.4.0 until the agent starts its next",
+  ]);
+});
+
+test("settings the updater refuses are said, and nothing is read", async () => {
+  const site = pinsAnswered([pinOf("0.5.0")]);
+  const lines = [];
+  await localToolUpdated(
+    "https://chuggy.test",
+    {
+      on: true,
+      settings: { ...updatesOn.settings, releasePrefix: "http://insecure/" },
+    },
+    { fetch: site.fetch, log: (line) => lines.push(line) },
+  );
+  assert.deepEqual(site.asked, []);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^cannot update this copy: release prefix/);
+});
+
+test("the serve ends only once the update it started once connected has ended", async () => {
+  const stdin = new EventEmitter();
+  const order = [];
+  let finish;
+  class McpServer {
+    constructor() {
+      this.server = {};
+    }
+    registerTool() {}
+    async connect() {
+      order.push("connected");
+    }
+    async close() {
+      this.server.onclose?.();
+    }
+  }
+  const context = localToolContext({
+    site: "https://chuggy.test",
+    tenant: "vteng",
+    project: "chuggy",
+    version: "1",
+    signIn: signInOf(["token"]),
+  });
+  let ended = false;
+  const served = localToolServe(
+    context,
+    { McpServer, StdioServerTransport: class {}, z },
+    stdin,
+    () => {
+      order.push("updating");
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    },
+  ).then(() => {
+    ended = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, ["connected", "updating"]);
+  stdin.emit("end");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ended, false);
+  finish();
+  await served;
+  assert.equal(ended, true);
+});
+
+test("served with updates on, the site's pin goes to the runner updater once connected, its refusal is said on stderr, and the serve goes on", async (t) => {
+  const signIns = await mkdtemp(join(tmpdir(), "local-tools-"));
+  t.after(() => rm(signIns, { recursive: true, force: true }));
+  const stderr = [];
+  t.mock.method(process.stderr, "write", (chunk) => stderr.push(String(chunk)));
+  const stdout = t.mock.method(process.stdout, "write", () => true);
+  const stdin = new EventEmitter();
+  let connected = false;
+  const asked = [];
+  class McpServer {
+    constructor() {
+      this.server = {};
+    }
+    registerTool() {}
+    async connect() {
+      connected = true;
+    }
+    async close() {
+      this.server.onclose?.();
+    }
+  }
+  const served = localToolServed(
+    {
+      site: "https://chuggy.test",
+      workspace: "vteng",
+      project: "chuggy",
+      version: "0.4.0",
+      signIns,
+      fetch: async (url) => {
+        asked.push({ url: String(url), connected });
+        return globalThis.Response.json({ releases: [pinOf("0.5.0")] });
+      },
+      updates: updatesOn,
+    },
+    { McpServer, StdioServerTransport: class {}, z },
+    stdin,
+  );
+  while (stderr.length === 0)
+    await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(asked, [
+    { url: "https://chuggy.test/api/v1/runner-releases", connected: true },
+  ]);
+  assert.deepEqual(stderr, [
+    "did not update to chuggy-test 0.5.0: this runner is installed at /opt/chuggy-test, which is not where npm installs a package globally\n",
+  ]);
+  stdin.emit("end");
+  await served;
+  assert.equal(stdout.mock.callCount(), 0);
+});
+
+/** A static import or re-export, a bare import, or an `import()`, outside comments. */
+const localToolSpecifierPattern =
+  /\bimport\s*\(|\b(?:from|import)\s*["']([^"']+)["']/gu;
+
+test("nothing the server's modules reach is loaded later than they are, so an install under it changes nothing it runs", async () => {
+  const reached = new Set();
+  const pending = [import.meta.resolve("./localTools.mjs")];
+  const lazy = [];
+  while (pending.length > 0) {
+    const module = pending.pop();
+    if (reached.has(module)) continue;
+    reached.add(module);
+    const source = (await readFile(fileURLToPath(module), "utf8")).replace(
+      /\/\*[\s\S]*?\*\/|^\s*\/\/.*$/gmu,
+      "",
+    );
+    for (const match of source.matchAll(localToolSpecifierPattern)) {
+      const specifier = match[1];
+      if (specifier === undefined) lazy.push(module);
+      else if (!specifier.startsWith("node:"))
+        pending.push(
+          /^\.\.?\//u.test(specifier)
+            ? new URL(specifier, module).href
+            : import.meta.resolve(specifier),
+        );
+    }
+  }
+  const named = [...reached].map((module) => module.split("/").at(-1));
+  for (const name of ["runnerUpdate.mjs", "fileLock.mjs", "workerPool.js"])
+    assert.ok(named.includes(name), `${name} is reached`);
+  assert.deepEqual(lazy, []);
 });
