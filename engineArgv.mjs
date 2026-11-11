@@ -897,8 +897,8 @@ export function logsArgv(container, linesMax) {
 }
 
 /**
- * A removal, with the container's anonymous volumes, a workspace of its own
- * among them, unless they are `kept`.
+ * A removal, with the container's anonymous volumes unless they are `kept`:
+ * a job started without chuggy's runtime holds its workspace among them.
  *
  * @param {string} container
  * @param {boolean} [kept]

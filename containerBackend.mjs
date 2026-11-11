@@ -1045,7 +1045,10 @@ async function retired(state, container, why) {
       ? undefined
       : keptWorkspaceWhy(retiredUnclean(container, why), copied.read);
   const removed = await state.seams.engine.exec(
-    removeArgv(container.id, keptWhy !== undefined),
+    removeArgv(
+      container.id,
+      keptWhy !== undefined && container.runtimeVolume === undefined,
+    ),
   );
   if (removed.code === 0) state.logFailures.delete(container.id);
   const kept = "file" in saved ? `logs saved to ${saved.file}` : "logs lost";

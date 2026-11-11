@@ -3618,6 +3618,20 @@ for (const [ending, ended, reason, read] of keptEndings)
     if (read) assert.deepEqual({ ...record, ...keptHolds }, record);
   });
 
+test("a kept job started through chuggy's runtime is still removed with its anonymous volumes", async (t) => {
+  const context = await harness(t);
+  const container = await placedThroughRuntime(context);
+  assert.ok(container !== undefined);
+  endedWith(container, 1);
+  await endsNamed(context.backend);
+  const removal = context.state.calls.find((call) => call.argv[0] === "rm");
+  assert.deepEqual(removal?.argv, ["rm", "-v", container.id]);
+  assert.deepEqual(
+    [...context.state.volumes.keys()],
+    [container.labels["io.chuggy.workspace"]],
+  );
+});
+
 test(
   "a workspace record whose copy hangs is given up at its cut, and its workspace kept",
   { timeout: 30_000 },
