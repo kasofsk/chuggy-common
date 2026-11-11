@@ -25,11 +25,16 @@
  * answers as docker's `HostConfig.Memory`, and what `stats` prints it uses,
  * which is `usedBytes`, in docker's binary units. `info` answers the engine's
  * own memory in docker's words and podman's alike.
+ *
+ * A CONTAINER'S FILES are what `cp` copies out of it, running or stopped, to
+ * the path on this machine it names; one it lacks is refused in docker 28's
+ * words. An anonymous volume it was run with is inspected as docker names one,
+ * by an id of its own.
  */
 
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { constants } from "node:os";
 import { dirname } from "node:path";
 
@@ -52,6 +57,7 @@ import { dirname } from "node:path";
  * @property {string} [log] what `logs` prints of it, which is a line naming it where none
  * @property {number} [memoryBytes] its cap, none where 0
  * @property {number} [usedBytes] what `stats` prints it uses, none where absent
+ * @property {Record<string, string>} [files] what `cp` copies out of it, by its path in the container
  *
  * @typedef {object} FakeVolume
  * @property {Record<string, string>} labels
@@ -466,6 +472,16 @@ function inspected(state, references) {
             Name: `/${container.name}`,
             Config: { Labels: container.labels, Env: container.env ?? null },
             HostConfig: { Memory: container.memoryBytes ?? 0 },
+            Mounts: (container.volumes ?? []).map((volume, index) => {
+              const [source, destination] = volume.split(":");
+              return destination === undefined
+                ? {
+                    Type: "volume",
+                    Name: `anonymous-${container.id}-${String(index)}`,
+                    Destination: source,
+                  }
+                : { Type: "volume", Name: source, Destination: destination };
+            }),
             State: {
               Status: container.status,
               ExitCode: container.exitCode,
@@ -644,7 +660,8 @@ function volumesInspected(state, names) {
 }
 
 /**
- * `volume ls` and `volume inspect`; `volume create`, which answers a name
+ * `volume ls`, which takes `dangling=true` for one no container mounts, and
+ * `volume inspect`; `volume create`, which answers a name
  * already made as made; and `volume rm`, which refuses one a container mounts.
  *
  * @param {FakeEngineState} state
@@ -655,9 +672,19 @@ function volumed(state, call) {
   const name = argv.at(-1) ?? "";
   if (argv[1] === "ls") {
     const wanted = labelFilters(argv);
+    const used = new Set(
+      [...state.containers.values()].flatMap((container) =>
+        namedVolumes(container.volumes ?? []),
+      ),
+    );
+    const dangling = flagValues(argv, "--filter").includes("dangling=true");
     return answered(
       [...state.volumes]
-        .filter(([, volume]) => labelsMatched(volume.labels, wanted))
+        .filter(
+          ([listed, volume]) =>
+            labelsMatched(volume.labels, wanted) &&
+            !(dangling && used.has(listed)),
+        )
         .map(([listed]) => `${listed}\n`)
         .join(""),
     );
@@ -876,6 +903,27 @@ function imaged(state, call) {
 }
 
 /**
+ * A `cp` of one file out of a container to this machine.
+ *
+ * @param {FakeEngineState} state
+ * @param {string[]} argv
+ */
+function copiedOut(state, [, from = "", to = ""]) {
+  const colon = from.indexOf(":");
+  const reference = from.slice(0, colon);
+  const path = from.slice(colon + 1);
+  const container = found(state, reference);
+  if (container === undefined) return missing(reference);
+  const content = container.files?.[path];
+  if (content === undefined)
+    return failed(
+      `Error response from daemon: Could not find the file ${path} in container ${reference}`,
+    );
+  writeFileSync(to, content);
+  return answered();
+}
+
+/**
  * @param {FakeEngineState} state
  * @param {FakeCall} call
  * @returns {EngineAnswer | Promise<EngineAnswer>}
@@ -921,6 +969,7 @@ function answer(state, call) {
   }
   if (verb === "container") return inspected(state, call.argv.slice(2));
   if (verb === "kill") return killed(state, last);
+  if (verb === "cp") return copiedOut(state, call.argv);
   if (verb === "rm") {
     const removed = changed(state, last, (container) => {
       state.containers.delete(container.name);

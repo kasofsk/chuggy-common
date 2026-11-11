@@ -63,6 +63,7 @@
     "imageRecord.mjs",
     "imageSweep.mjs",
     "job.mjs",
+    "keptWorkspace.mjs",
     "leadDecision.mjs",
     "lease.mjs",
     "localSignIn.mjs",
