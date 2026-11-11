@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { Buffer, constants } from "node:buffer";
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import {
   chmod,
   copyFile,
@@ -3646,6 +3647,134 @@ test("a host job's clone and push write the git credential in the job's own mint
   });
 });
 
+/** What the plane answers an attempt's mint, its report, and every route that only records. */
+function attemptAnswered(route) {
+  if (route === "credential")
+    return { status: 200, body: { ...minted, expiresAtMs: 1_900_000_000_000 } };
+  if (route === "report") return { status: 202, body: { action: "stop" } };
+  return { status: 204 };
+}
+
+/** What an attempt's workspace record says, read from the workspace it describes. */
+function workspaceRecordIn(workspace) {
+  return JSON.parse(
+    readFileSync(join(workspace, "chuggy-workspace.json"), "utf8"),
+  );
+}
+
+/**
+ * One commanded work attempt over a real checkout from an envelope naming a
+ * workspace of its own, the remote refusing every push of it where `refused`
+ * says: its workspace's record as it stood when the plane was asked for the
+ * input, and as the attempt left it.
+ */
+async function recordedAttempt(
+  t,
+  { remote, directory, base },
+  commands,
+  refused = false,
+) {
+  await git("git", ["push", remote, `${base}:refs/heads/main`], {
+    cwd: directory,
+  });
+  if (refused) await remoteRefuses(remote, "pre-receive", "exit 1");
+  const root = await suiteDirectory(t, "chuggy-recorded-");
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  let atInput;
+  const plane = await servedPlane((route) => {
+    switch (route) {
+      case "task":
+        return commandedTask(commands);
+      case "input":
+        atInput = workspaceRecordIn(workspace);
+        return inputAnswer(remote, base);
+      default:
+        return attemptAnswered(route);
+    }
+  });
+  t.after(() => plane.close());
+  const served = { ...envelope, callbackUrl: plane.url, workspace };
+  const { task: answered } = await envelopeTask(served);
+  await workerAttempt(envelopeLaunch(served, answered), {
+    minted: root,
+    write: async () => undefined,
+  });
+  return { atInput, left: workspaceRecordIn(workspace), workspace };
+}
+
+/** Whose work an attempt of `fetchedAnswer` in `remote`'s repository holds. */
+const recordedWork = (remote) => ({
+  ticket: fetchedAnswer.ticket,
+  attempt: fetchedAnswer.attempt,
+  stage: fetchedAnswer.stage,
+  repository: remote,
+});
+
+/**
+ * Catches a workspace whose record names no work until too late to be read
+ * of a run killed early, or says its work is safe before a push landed it.
+ */
+test("a work attempt records whose work its workspace holds once it has its task, and records it safe once its pass has landed, never committing or pushing the record", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { atInput, left, workspace } = await recordedAttempt(t, checkout, [
+      "echo done > done.txt",
+    ]);
+
+    assert.deepEqual(atInput, {
+      ticket: fetchedAnswer.ticket,
+      attempt: fetchedAnswer.attempt,
+      stage: fetchedAnswer.stage,
+      safe: false,
+    });
+    assert.deepEqual(left, { ...recordedWork(checkout.remote), safe: true });
+    const { stdout: refs } = await git(
+      "git",
+      ["for-each-ref", "--format=%(refname)"],
+      { cwd: checkout.remote },
+    );
+    const pushed = refs.split("\n").filter((ref) => ref.includes("/attempts/"));
+    assert.equal(pushed.length, 1);
+    const { stdout: files } = await git(
+      "git",
+      ["ls-tree", "-r", "--name-only", pushed[0]],
+      { cwd: checkout.remote },
+    );
+    assert.ok(files.split("\n").includes("done.txt"), files);
+    assert.ok(!files.includes("chuggy-workspace.json"), files);
+    const { stdout: status } = await git(
+      "git",
+      ["status", "--porcelain", "--ignored"],
+      { cwd: join(workspace, "repository") },
+    );
+    assert.ok(!status.includes("chuggy-workspace.json"), status);
+  });
+});
+
+test("a failed work attempt whose changes were kept, or that changed nothing, records its work safe", async (t) => {
+  for (const commands of [["echo half > half.txt && exit 1"], ["exit 1"]])
+    await inCheckout(async (checkout) => {
+      const { left } = await recordedAttempt(t, checkout, commands);
+      assert.deepEqual(
+        left,
+        { ...recordedWork(checkout.remote), safe: true },
+        commands[0],
+      );
+    });
+});
+
+test("a failed work attempt whose changes could not be kept records nothing safe", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { left } = await recordedAttempt(
+      t,
+      checkout,
+      ["echo half > half.txt && exit 1"],
+      true,
+    );
+    assert.deepEqual(left, { ...recordedWork(checkout.remote), safe: false });
+  });
+});
+
 /** A plane serving one attempt `answer` as its task, an input bundle pinning `briefImage`, and that image. */
 function imagePlane(answer, remote, base) {
   return servedPlane((route) => {
@@ -4826,6 +4955,7 @@ async function standInAttempt(
     ...seams.agent,
   };
   const workspace = join(root, "workspace");
+  await mkdir(workspace);
   const served = {
     ...envelope,
     callbackUrl: plane.url,
@@ -4896,12 +5026,15 @@ const readToken = "ghs_read0123456789abcdefghijklmnop";
  * naming no place to find it, and a keep that changes the failure into a step's
  * label: a run with no verdict is reported with the label it always was.
  */
-test("a work run that ends without a verdict leaves its work on the ticket's checkpoint, and its text says where", async (t) => {
+test("a work run that ends without a verdict leaves its work on the ticket's checkpoint, its text says where, and its workspace record says its work is safe", async (t) => {
   await inCheckout(async (checkout) => {
     await targetPushed(checkout);
 
-    const { failure } = await standInAttempt(t, checkout, [revokedRun()]);
+    const { failure, workspace } = await standInAttempt(t, checkout, [
+      revokedRun(),
+    ]);
 
+    assert.equal(workspaceRecordIn(workspace).safe, true);
     assert.ok(!(failure instanceof RunStepFailure), String(failure));
     const { stdout: commit } = await git("git", ["rev-parse", checkpointRef], {
       cwd: checkout.remote,
@@ -4982,13 +5115,16 @@ function remoteSays(bytes) {
 }
 
 /** Catches a failure to keep that masks why the run ended, or moves its label to the push's. */
-test("a run whose work could not be kept still ends as it ended, and says so", async (t) => {
+test("a run whose work could not be kept still ends as it ended, says so, and records nothing safe", async (t) => {
   await inCheckout(async (checkout) => {
     await targetPushed(checkout);
     await remoteRefuses(checkout.remote, "pre-receive", "exit 1");
 
-    const { failure } = await standInAttempt(t, checkout, [revokedRun()]);
+    const { failure, workspace } = await standInAttempt(t, checkout, [
+      revokedRun(),
+    ]);
 
+    assert.equal(workspaceRecordIn(workspace).safe, false);
     assert.ok(!(failure instanceof RunStepFailure), String(failure));
     assert.match(failure.message, /^Claude Code exited 1$/mu);
     assert.ok(failure.message.includes(revokedSentence));
@@ -4996,14 +5132,15 @@ test("a run whose work could not be kept still ends as it ended, and says so", a
   });
 });
 
-test("a run that changed nothing keeps nothing, and its text says so", async (t) => {
+test("a run that changed nothing keeps nothing, its text says so, and its workspace record says its work is safe", async (t) => {
   await inCheckout(async (checkout) => {
     await targetPushed(checkout);
 
-    const { failure } = await standInAttempt(t, checkout, [
+    const { failure, workspace } = await standInAttempt(t, checkout, [
       { frames: [], exit: 1 },
     ]);
 
+    assert.equal(workspaceRecordIn(workspace).safe, true);
     assert.equal(
       failure.message,
       "Claude Code exited 1\nThe run changed nothing, so nothing is kept.",

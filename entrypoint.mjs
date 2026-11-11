@@ -143,6 +143,7 @@ import { chatAbortable } from "./chatCheckout.mjs";
 import { gitFailureLine, gitRemoteTried } from "./gitRemote.mjs";
 import { heldCredentials } from "./heldCredentials.mjs";
 import { jobHostPlaces, jobRepositoryDirectory } from "./job.mjs";
+import { keptWorkspaceRecordWritten } from "./keptWorkspace.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import {
   planeCredential,
@@ -800,10 +801,13 @@ async function workSource(context, workspace, verdict) {
     try {
       source = await pushed();
     } catch (failure) {
-      throw await workFailureKept(failure, () =>
-        workCheckpointed(context, workspace),
+      throw await workFailureKept(
+        failure,
+        () => workCheckpointed(context, workspace),
+        workspace,
       );
     }
+    await workspace.workSafe?.();
     return { source };
   }
   try {
@@ -813,6 +817,7 @@ async function workSource(context, workspace, verdict) {
         ? "the failed attempt changed nothing, so nothing is kept\n"
         : `${workSourceKept(kept)}\n`,
     );
+    await workspace.workSafe?.();
     return { kept };
   } catch (failure) {
     process.stderr.write(
@@ -1008,9 +1013,10 @@ async function workAside(context, workspace, push) {
 
 /**
  * What a work run did kept as its ticket's checkpoint: `line`, saying what became
- * of it, which is logged, and `credentialLeft` as `workAside` answers it. Nothing
- * where the run is not work. Whatever goes wrong here is that line, and never
- * reaches the run's own end.
+ * of it, which is logged, `credentialLeft` as `workAside` answers it, and `safe`
+ * where it was kept or there was nothing to keep. Nothing where the run is not
+ * work. Whatever goes wrong here is that line, and never reaches the run's own
+ * end.
  */
 async function workCheckpointed(context, workspace) {
   if (context.task.taskKind !== "Work") return {};
@@ -1033,7 +1039,7 @@ async function workCheckpointed(context, workspace) {
     line = "The run changed nothing, so nothing is kept.";
   else line = `The run's work is kept on ${done.ref} at ${done.commit}.`;
   process.stderr.write(`${line}\n`);
-  return { line, credentialLeft };
+  return { line, credentialLeft, safe: failure === undefined };
 }
 
 /**
@@ -1139,9 +1145,13 @@ function workKeptOnce(keep) {
   };
 }
 
-/** `failure`, the run's own, told what became of its unfinished work. */
-async function workFailureKept(failure, keep) {
-  const { line } = await keep();
+/**
+ * `failure`, the run's own, told what became of its unfinished work, which
+ * the workspace's record says is safe where it is.
+ */
+async function workFailureKept(failure, keep, workspace) {
+  const { line, safe } = await keep();
+  if (safe === true) await workspace.workSafe?.();
   if (line !== undefined && failure instanceof Error)
     failure.message = `${failure.message}\n${line}`;
   return failure;
@@ -1819,7 +1829,7 @@ async function workerAttemptWorked(attempt, workspace, git) {
     },
     attempt.commands,
   ).catch(async (failure) => {
-    throw await workFailureKept(failure, keep);
+    throw await workFailureKept(failure, keep, workspace);
   });
   await publishWorkerResult(
     {
@@ -1900,8 +1910,8 @@ function workerRunDeadlineMs(timeoutSecsMax, clock) {
 
 /**
  * What an attempt holding its lease does: its credentials, its workspace and its
- * project reads taken, and the work done in them. Its evidence stops and its
- * reads close however that ends.
+ * project reads taken, its workspace's record told the repository, and the work
+ * done in them. Its evidence stops and its reads close however that ends.
  */
 async function workerAttemptLeased(
   attempt,
@@ -1918,7 +1928,7 @@ async function workerAttemptLeased(
       keepSecret,
       request: workspaceSeams.request,
     });
-    const workspace = await workerWorkspace(
+    const cloned = await workerWorkspace(
       task,
       repositories,
       credentialFiles,
@@ -1926,6 +1936,8 @@ async function workerAttemptLeased(
       keepSecret,
       { ...workspaceSeams, minted, workspace: into },
     );
+    await attempt.recorder.repository(cloned.repositoryId);
+    const workspace = { ...cloned, workSafe: attempt.recorder.safe };
     reads = await workerProjectReads({
       task,
       bearer,
@@ -1943,6 +1955,49 @@ async function workerAttemptLeased(
     evidence.stop();
     await reads?.close();
   }
+}
+
+/**
+ * What an attempt writes of whose work its workspace holds, as
+ * `keptWorkspace.mjs` says: once it has its task, again with the repository
+ * its input names, and again where its work is safe, which a task that is not
+ * work is from the start. A write that fails is logged and is never the run's
+ * failure, since a workspace whose record says nothing is kept.
+ *
+ * @param {string | undefined} workspace
+ * @param {{ticket: number, attempt: string, stage?: number, taskKind: string}} task
+ * @param {(text: string) => string} scrub
+ */
+function workspaceRecorder(workspace, task, scrub) {
+  /** @type {import("./keptWorkspace.mjs").KeptWorkspaceRecord} */
+  const record = {
+    ticket: task.ticket,
+    attempt: task.attempt,
+    ...(task.stage === undefined ? {} : { stage: task.stage }),
+    safe: task.taskKind !== "Work",
+  };
+  const written = async () => {
+    if (workspace === undefined) return;
+    try {
+      await keptWorkspaceRecordWritten(workspace, record, scrub);
+    } catch (failure) {
+      process.stderr.write(
+        `the workspace's record could not be written: ${scrub(failure instanceof Error ? failure.message : String(failure))}\n`,
+      );
+    }
+  };
+  return {
+    written,
+    /** @param {string} repository */
+    repository: async (repository) => {
+      record.repository = repository;
+      await written();
+    },
+    safe: async () => {
+      record.safe = true;
+      await written();
+    },
+  };
 }
 
 /**
@@ -1985,6 +2040,12 @@ export async function workerAttempt(launch, seams = {}) {
     agent,
     clock,
   });
+  const recorder = workspaceRecorder(
+    into ?? process.env[workerWorkspaceVariable],
+    task,
+    ran.scrub,
+  );
+  await recorder.written();
   await workerMintedWritable(minted);
   const stopLease = keepWorkerLease(task, bearer);
   try {
@@ -1999,6 +2060,7 @@ export async function workerAttempt(launch, seams = {}) {
         clock,
         runDeadlineMs: workerRunDeadlineMs(timeoutSecsMax, clock),
         asideCapMs,
+        recorder,
       },
       { credentialFiles, repositories, minted, into, workspaceSeams },
     );

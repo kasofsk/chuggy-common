@@ -5,7 +5,7 @@
  */
 
 /**
- * @param {"pull" | "job"} kind
+ * @param {"pull" | "job" | "record"} kind
  * @param {number} pid
  */
 export function runtimeScratch(kind, pid = process.pid) {

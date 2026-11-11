@@ -21,8 +21,10 @@
  * workspace, its home, its temporary files and the credentials it mints, as
  * `jobHostPlaces` names them. It inherits the runner's environment, then the
  * owner's and, where it reads Claude's credential, that credential's kind,
- * then the job's own places, and the directory goes when the job does. Any a
- * predecessor left are removed the first time `held` is asked.
+ * then the job's own places. The directory goes when the job does where the
+ * job ended clean, as `keptWorkspace.mjs` says, and is otherwise kept under a
+ * name of `hostKeptPrefix`, logged and recorded. Any other a predecessor left
+ * is removed the first time `held` is asked.
  *
  * WHAT ENDED OF ITSELF IS NAMED ONCE, after `held` stopped naming it, with this
  * backend's own reason and never the job's output, which is written to the log
@@ -35,8 +37,17 @@
 
 import { spawn as spawnDefault } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
-import { join } from "node:path";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  readdir,
+  rename,
+  rm,
+} from "node:fs/promises";
+import { basename, isAbsolute, join } from "node:path";
 import { clearTimeout, setTimeout } from "node:timers";
 import { fileURLToPath, URL } from "node:url";
 
@@ -53,6 +64,14 @@ import {
   jobHostPlaces,
   reservedJobVariables,
 } from "./job.mjs";
+import {
+  keptWorkspaceKept,
+  keptWorkspaceRecordName,
+  keptWorkspaceRecordRead,
+  keptWorkspacesListed,
+  keptWorkspacesRecorded,
+  keptWorkspaceWhy,
+} from "./keptWorkspace.mjs";
 import { runnerMeasures, runnerMeasuredSum } from "./runnerReport.mjs";
 import { savedLogTrimmed } from "./savedLog.mjs";
 
@@ -436,9 +455,63 @@ async function hostDirectoryWritable(directory) {
       await hostDirectoryWritable(join(directory, entry.name));
 }
 
+/** What a kept job's directory is renamed to begin with, which no sweep removes. */
+export const hostKeptPrefix = "kept-";
+
+/**
+ * Why an ended job's directory is kept whatever its workspace record says, or
+ * nothing where its process exited 0 of itself.
+ *
+ * @param {HostJob} job
+ * @param {number | null} code
+ * @param {NodeJS.Signals | null} signal
+ */
+function hostJobUnclean(job, code, signal) {
+  if (job.expired) return "it ran past its deadline and was killed";
+  if (job.stopped) return "it was stopped";
+  if (signal !== null) return `its process was killed by ${signal}`;
+  if (code !== 0) return `its process exited ${String(code)}`;
+  return undefined;
+}
+
+/**
+ * Removes an ended job's directory where it ended clean, and otherwise keeps
+ * it under a name of `hostKeptPrefix`, logged and recorded beside its log.
+ *
+ * @param {State} state
+ * @param {HostJob} job
+ * @param {number | null} code
+ * @param {NodeJS.Signals | null} signal
+ */
+async function hostJobDirectoryRetired(state, job, code, signal) {
+  const read = await keptWorkspaceRecordRead(
+    join(jobHostPlaces(job.directory).workspace, keptWorkspaceRecordName),
+  );
+  const why = keptWorkspaceWhy(hostJobUnclean(job, code, signal), read);
+  if (why === undefined) {
+    await hostDirectoryRemoved(state, job.directory);
+    return;
+  }
+  const kept = join(
+    state.settings.directory,
+    `${hostKeptPrefix}${basename(job.directory).replace(/^job-/u, "")}`,
+  );
+  try {
+    await rename(job.directory, kept);
+  } catch (failure) {
+    state.seams.log(
+      `${job.name}: ${job.directory} is kept, since ${why}, but could not be moved to ${kept}, so the next start removes it: ${failure instanceof Error ? failure.message : String(failure)}`,
+    );
+    return;
+  }
+  state.seams.log(
+    `${job.name}: ${await keptWorkspaceKept(state.settings.logDir, kept, why, read, (state.seams.nowMs ?? Date.now)())}`,
+  );
+}
+
 /**
  * Removes the job directories no job of this run holds, which a predecessor
- * left.
+ * left, and never one it kept.
  *
  * @param {State} state
  */
@@ -453,7 +526,8 @@ async function hostSwept(state) {
   }
   for (const name of names) {
     const directory = join(state.settings.directory, name);
-    if (!held.has(directory)) await hostDirectoryRemoved(state, directory);
+    if (!held.has(directory) && !name.startsWith(hostKeptPrefix))
+      await hostDirectoryRemoved(state, directory);
   }
 }
 
@@ -554,8 +628,8 @@ async function hostJobSpawned(state, name, made, carried) {
 
 /**
  * Watches a started job: its deadline kills it, and its end kills what is left
- * of its group, removes its directory and, unless this pool stopped it, is
- * named.
+ * of its group, removes or keeps its directory and, unless this pool stopped
+ * it, is named.
  *
  * @param {State} state
  * @param {HostJob} job
@@ -587,7 +661,7 @@ function hostJobWatched(state, job, name, log, deadlineSecs) {
               `${name}: its log could not be cut to its end: ${failure instanceof Error ? failure.message : String(failure)}`,
             ),
           );
-          await hostDirectoryRemoved(state, job.directory);
+          await hostJobDirectoryRetired(state, job, code, signal);
         } finally {
           if (state.jobs.get(job.assignment) === job)
             state.jobs.delete(job.assignment);
@@ -819,4 +893,52 @@ export function hostRoutedBackend(container, host, platforms) {
       await Promise.all([container.settled(), host.settled()]);
     },
   };
+}
+
+/** The most entries a kept directory's size is counted over, past which it is unknown. */
+export const hostKeptEntriesMax = 1_000_000;
+
+/**
+ * The bytes a directory's files hold, links counted as themselves, or nothing
+ * where it holds more than `hostKeptEntriesMax` entries or cannot be read.
+ *
+ * @param {string} directory
+ */
+async function hostDirectoryBytes(directory) {
+  const pending = [directory];
+  let bytes = 0;
+  let entries = 0;
+  try {
+    while (pending.length > 0) {
+      const path = /** @type {string} */ (pending.pop());
+      const found = await lstat(path);
+      entries += 1;
+      if (found.isDirectory())
+        for (const name of await readdir(path)) pending.push(join(path, name));
+      else bytes += found.size;
+      if (entries + pending.length > hostKeptEntriesMax) return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+  return bytes;
+}
+
+/**
+ * The operator's listing of the job directories a host runner kept, as
+ * `keptWorkspacesListed` lines them, each with the size its files hold.
+ *
+ * @param {string} logDir
+ */
+export async function hostKeptWorkspaces(logDir) {
+  const kept = (await keptWorkspacesRecorded(logDir)).filter(({ workspace }) =>
+    isAbsolute(workspace),
+  );
+  /** @type {Map<string, number>} */
+  const sizes = new Map();
+  for (const { workspace } of kept) {
+    const bytes = await hostDirectoryBytes(workspace);
+    if (bytes !== undefined) sizes.set(workspace, bytes);
+  }
+  return keptWorkspacesListed(kept, sizes);
 }

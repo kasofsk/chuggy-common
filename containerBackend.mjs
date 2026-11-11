@@ -64,8 +64,16 @@
  * go with the job's container, or with its placement where the job never
  * starts in them, the container filling them first. Any a runner left,
  * stopped mid-placement or refused a removal, are removed by a later `held`,
- * which never takes one of a placement in flight or of a container it lists.
- * An assignment naming no runtime runs its image's own entrypoint.
+ * which never takes one of a placement in flight or of a container it lists,
+ * nor any workspace. An assignment naming no runtime runs its image's own
+ * entrypoint.
+ *
+ * A JOB'S WORKSPACE GOES WITH ITS CONTAINER ONLY WHERE THE JOB ENDED CLEAN, as
+ * `keptWorkspace.mjs` says: its record is copied out of the stopped container
+ * first, within a bound, and one that cannot be is no record. Every other
+ * job's workspace is kept, a job's started through no runtime among them,
+ * whose workspace is the engine's anonymous volume, and is logged and
+ * recorded. Nothing here removes a kept one.
  *
  * A JOB IS HANDED THIS MACHINE'S ENGINE where its runner hands jobs one: the
  * engine's socket, mounted into its container, and the variables that tell
@@ -132,7 +140,7 @@
 
 import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { dirname, join, posix } from "node:path";
+import { dirname, isAbsolute, join, posix } from "node:path";
 
 import {
   workerImageFaults,
@@ -150,6 +158,7 @@ import { claudeCredentialCarried } from "./claudeCredential.mjs";
 import {
   assignmentLabel,
   bindMountNameable,
+  copiedOutArgv,
   deadlineLabel,
   dockerDiskUsageArgv,
   fillLabel,
@@ -159,6 +168,7 @@ import {
   imageInspectManyArgv,
   imageInspectPlatformArgv,
   inspectArgv,
+  keptVolumesArgv,
   killArgv,
   kindLabel,
   listArgv,
@@ -178,6 +188,7 @@ import {
   volumeRemoveArgv,
   workloadMountTargets,
   workspaceLabel,
+  workspaceVolumeLabel,
 } from "./engineArgv.mjs";
 import {
   engineCommandUnstarted,
@@ -234,6 +245,14 @@ import {
   memoryStartCutMs,
   memoryStartDecided,
 } from "./memoryBudget.mjs";
+import {
+  keptWorkspaceKept,
+  keptWorkspaceRecordName,
+  keptWorkspaceRecordRead,
+  keptWorkspacesListed,
+  keptWorkspacesRecorded,
+  keptWorkspaceWhy,
+} from "./keptWorkspace.mjs";
 import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
 import { runnerMeasures } from "./runnerReport.mjs";
 import { runtimeScratch } from "./runtimeScratch.mjs";
@@ -303,6 +322,7 @@ import {
  * @property {(line: string) => void} log
  * @property {() => Promise<import("./diskFloor.mjs").DiskFree>} [diskFree] the bytes free where the engine stores what it holds, the runner's to measure, since an engine in a VM answers for the VM's disk; none, and no floor is kept
  * @property {(pid: number) => boolean} [holderAlive] whether the process a memory hold or the runtime lock names is running; `fileLockHolderAlive` where none
+ * @property {() => AbortSignal} [workspaceRecordCut] what ends a copy of a job's workspace record out of its container; `workspaceRecordReadMsMax` where none
  *
  * @typedef {object} InFlightPlacement
  * @property {string} assignment
@@ -347,7 +367,7 @@ import {
  * @property {number | undefined} startedMs where the engine says it started
  * @property {number | undefined} finishedMs where the engine says it finished, which before it has is a time before it started
  * @property {string | undefined} runtimeVolume the volume holding its copy of chuggy's runtime, where it was started through one
- * @property {string | undefined} workspaceVolume the volume its workspace is, where it was started through chuggy's runtime
+ * @property {string | undefined} workspaceVolume the volume its workspace is: its own where it was started through chuggy's runtime, and otherwise the anonymous one the engine made
  *
  * @typedef {WorkerPoolBackend & {
  *   inFlight: () => InFlightPlacement[],
@@ -503,6 +523,15 @@ const inspectedSchema = z.array(
       Labels: z.record(z.string(), z.string()).nullish(),
       Env: z.array(z.string()).nullish(),
     }),
+    Mounts: z
+      .array(
+        z.object({
+          Type: z.string(),
+          Name: z.string().optional(),
+          Destination: z.string(),
+        }),
+      )
+      .nullish(),
     State: z.object({
       Status: z.string(),
       ExitCode: z.number().optional(),
@@ -614,7 +643,12 @@ function poolContainer(inspected) {
     startedMs: Number.isNaN(started) ? undefined : started,
     finishedMs: Number.isNaN(finished) ? undefined : finished,
     runtimeVolume: labels[runtimeLabel],
-    workspaceVolume: labels[workspaceLabel],
+    workspaceVolume:
+      labels[workspaceLabel] ??
+      inspected.Mounts?.find(
+        (mount) =>
+          mount.Type === "volume" && mount.Destination === jobWorkspace,
+      )?.Name,
   };
 }
 
@@ -844,8 +878,9 @@ async function poolVolumes(state) {
  * Removes the volumes of chuggy's runtime that nothing answers for: each of
  * an assignment `held` listed no container of and found no placement of in
  * flight, the placements read again as each is removed, since a placement
- * makes its volumes after it is placed. The container filling them goes
- * first. A sweep that could not finish leaves `strays` set for the next.
+ * makes its volumes after it is placed, and never a workspace, which is kept
+ * where its job did not end clean. The container filling them goes first. A
+ * sweep that could not finish leaves `strays` set for the next.
  *
  * @param {State} state
  * @param {ReadonlySet<string>} listed the assignments `held` found in flight or listed a container of
@@ -862,6 +897,7 @@ async function strayVolumesRemoved(state, listed) {
     const assignment = labels?.[assignmentLabel];
     if (
       assignment === undefined ||
+      Object.hasOwn(labels ?? {}, workspaceVolumeLabel) ||
       listed.has(assignment) ||
       state.placements.has(assignment)
     )
@@ -879,20 +915,138 @@ async function strayVolumesRemoved(state, listed) {
   }
 }
 
+/** How long a stopped job's workspace record may take to copy out of its container. */
+export const workspaceRecordReadMsMax = 10_000;
+
+/**
+ * A stopped job's workspace record, copied out of its container to this
+ * machine through the engine and read there, or why it could not be: bounded
+ * by `workspaceRecordReadMsMax`, or by the seam's cut where it gives one. A
+ * container the engine no longer has is `gone`.
+ *
+ * @param {State} state
+ * @param {PoolContainer} container
+ * @returns {Promise<{read: import("./keptWorkspace.mjs").KeptWorkspaceRead, gone: boolean}>}
+ */
+async function workspaceRecordCopied(state, container) {
+  const { settings, seams } = state;
+  const cut =
+    seams.workspaceRecordCut?.() ??
+    globalThis.AbortSignal.timeout(workspaceRecordReadMsMax);
+  let directory;
+  try {
+    await mkdir(settings.runtimeDir, { recursive: true, mode: 0o700 });
+    directory = await mkdtemp(
+      join(settings.runtimeDir, runtimeScratch("record")),
+    );
+    const file = join(directory, keptWorkspaceRecordName);
+    const copied = await seams.engine.exec(
+      copiedOutArgv(
+        container.id,
+        posix.join(jobWorkspace, keptWorkspaceRecordName),
+        file,
+      ),
+      { cut },
+    );
+    if (copied.code === 0)
+      return { read: await keptWorkspaceRecordRead(file), gone: false };
+    const gone = engineFailure(copied) === "NoSuchContainer";
+    return {
+      read: {
+        unread: gone ? "its container is gone" : engineFailureLine(copied),
+      },
+      gone,
+    };
+  } catch (failure) {
+    return {
+      read: {
+        unread: cut.aborted
+          ? "it was not copied out in time"
+          : failure instanceof Error
+            ? failure.message
+            : String(failure),
+      },
+      gone: false,
+    };
+  } finally {
+    if (directory !== undefined)
+      await rm(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Why a retired job's end keeps its workspace whatever its record says, or
+ * nothing where it ended of itself with status 0 through chuggy's runtime.
+ *
+ * @param {PoolContainer} container as it was found before it was retired
+ * @param {string} why what retired it
+ */
+function retiredUnclean(container, why) {
+  if (container.runtimeVolume === undefined)
+    return "it was started without chuggy's runtime";
+  if (!endedStatuses.has(container.status)) return `it ${why}`;
+  if (!exitedStatuses.has(container.status) || container.exitCode === undefined)
+    return `its container was left ${container.status}`;
+  if (container.exitCode !== 0)
+    return `its container exited with status ${String(container.exitCode)}`;
+  return undefined;
+}
+
+/**
+ * Logs and records a job's workspace kept.
+ *
+ * @param {State} state
+ * @param {PoolContainer} container
+ * @param {string} reason
+ * @param {import("./keptWorkspace.mjs").KeptWorkspaceRead} read
+ */
+async function workspaceKept(state, container, reason, read) {
+  const workspace =
+    container.workspaceVolume ?? `the anonymous workspace of ${container.name}`;
+  state.seams.log(
+    `${container.name}: ${await keptWorkspaceKept(state.settings.logDir, workspace, reason, read, state.seams.nowMs())}`,
+  );
+}
+
 /**
  * Saves a container's logs and removes it, and the volumes of chuggy's
- * runtime it was started through with it. A container whose logs could not
- * be saved is left for the next pass to try again, rather than lost with
- * them, until `unsavedKept` says it has been kept long enough.
+ * runtime it was started through with it. A job's workspace goes only where
+ * the job ended clean, as `keptWorkspace.mjs` says, which its record is
+ * copied out first to tell; one of a container the engine no longer has is
+ * kept with nothing to save or remove. A container whose logs could not be
+ * saved is left for the next pass to try again, rather than lost with them,
+ * until `unsavedKept` says it has been kept long enough.
  *
  * @param {State} state
  * @param {PoolContainer} container
  * @param {string} why
  */
 async function retired(state, container, why) {
+  const copied =
+    container.kind === "Job"
+      ? await workspaceRecordCopied(state, container)
+      : undefined;
+  if (copied?.gone === true) {
+    await workspaceKept(
+      state,
+      container,
+      "its container was gone",
+      copied.read,
+    );
+    await runtimeVolumesRemoved(state, container.name, [
+      container.runtimeVolume,
+    ]);
+    return;
+  }
   const saved = await savedLogs(state, container);
   if ("why" in saved && unsavedKept(state, container, why, saved.why)) return;
-  const removed = await state.seams.engine.exec(removeArgv(container.id));
+  const keptWhy =
+    copied === undefined
+      ? undefined
+      : keptWorkspaceWhy(retiredUnclean(container, why), copied.read);
+  const removed = await state.seams.engine.exec(
+    removeArgv(container.id, keptWhy !== undefined),
+  );
   if (removed.code === 0) state.logFailures.delete(container.id);
   const kept = "file" in saved ? `logs saved to ${saved.file}` : "logs lost";
   state.seams.log(
@@ -900,12 +1054,14 @@ async function retired(state, container, why) {
       ? `${container.name} ${why}; ${kept}, container removed`
       : `${container.name} ${why}; ${kept}, not removed: ${engineFailureLine(removed)}`,
   );
-  if (removed.code === 0) retiredRan(state, container);
-  if (removed.code === 0)
-    await runtimeVolumesRemoved(state, container.name, [
-      container.runtimeVolume,
-      container.workspaceVolume,
-    ]);
+  if (removed.code !== 0) return;
+  retiredRan(state, container);
+  await runtimeVolumesRemoved(state, container.name, [
+    container.runtimeVolume,
+    ...(keptWhy === undefined ? [container.workspaceVolume] : []),
+  ]);
+  if (keptWhy !== undefined && copied !== undefined)
+    await workspaceKept(state, container, keptWhy, copied.read);
 }
 
 /**
@@ -1237,6 +1393,8 @@ async function heldAssignments(state) {
     await diskFloorHeld(state.disk, {
       ...state.seams,
       reclaimed: (signal, made) => state.images.reclaimed(signal, made),
+      kept: async () =>
+        (await keptWorkspacesRecorded(state.settings.logDir)).length,
       killed: async (why) => {
         const killed = await diskLowKilled(state, running, why);
         if (killed !== undefined) held.delete(killed);
@@ -2016,6 +2174,7 @@ async function runtimeFilled(state, placement, runtime, platform) {
           poolLabelValue(settings.pool),
           placement.assignment,
           volumes.fill,
+          volume === volumes.workspace,
         ),
       );
       if (created.code !== 0)
@@ -3139,4 +3298,32 @@ export function containerBackend(settings, seams) {
       await state.images.settled();
     },
   };
+}
+
+/**
+ * The operator's listing of the workspace volumes a container runner kept, as
+ * `keptWorkspacesListed` lines them: each one recorded in `logDir`, and each
+ * no container uses that no record names. Their sizes are docker's to say;
+ * podman's are unknown. A record of a host job's directory is the host
+ * backend's to list.
+ *
+ * @param {"docker" | "podman"} engineName
+ * @param {Engine} engine
+ * @param {string} logDir
+ */
+export async function containerKeptWorkspaces(engineName, engine, logDir) {
+  const kept = (await keptWorkspacesRecorded(logDir)).filter(
+    ({ workspace }) => !isAbsolute(workspace),
+  );
+  const listed = await engine.exec(keptVolumesArgv());
+  const usage =
+    engineName === "docker"
+      ? await engine.exec(dockerDiskUsageArgv())
+      : undefined;
+  return keptWorkspacesListed(
+    kept,
+    (usage?.code === 0 ? dockerDiskUsage(usage.stdout)?.volumes : undefined) ??
+      new Map(),
+    listed.code === 0 ? listedIds(listed) : [],
+  );
 }
