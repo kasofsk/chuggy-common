@@ -3,6 +3,7 @@ import test from "node:test";
 import { setImmediate } from "node:timers";
 
 import {
+  chuggyToolCapabilities,
   chuggyToolServerName,
   chuggyToolTimeoutMs,
 } from "@chuggy/worker-contract/sessionTools";
@@ -123,6 +124,38 @@ test("a person's agent is given every project tool and no decision tool, under o
   assert.notEqual(context.turn(), first);
 });
 
+test("a person's agent is given every lead settings and placement tool", () => {
+  const context = localToolContext({
+    site: "https://chuggy.test",
+    tenant: "vteng",
+    project: "chuggy",
+    version: "1",
+    signIn: signInOf(["token"]),
+  });
+  const { registered, sdk } = sdkOf();
+  localToolServer(context, sdk);
+  const served = new Set(registered.map(({ name }) => name));
+
+  assert.ok(chuggyToolCapabilities.ProjectSettings.length > 0);
+  for (const tool of chuggyToolCapabilities.ProjectSettings)
+    assert.ok(served.has(tool), tool);
+});
+
+test("the server's instructions say how to change the lead's prompt and move it onto the subsidized lead", () => {
+  const instructions = localToolInstructions({
+    tenant: "vteng",
+    project: "chuggy",
+  });
+  assert.match(
+    instructions,
+    /^To change the lead's prompt: read_docs the page "Writing a project's lead prompt", then read_lead_settings and update_lead_settings\.$/mu,
+  );
+  assert.match(
+    instructions,
+    /^To move the lead onto the subsidized lead: read_docs the page "The subsidized lead", then update_placement\.$/mu,
+  );
+});
+
 test("the server tells the agent the docs are behind read_docs, index first", () => {
   const context = localToolContext({
     site: "https://chuggy.test",
@@ -203,7 +236,7 @@ test("the server's instructions name the filing recipe's tools in order, then wh
   assert.match(instructions, /^2\. list_repositories: [^\n]*`fileable`/mu);
   assert.match(
     instructions,
-    /Releasing starts nothing: [^.]*lead dispatches it[^.]*, or a person who may dispatch does\.$/u,
+    /Releasing starts nothing: [^.]*lead dispatches it[^.]*, or a person who may dispatch does\.$/mu,
   );
   assert.match(
     instructions,

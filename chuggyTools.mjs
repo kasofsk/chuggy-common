@@ -73,7 +73,9 @@
  * and otherwise an object or an array as the outline of its entries and a
  * string cut to fit, each read on by `offset`. `initialize_draft` draws its
  * route's body under the same bound, since that body carries the canonical
- * too.
+ * too. `read_lead_settings` answers a project's lead settings the same way,
+ * its body the document, since its texts and allowlists can far outweigh
+ * one answer.
  *
  * ANOTHER IS AN EPIC, ANSWERED WITH ITS DESCRIPTION CUT where it is larger than
  * one answer. Its route answers the description whole, bounded by what an epic
@@ -82,12 +84,15 @@
  * fits, and `revise_epic` sent no `description` keeps the one the epic holds,
  * so a long one never has to pass through the model to survive a revision.
  *
- * THREE ARE ANSWERED RESHAPED. `list_repositories` adds to each row whether a
+ * SOME ARE ANSWERED RESHAPED. `list_repositories` adds to each row whether a
  * ticket may be filed in it, read from that row alone, and `initialize_draft`
  * leaves out the configuration's `canonical`, which `read_configuration`
  * answers, and its dependency candidates, which are chosen from `list_tickets`;
  * every other field of theirs is as the route answered it. `list_configurations`
- * answers only what a draft is filed against.
+ * answers only what a draft is filed against. `update_lead_settings` answers a
+ * 200 and a `SettingsRevisionConflict` as their status, code and the revision
+ * the settings are now at, since both carry the whole settings, and every
+ * other answer as the API gave it.
  *
  * THE LAST IS AN IMAGE, ANSWERED AS THE FILE IT WAS WRITTEN TO, never as its
  * bytes. Its route answers them as base64, bounded by the largest upload rather
@@ -127,6 +132,14 @@
  * relayed unaltered. `revise_epic` reads it only when sent no `description`, and
  * writes the one the epic holds against the revision the model gave, so an epic
  * that has moved is still refused as stale and never retried.
+ *
+ * BOTH SETTINGS WRITES READ FIRST, and neither retries. `update_lead_settings`
+ * writes the whole override set read, with what the call sets and clears, under
+ * the revision the model gave, so a field the call does not name survives a
+ * write without passing through the model, and settings that moved since the
+ * model read them are refused as stale. `update_placement` writes the routes
+ * read with the ones the call names, and always names the lead's offering,
+ * since the API keeps the stored one for an offering left out, not the one read.
  *
  * WHAT A PROJECT TOOL SENDS IS SCRUBBED. Its arguments are the model's, and the
  * model has read whatever its shell could, so every string of them, a key's
@@ -177,6 +190,7 @@ import {
   chuggyToolDispatchViewResponseBytesMax,
   chuggyToolEpicViewResponseBytesMax,
   chuggyToolImageResponseBytesMax,
+  chuggyToolLeadSettingsResponseBytesMax,
   chuggyToolNames,
   chuggyToolPrefix,
   chuggyToolResponseBytesMax,
@@ -194,10 +208,13 @@ import {
   epicTicketsMax,
   epicTitleCharsMax,
   imageMediaTypes,
+  leadOfferings,
   nativeHttpMediaType,
   nativeHttpPageItemsMax,
+  placementRoutes,
   projectArtifactEncoding,
   selectorHistoryLimitMax,
+  selectorProjectOverridesSchema,
   threadOfferReleaseSchema,
   threadOfferRevokeSchema,
   threadTurnsAnsweredMax,
@@ -759,9 +776,9 @@ function chuggyToolAnswerFitting(total, compose) {
   return low;
 }
 
-/** Why `path` walks out of the document at its `depth`th key, naming what is there instead. */
-function readConfigurationMissing(path, depth, value) {
-  const opening = `the configuration holds no ${JSON.stringify(path[depth])} at ${JSON.stringify(path.slice(0, depth))}`;
+/** Why `path` walks out of the document at its `depth`th key, naming what is there instead, `holds` saying whose document it is. */
+function readConfigurationMissing(holds, path, depth, value) {
+  const opening = `${holds} no ${JSON.stringify(path[depth])} at ${JSON.stringify(path.slice(0, depth))}`;
   const kind = readConfigurationKind(value);
   if (Array.isArray(value))
     return value.length === 0
@@ -842,17 +859,21 @@ function readConfigurationCut(head, path, value, offset) {
 }
 
 /**
- * The answer at `path` in a configuration's parsed canonical `document`: the
- * value whole where it fits, an object or an array too large as its outline,
- * and a string too long as a piece of it, both read on from by `offset`. A
- * `path` the document does not hold, or an `offset` past the end, is refused.
+ * The answer at `path` in a parsed `document`, a configuration's canonical or
+ * a body read like one, whose refusal `holds` names: the value whole where it
+ * fits, an object or an array too large as its outline, and a string too long
+ * as a piece of it, both read on from by `offset`. A `path` the document does
+ * not hold, or an `offset` past the end, is refused.
  */
-function readConfigurationAnswer(status, document, path, offset = 0) {
+function readConfigurationAnswer(holds, status, document, path, offset = 0) {
   let value = document;
   for (const [depth, key] of path.entries()) {
     const held = readConfigurationChild(value, key);
     if (held === undefined)
-      return answered(readConfigurationMissing(path, depth, value), true);
+      return answered(
+        readConfigurationMissing(holds, path, depth, value),
+        true,
+      );
     value = held.child;
   }
   const head = `HTTP ${String(status)}\n`;
@@ -883,30 +904,63 @@ function readConfigurationDocument(text) {
   }
 }
 
+/** A body that is itself the document a `path` walks, parsed, or nothing where it is not a JSON object. */
+function readLeadSettingsDocument(text) {
+  try {
+    const document = JSON.parse(text);
+    return document !== null && typeof document === "object"
+      ? { document }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** What each read by `path` draws its body under, parses it as, and calls it whole, as a kind, and as what holds a `path`. */
+const readAtPathRoutes = {
+  configuration: {
+    bytesMax: chuggyToolDispatchViewResponseBytesMax,
+    documentOf: readConfigurationDocument,
+    whole: "this configuration",
+    what: "a configuration",
+    holds: "the configuration holds",
+  },
+  selectorSettings: {
+    bytesMax: chuggyToolLeadSettingsResponseBytesMax,
+    documentOf: readLeadSettingsDocument,
+    whole: "these lead settings",
+    what: "lead settings",
+    holds: "the lead settings hold",
+  },
+};
+
 /**
- * One configuration revision. With no `path`, a body that fits one answer is
- * answered verbatim; otherwise its canonical is parsed and
- * answered at `path` by `readConfigurationAnswer`. It is drawn under a bound
- * its whole canonical fits, which the route's own body bound is not.
+ * One body read by `path`, as `readAtPathRoutes` names its `read`. With no
+ * `path`, a body that fits one answer is answered verbatim; otherwise its
+ * document is parsed and answered at `path` by `readConfigurationAnswer`. It
+ * is drawn under a bound its whole document fits, which the route's own body
+ * bound is not.
  */
-async function readConfiguration(context, route, path, offset) {
-  const body = await drawn(
-    context,
-    route,
-    chuggyToolDispatchViewResponseBytesMax,
-    "this configuration",
-  );
+async function readAtPath(context, path, read, at, offset) {
+  const { bytesMax, documentOf, whole, what, holds } = readAtPathRoutes[read];
+  const body = await drawn(context, path, bytesMax, whole);
   if (body.refused !== undefined) return body.refused;
   const verbatim = `HTTP ${String(body.status)}\n${body.text}`;
-  if (path === undefined && chuggyToolAnswerFits(verbatim))
+  if (at === undefined && chuggyToolAnswerFits(verbatim))
     return answered(verbatim);
-  const parsed = readConfigurationDocument(body.text);
+  const parsed = documentOf(body.text);
   return parsed === undefined
     ? answered(
-        `the configuration route answered HTTP ${String(body.status)} with a body that is not a configuration as the contract answers it.`,
+        `the ${read} route answered HTTP ${String(body.status)} with a body that is not ${what} as the contract answers it.`,
         true,
       )
-    : readConfigurationAnswer(body.status, parsed.document, path ?? [], offset);
+    : readConfigurationAnswer(
+        holds,
+        body.status,
+        parsed.document,
+        at ?? [],
+        offset,
+      );
 }
 
 /** Why a ticket filed in a listed binding would not run, or nothing where it would. */
@@ -1426,6 +1480,159 @@ async function epicMembersChanged(context, epic, change, unchanged) {
   }
 }
 
+/** Every field a project's lead settings may override, each of which update_lead_settings sets or clears. */
+const updateLeadSettingsFields = Object.keys(
+  selectorProjectOverridesSchema.shape,
+);
+
+/** Why a settings write is refused before it reads anything, or nothing where it may go on: `set` is the contract's overrides, and every field is named once. */
+function updateLeadSettingsRefusal(set, clear) {
+  if (Object.keys(set).length === 0 && clear.length === 0)
+    return "update_lead_settings names no field to set or clear, so nothing was read or written.";
+  const checked = selectorProjectOverridesSchema.safeParse(set);
+  if (!checked.success)
+    return `\`set\` is not overrides the contract admits, so nothing was read or written: ${checked.error.message}`;
+  const both = clear.filter((field) => Object.hasOwn(set, field));
+  return both.length === 0
+    ? undefined
+    : `${JSON.stringify(both)} are named in both \`set\` and \`clear\`, so nothing was read or written.`;
+}
+
+/** The overrides a settings read holds, or nothing where its body is not settings as the route answers them. */
+function updateLeadSettingsHeld(text) {
+  try {
+    const checked = selectorProjectOverridesSchema.safeParse(
+      JSON.parse(text)?.overrides,
+    );
+    return checked.success ? checked.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A settings write's answer: a 200 and a 409 `SettingsRevisionConflict`, which
+ * carry the whole settings, as their status, their code and the revision the
+ * settings are now at; every other as the API answered it.
+ */
+function updateLeadSettingsAnswer(status, text) {
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = undefined;
+  }
+  const head = `HTTP ${String(status)}\n`;
+  if (status === 200 && Number.isSafeInteger(body?.revision))
+    return answered(`${head}${JSON.stringify({ revision: body.revision })}`);
+  const code = body?.error?.code;
+  if (
+    status === 409 &&
+    code === "SettingsRevisionConflict" &&
+    Number.isSafeInteger(body?.settings?.revision)
+  )
+    return answered(
+      `${head}${JSON.stringify({ code, revision: body.settings.revision })}`,
+      true,
+    );
+  return answered(`${head}${text}`, status >= 400);
+}
+
+/**
+ * The lead settings written whole: the override set read, with `set` applied
+ * and `clear` dropped, under the `expectedRevision` the model gave. A set that
+ * moved since the model read it is refused as stale, a field neither names
+ * keeps what the settings hold without passing through the model, and nothing
+ * is asked again.
+ */
+async function updateLeadSettings(context, args) {
+  const { expectedRevision, set = {}, clear = [] } = args;
+  const refused = updateLeadSettingsRefusal(set, clear);
+  if (refused !== undefined) return answered(refused, true);
+  const path = projectPath(context, "selectorSettings");
+  const body = await drawn(
+    context,
+    path,
+    chuggyToolLeadSettingsResponseBytesMax,
+    "these lead settings",
+  );
+  if (body.refused !== undefined) return body.refused;
+  const held = updateLeadSettingsHeld(body.text);
+  if (held === undefined)
+    return answered(
+      `the selectorSettings route answered HTTP ${String(body.status)} with a body that is not lead settings as the contract answers them.`,
+      true,
+    );
+  const overrides = { ...held, ...set };
+  for (const field of clear) delete overrides[field];
+  const response = await context.request(context.task, context.bearer, path, {
+    method: "PUT",
+    headers: { "content-type": nativeHttpMediaType },
+    body: JSON.stringify({ expectedRevision, overrides }),
+  });
+  const { text } = await chuggyBoundedBody(
+    response,
+    chuggyToolLeadSettingsResponseBytesMax,
+  );
+  return updateLeadSettingsAnswer(response.status, text);
+}
+
+/** The routes and the offering a placement read holds, or nothing where its body is not a placement as the route answers one. */
+function updatePlacementHeld(text) {
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  const thread = body?.thread?.route;
+  const lead = body?.lead?.route;
+  const leadOffering = body?.leadOffering;
+  return placementRoutes.includes(thread) &&
+    placementRoutes.includes(lead) &&
+    leadOfferings.includes(leadOffering)
+    ? { thread, lead, leadOffering }
+    : undefined;
+}
+
+/**
+ * Where the project's threads and lead run, written whole from the placement
+ * read with what the call names in place. The offering is always named,
+ * because one left out is the row's stored one rather than the one read, and
+ * a lead moved to `Pool` with none named runs on its own.
+ */
+async function updatePlacement(context, args) {
+  if (
+    args.thread === undefined &&
+    args.lead === undefined &&
+    args.leadOffering === undefined
+  )
+    return answered(
+      "update_placement names no field to change, so nothing was read or written.",
+      true,
+    );
+  const path = projectPath(context, "sessionPlacement");
+  const body = await drawn(
+    context,
+    path,
+    chuggyToolResponseBytesMax,
+    "this placement",
+  );
+  if (body.refused !== undefined) return body.refused;
+  const held = updatePlacementHeld(body.text);
+  if (held === undefined)
+    return answered(
+      `the sessionPlacement route answered HTTP ${String(body.status)} with a body that is not a placement as the contract answers one.`,
+      true,
+    );
+  const ownOffering = args.lead === "Pool" ? "Own" : held.leadOffering;
+  return write(context, path, "PUT", {
+    thread: args.thread ?? held.thread,
+    lead: args.lead ?? held.lead,
+    leadOffering: args.leadOffering ?? ownOffering,
+  });
+}
+
 /**
  * The parameters several tools share, each describing itself, so every tool
  * that takes one publishes the sentence; a tool where one means something
@@ -1544,6 +1751,22 @@ const transcriptStream = (z, read) =>
       `One of the \`streams\` ${read} answers, by its \`stream\`; left out, the session's own agent's stream.`,
     )
     .optional();
+/** What a read by `path` answers there, which read_configuration and read_lead_settings both say. */
+const chuggyPathReadDescription =
+  "the value there is answered whole where it fits; an object or an array that does not is answered as its outline, each entry's key with its child whole where that is short and otherwise the child's kind, entries and length in characters; a string that does not is answered cut to fit; and either says how much is left, which `offset` reads on from.";
+/** The `path` and `offset` a read by `path` takes, `path` described as walking into what `into` names. */
+const pathArguments = (z, into) => ({
+  path: z
+    .array(z.union([z.string().max(readConfigurationKeyCharsMax), count(z)]))
+    .max(readConfigurationPathKeysMax)
+    .describe(into)
+    .optional(),
+  offset: count(z)
+    .describe(
+      "Where an outline's entries or a cut string's characters read on from, as the previous answer at the same `path` said; left out, the start.",
+    )
+    .optional(),
+});
 /** A position in a mailbox, which is counted from one and never from zero. */
 const ordinal = (z) => z.number().int().min(1);
 /**
@@ -1666,28 +1889,21 @@ export const chuggyProjectTools = [
   {
     name: "read_configuration",
     description:
-      "One configuration revision's canonical document, as a draft is authored against it. Call it for who does a ticket's work and what evaluates it. `canonical` is the stored document as JSON text, and its `worker.mode` is who does the work of a ticket released against it: the agent, and what that agent is started with, a model where the configuration names one. Its evaluation stages run in the order listed and a failed stage ends evaluation, while the evaluators of one stage run in parallel; in a catalog each evaluator of a plan stage names its own workload, so review lenses that should run side by side belong in one stage. A configuration larger than one answer is read by `path`, keys walking into the parsed `canonical`: the value there is answered whole where it fits; an object or an array that does not is answered as its outline, each entry's key with its child whole where that is short and otherwise the child's kind, entries and length in characters; a string that does not is answered cut to fit; and either says how much is left, which `offset` reads on from. With no `path`, the route's body is answered as it is where it fits; where it does not, the parsed `canonical` is answered whole where that fits and otherwise as its outline. A `path` the document does not hold is refused, naming the keys where it stopped.",
+      "One configuration revision's canonical document, as a draft is authored against it. Call it for who does a ticket's work and what evaluates it. `canonical` is the stored document as JSON text, and its `worker.mode` is who does the work of a ticket released against it: the agent, and what that agent is started with, a model where the configuration names one. Its evaluation stages run in the order listed and a failed stage ends evaluation, while the evaluators of one stage run in parallel; in a catalog each evaluator of a plan stage names its own workload, so review lenses that should run side by side belong in one stage. A configuration larger than one answer is read by `path`, keys walking into the parsed `canonical`: " +
+      chuggyPathReadDescription +
+      " With no `path`, the route's body is answered as it is where it fits; where it does not, the parsed `canonical` is answered whole where that fits and otherwise as its outline. A `path` the document does not hold is refused, naming the keys where it stopped.",
     shape: (z) => ({
       revision: revision(z),
-      path: z
-        .array(
-          z.union([z.string().max(readConfigurationKeyCharsMax), count(z)]),
-        )
-        .max(readConfigurationPathKeysMax)
-        .describe(
-          'The keys walking into the parsed `canonical`, an array\'s entries by index, such as ["workloads", "review", "prompt"]; left out, the whole configuration.',
-        )
-        .optional(),
-      offset: count(z)
-        .describe(
-          "Where an outline's entries or a cut string's characters read on from, as the previous answer at the same `path` said; left out, the start.",
-        )
-        .optional(),
+      ...pathArguments(
+        z,
+        'The keys walking into the parsed `canonical`, an array\'s entries by index, such as ["workloads", "review", "prompt"]; left out, the whole configuration.',
+      ),
     }),
     call: (context, { revision: given, path, offset }) =>
-      readConfiguration(
+      readAtPath(
         context,
         projectPath(context, "configuration", { revision: given }),
+        "configuration",
         path,
         offset,
       ),
@@ -2297,6 +2513,75 @@ export const chuggyProjectTools = [
     description: `Submits the dispatch of one released ticket, on your owner's word only, which starts its work now rather than when the lead chooses it. It is your owner's dispatch, so where they may not dispatch in this project the submission is answered 404, though the ticket exists. Only a Pending ticket whose dependencies are all Done can be dispatched, and any other is answered without anything being submitted. A ticket that moved between this tool reading it and submitting is refused (TicketChanged), so call again. ${chuggySubmissionDescription}`,
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) => dispatchTicket(context, args.ticket),
+  },
+  {
+    name: "read_lead_settings",
+    description: `This project's lead settings: what the project sets for its lead, and what the lead runs with. Call it before update_lead_settings, and for why the lead is paused or how it is prompted. \`overrides\` is what the project sets, a field it leaves out taking the installation default; \`effective\` is what the lead runs with; \`revision\` is what update_lead_settings is written against. \`effective.installationMode\` Paused is a pause for the whole installation, which no project setting lifts. Reading and writing both need \`manageSelector\` in read_abilities, and without it the route answers 404. Settings larger than one answer are read by \`path\`, keys walking into the settings: ${chuggyPathReadDescription} With no \`path\`, the settings are answered whole where they fit and otherwise as their outline. A \`path\` the settings do not hold is refused, naming the keys where it stopped.`,
+    shape: (z) =>
+      pathArguments(
+        z,
+        'The keys walking into the settings, an array\'s entries by index, such as ["overrides", "basePrompt"]; left out, the whole settings.',
+      ),
+    call: (context, { path, offset }) =>
+      readAtPath(
+        context,
+        projectPath(context, "selectorSettings"),
+        "selectorSettings",
+        path,
+        offset,
+      ),
+  },
+  {
+    name: "update_lead_settings",
+    description: `Changes this project's lead settings, on your owner's word only. Call it after read_lead_settings, whose \`revision\` it is written against. It reads the settings and writes the whole override set back with \`set\` applied and \`clear\` dropped, so a field named in neither keeps what the settings hold, and a long text is never sent again. An edit takes effect at the lead's next decision. \`mode\` Running resumes the lead and Paused pauses it, but neither lifts a pause set for the whole installation, which read_lead_settings answers as \`effective.installationMode\`. A write needs \`manageSelector\` in read_abilities, and without it the route answers 404. read_docs's page "Writing a project's lead prompt" is how to write \`basePrompt\` and \`northStar\`. A write is answered as its status and the \`revision\` the settings are now at; 409 with the \`code\` SettingsRevisionConflict is settings that moved since they were read, and is never asked again, so read them and decide again. Every other answer is the API's, its status and body unaltered: 409 AutomaticDispatchUnavailable, 503 SettingsWriteContended, which may be sent again, 404, and a body larger than the API takes.`,
+    shape: (z) => ({
+      expectedRevision: count(z).describe(
+        "The settings' `revision`, as read_lead_settings answers it.",
+      ),
+      set: anyObject(z)
+        .describe(
+          "The override fields to write, each replacing that field whole, `limits` included, as read_lead_settings answers `overrides`; left out, none. A set the contract does not admit is refused before anything is read.",
+        )
+        .optional(),
+      clear: z
+        .array(z.enum(updateLeadSettingsFields))
+        .max(updateLeadSettingsFields.length)
+        .describe(
+          "The override fields to return to the installation default; left out, none. A field named here and in `set` is refused.",
+        )
+        .optional(),
+    }),
+    call: updateLeadSettings,
+  },
+  {
+    name: "read_placement",
+    description:
+      "Where this project's threads and its lead run, and what decided each. Call it before update_placement. `thread` and `lead` are each a `route` and its `source`; `leadOffering` is how the lead runs on its route, and `leadOfferings` the offerings this project may choose; `choices` are the routes you may choose, none where you may not administer the project; `runners` says whether runners would take each.",
+    shape: () => ({}),
+    call: (context) => read(context, projectPath(context, "sessionPlacement")),
+  },
+  {
+    name: "update_placement",
+    description: `Changes where this project's threads and its lead run, on your owner's word only. It reads the placement and writes it whole, each field the one given or else the one read. chuggy's subsidized lead is \`lead\` "InCluster" with \`leadOffering\` "Subsidized", and the project's own runners are \`lead\` "Pool"; read_placement's \`leadOfferings\` says which offerings the project may choose. A write needs \`administer\` in read_abilities. read_docs's page "The subsidized lead" says what changes. The answer is the API's, its status and body unaltered, a refusal included: 403 HostedRunsNotGranted where a route InCluster needs the tenant's hosted grant, and 422 LeadOfferingNotAdmitted where the deployment does not admit the offering on that route.`,
+    shape: (z) => ({
+      thread: z
+        .enum(placementRoutes)
+        .describe(
+          "Where the project's threads run; left out, where they run now.",
+        )
+        .optional(),
+      lead: z
+        .enum(placementRoutes)
+        .describe("Where the project's lead runs; left out, where it runs now.")
+        .optional(),
+      leadOffering: z
+        .enum(leadOfferings)
+        .describe(
+          "How the lead runs on its route; left out, the offering it has now, or Own where `lead` is Pool.",
+        )
+        .optional(),
+    }),
+    call: updatePlacement,
   },
 ];
 
