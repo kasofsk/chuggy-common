@@ -1308,7 +1308,8 @@ function sessionStagedMailbox(context, { request, wait: pause, now }) {
 /**
  * The runtime this session speaks through, opened once over the mailbox's own
  * stream of turns. The checkout reaches it only as `cwd`, so a session with no
- * tree opens exactly the same runtime with the bare workspace under it.
+ * tree opens the same runtime over the bare workspace, or over
+ * `sessionTreeEmpty` where it runs on its own prompt.
  */
 async function sessionRuntime(
   context,
