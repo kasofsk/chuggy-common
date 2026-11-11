@@ -72,6 +72,7 @@ export const localToolCapabilities = [
   "DraftAuthor",
   "DraftOriginate",
   "TicketDispatch",
+  "ProjectSettings",
 ];
 
 /** What a submitted command made again answers here, where every call is a turn of its own. */
@@ -91,7 +92,9 @@ To file a ticket:
 6. read_draft: the draft as filed.
 7. release_draft.
 8. read_operation: every command is submitted, and this is how its outcome is read.
-Releasing starts nothing: the ticket waits Pending until the project's lead dispatches it, once its dependencies are Done, or a person who may dispatch does.`;
+Releasing starts nothing: the ticket waits Pending until the project's lead dispatches it, once its dependencies are Done, or a person who may dispatch does.
+To change the lead's prompt: read_docs the page "Writing a project's lead prompt", then read_lead_settings and update_lead_settings.
+To move the lead onto the subsidized lead: read_docs the page "The subsidized lead", then update_placement.`;
 }
 
 const localToolUnauthorizedStatus = 401;

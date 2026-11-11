@@ -8,7 +8,10 @@ import test from "node:test";
 import { setImmediate } from "node:timers";
 import { URL } from "node:url";
 
-import { sessionStoreBatchBytesMax } from "@chuggy/worker-contract/sessionPlane";
+import {
+  sessionCapabilities,
+  sessionStoreBatchBytesMax,
+} from "@chuggy/worker-contract/sessionPlane";
 import {
   agenticRefusalsAnsweredMax,
   allChuggyTools,
@@ -18,6 +21,7 @@ import {
   chuggyToolDocsResponseBytesMax,
   chuggyToolEpicViewResponseBytesMax,
   chuggyToolImageResponseBytesMax,
+  chuggyToolLeadSettingsResponseBytesMax,
   chuggyToolPrefix,
   chuggyToolResponseBytesMax,
   chuggyToolRunErrorResponseBytesMax,
@@ -34,6 +38,7 @@ import {
   runTranscriptBatchBytesMax,
   runTranscriptPageBatchesMax,
   selectorHistoryLimitMax,
+  selectorProjectOverridesSchema,
   threadTurnsAnsweredMax,
   ticketLandingsAnsweredMax,
 } from "@chuggy/worker-contract/sessionTools";
@@ -59,7 +64,7 @@ import {
   chuggyToolServer,
   chuggyToolSignal,
   chuggyTranscriptBodyBytesMax,
-  readConfigurationChildCharsMax,
+  readAtPathChildCharsMax,
   sessionAllowedTools,
   sessionBuiltInTools,
   sessionCapabilityTools,
@@ -1655,7 +1660,7 @@ test("an outline too long for one answer is read to its end by offset", async ()
     ]),
   );
   for (const child of Object.values(workloads))
-    assert.ok(JSON.stringify(child).length <= readConfigurationChildCharsMax);
+    assert.ok(JSON.stringify(child).length <= readAtPathChildCharsMax);
   const { call } = configurationToolsOf({ version: 2, workloads });
 
   const pieces = await configurationReadOn(
@@ -3498,6 +3503,51 @@ const epicContentKeptGiven = {
   tickets: epicContentGiven.tickets,
 };
 
+/** A project's lead settings as the route answers them, `overrides` replacing what the project sets. */
+function leadSettingsRead(overrides = leadSettingsOverrides, revision = 5) {
+  const effective = {
+    revision: 9,
+    projectRevision: revision,
+    mode: "Running",
+    installationMode: "Running",
+    dispatchMode: "Automatic",
+    basePrompt: "Base.",
+    northStar: "North.",
+    threadStandingRules: "Rules.",
+    modelAllowlist: [],
+    toolAllowlist: [],
+    limits: {},
+    installationLimits: {},
+    operationalContextMaxAgeMs: 60_000,
+    leadOffering: "Own",
+  };
+  return {
+    partition: { tenant: task.tenant, project: task.project },
+    revision,
+    overrides,
+    effective,
+  };
+}
+
+/** What a project's settings override, each kind of field among them. */
+const leadSettingsOverrides = {
+  northStar: "Ship the worker core.",
+  basePrompt: "You are the lead.",
+  mode: "Running",
+  modelAllowlist: ["claude-opus-5-5"],
+  limits: { tokensPerDecision: 100, toolCallsPerDecision: 20 },
+};
+
+/** A project's placement as the route answers it. */
+const placementRead = {
+  thread: { route: "InCluster", source: "Default" },
+  lead: { route: "InCluster", source: "Project" },
+  leadOffering: "Subsidized",
+  leadOfferings: ["Own", "Subsidized"],
+  choices: ["InCluster", "Pool"],
+  runners: { mine: "Unregistered", project: "Live" },
+};
+
 /** What every project tool is driven with where a suite drives them all. */
 const projectToolArguments = {
   list_tickets: {},
@@ -3556,6 +3606,10 @@ const projectToolArguments = {
   revise_epic: { epic: 3, expectedRevision: 5, ...epicContentGiven },
   add_epic_tickets: { epic: 3, tickets: [9] },
   remove_epic_tickets: { epic: 3, tickets: [4] },
+  read_lead_settings: {},
+  update_lead_settings: { expectedRevision: 5, set: { mode: "Paused" } },
+  read_placement: {},
+  update_placement: { lead: "Pool" },
 };
 
 /** What every member tool is driven with where a suite drives them all. */
@@ -3806,7 +3860,11 @@ test("every project tool a session holds asks its route, read_docs the docs host
                       ? JSON.stringify(epicRead)
                       : path.includes("/draft-initializations/")
                         ? JSON.stringify(draftInitialized)
-                        : "{}",
+                        : path.endsWith("/selector-settings")
+                          ? JSON.stringify(leadSettingsRead())
+                          : path.endsWith("/session-placement")
+                            ? JSON.stringify(placementRead)
+                            : "{}",
       }),
     );
 
@@ -3818,6 +3876,8 @@ test("every project tool a session holds asks its route, read_docs the docs host
         read_docs: 0,
         add_epic_tickets: 2,
         remove_epic_tickets: 2,
+        update_lead_settings: 2,
+        update_placement: 2,
       }[name] ?? 1;
     assert.equal(api.calls.length, asked, name);
     assert.equal(docs.length, name === "read_docs" ? 1 : 0, name);
@@ -4709,4 +4769,417 @@ test("the epic tools are described: the writes name their refusals and the abili
     parameterDescribed("create_draft", "epic"),
     /refused 409 .*MissingEpic, ArchivedEpic, ManyTickets or LargeContent/,
   );
+});
+
+/** The settings route of the suite's project. */
+const leadSettingsPath =
+  "/api/v1/tenants/vteng/projects/chuggy/selector-settings";
+
+/** The placement route of the suite's project. */
+const placementPath = "/api/v1/tenants/vteng/projects/chuggy/session-placement";
+
+/** The tools with the settings route reading `read` and writing whatever `written` answers, which is a 200 at revision 6 where it is left out. */
+function leadSettingsToolsOf(read, written) {
+  return toolsOf({}, (_path, init) =>
+    (init?.method ?? "GET") === "GET"
+      ? { status: 200, body: JSON.stringify(read) }
+      : (written?.(init) ?? {
+          status: 200,
+          body: JSON.stringify(
+            leadSettingsRead(JSON.parse(init.body).overrides, 6),
+          ),
+        }),
+  );
+}
+
+/** The largest count in `1..2**20` that `admits` admits, which a schema's own bound is found by. */
+function admittedMost(admits) {
+  let low = 1;
+  let high = 2 ** 20;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (admits(middle)) low = middle;
+    else high = middle - 1;
+  }
+  return low;
+}
+
+/**
+ * The heaviest settings the contract admits: every text and allowlist of the
+ * overrides and of the effective settings at the most its schema admits, each
+ * character one JSON escapes into six.
+ */
+function leadSettingsHeaviest() {
+  const { basePrompt, modelAllowlist } = selectorProjectOverridesSchema.shape;
+  const heavy = (chars) => "\u0001".repeat(chars);
+  const text = heavy(
+    admittedMost((chars) => basePrompt.safeParse(heavy(chars)).success),
+  );
+  const nameChars = admittedMost(
+    (chars) => modelAllowlist.safeParse([heavy(chars)]).success,
+  );
+  const allowlist = Array.from(
+    {
+      length: admittedMost(
+        (names) =>
+          modelAllowlist.safeParse(Array(names).fill(heavy(nameChars))).success,
+      ),
+    },
+    (_, index) => `${heavy(nameChars - 1)}${String(index % 10)}`,
+  );
+  const texts = {
+    basePrompt: text,
+    northStar: text,
+    threadStandingRules: text,
+    modelAllowlist: allowlist,
+    toolAllowlist: allowlist,
+  };
+  const settings = leadSettingsRead({
+    ...leadSettingsOverrides,
+    ...texts,
+  });
+  assert.ok(
+    selectorProjectOverridesSchema.safeParse(settings.overrides).success,
+  );
+  return { ...settings, effective: { ...settings.effective, ...texts } };
+}
+
+/** Whether a read_lead_settings answer at `path` is a piece of the value there, rather than the value whole. */
+function leadSettingsPiece(read, path) {
+  return (
+    read !== null &&
+    typeof read === "object" &&
+    typeof read.note === "string" &&
+    JSON.stringify(read.path) === JSON.stringify(path) &&
+    ("outline" in read || "text" in read)
+  );
+}
+
+/**
+ * The value at `path` in the settings, read by `path` and `offset` alone: a
+ * piece read on until nothing is left, and an outline's entry whose child is
+ * not written whole read at its own `path`. `budget.reads` bounds the reads.
+ */
+async function leadSettingsWalked(call, path, budget) {
+  const entries = [];
+  let text = "";
+  let offset;
+  for (;;) {
+    budget.reads -= 1;
+    assert.ok(budget.reads >= 0, "the reads never reached the end");
+    const read = configurationRead(
+      await call("read_lead_settings", { path, offset }),
+    );
+    if (!leadSettingsPiece(read, path)) return read;
+    assert.equal(read.offset, offset ?? 0);
+    if (read.kind === "string") {
+      text += read.text;
+      if (read.charsLeft === 0) return text;
+      offset = read.offset + read.text.length;
+      continue;
+    }
+    for (const entry of read.outline)
+      entries.push([
+        entry.key,
+        "value" in entry
+          ? entry.value
+          : await leadSettingsWalked(call, [...path, entry.key], budget),
+      ]);
+    if (read.entriesLeft === 0)
+      return read.kind === "array"
+        ? entries.map(([, value]) => value)
+        : Object.fromEntries(entries);
+    offset = read.offset + read.outline.length;
+  }
+}
+
+test("read_lead_settings answers the heaviest settings in pieces that fit, which read by path and offset make the whole", async () => {
+  const heaviest = leadSettingsHeaviest();
+  const body = JSON.stringify(heaviest);
+  assert.ok(Buffer.byteLength(body) > chuggyToolResponseBytesMax);
+  assert.ok(Buffer.byteLength(body) <= chuggyToolLeadSettingsResponseBytesMax);
+  const { api, call } = toolsOf({}, () => ({ status: 200, body }));
+
+  const outline = configurationRead(await call("read_lead_settings", {}));
+  assert.ok(leadSettingsPiece(outline, []));
+  assert.deepEqual(
+    outline.outline.map(({ key }) => key),
+    Object.keys(heaviest),
+  );
+  assert.deepEqual(
+    await leadSettingsWalked(call, [], { reads: 10_000 }),
+    heaviest,
+  );
+  assert.ok(api.calls.every(({ path }) => path === leadSettingsPath));
+  assert.ok(api.calls.every(({ method }) => method === "GET"));
+});
+
+test("read_lead_settings answers settings that fit as the route answered them, and a refusal unaltered", async () => {
+  const body = JSON.stringify(leadSettingsRead());
+  const fits = toolsOf({}, () => ({ status: 200, body }));
+  assert.equal(
+    textOf(await fits.call("read_lead_settings", {})),
+    `HTTP 200\n${body}`,
+  );
+  assert.deepEqual(
+    configurationRead(
+      await fits.call("read_lead_settings", { path: ["overrides", "limits"] }),
+    ),
+    leadSettingsOverrides.limits,
+  );
+  const missing = await fits.call("read_lead_settings", {
+    path: ["overrides", "leadModel"],
+  });
+  assert.equal(missing.isError, true);
+  assert.match(textOf(missing), /^the lead settings hold no "leadModel"/u);
+
+  const refusal = JSON.stringify({ error: { code: "NotFound", message: "n" } });
+  const hidden = toolsOf({}, () => ({ status: 404, body: refusal }));
+  const answer = await hidden.call("read_lead_settings", {});
+  assert.equal(textOf(answer), `HTTP 404\n${refusal}`);
+  assert.equal(answer.isError, true);
+});
+
+test("update_lead_settings keeps a field it is not sent, at its longest, drops one it clears and replaces limits whole, under the revision it was given", async () => {
+  const heaviest = leadSettingsHeaviest();
+  const { api, call } = leadSettingsToolsOf(heaviest);
+
+  const answer = await call("update_lead_settings", {
+    expectedRevision: 4,
+    set: { mode: "Paused", limits: { dispatchesPerDecision: 1 } },
+    clear: ["northStar"],
+  });
+
+  assert.equal(textOf(answer), `HTTP 200\n${JSON.stringify({ revision: 6 })}`);
+  assert.equal(answer.isError, undefined);
+  assert.deepEqual(
+    api.calls.map(({ method, path }) => [method, path]),
+    [
+      ["GET", leadSettingsPath],
+      ["PUT", leadSettingsPath],
+    ],
+  );
+  const kept = { ...heaviest.overrides };
+  delete kept.northStar;
+  assert.deepEqual(JSON.parse(api.calls[1].init.body), {
+    expectedRevision: 4,
+    overrides: {
+      ...kept,
+      mode: "Paused",
+      limits: { dispatchesPerDecision: 1 },
+    },
+  });
+});
+
+test("update_lead_settings relays settings that moved as their code and revision, and never writes again", async () => {
+  const conflict = {
+    error: {
+      code: "SettingsRevisionConflict",
+      message: "The selector settings moved under this write.",
+    },
+    settings: leadSettingsRead(leadSettingsOverrides, 7),
+    movedBy: { kind: "User", subject: "u-1" },
+  };
+  const { api, call } = leadSettingsToolsOf(leadSettingsRead(), () => ({
+    status: 409,
+    body: JSON.stringify(conflict),
+  }));
+
+  const answer = await call("update_lead_settings", {
+    expectedRevision: 5,
+    set: { mode: "Paused" },
+  });
+
+  assert.equal(
+    textOf(answer),
+    `HTTP 409\n${JSON.stringify({ code: "SettingsRevisionConflict", revision: 7 })}`,
+  );
+  assert.equal(answer.isError, true);
+  assert.deepEqual(
+    api.calls.map(({ method }) => method),
+    ["GET", "PUT"],
+  );
+});
+
+test("update_lead_settings relays every other answer of its write as the API gave it", async () => {
+  for (const [status, body] of [
+    [
+      409,
+      JSON.stringify({
+        error: { code: "AutomaticDispatchUnavailable", message: "a" },
+      }),
+    ],
+    [
+      503,
+      JSON.stringify({
+        error: {
+          code: "SettingsWriteContended",
+          message: "The request can be retried.",
+        },
+      }),
+    ],
+    [404, JSON.stringify({ error: { code: "NotFound", message: "n" } })],
+    [413, JSON.stringify({ error: { code: "BodyTooLarge", message: "b" } })],
+  ]) {
+    const { api, call } = leadSettingsToolsOf(leadSettingsRead(), () => ({
+      status,
+      body,
+    }));
+
+    const answer = await call("update_lead_settings", {
+      expectedRevision: 5,
+      clear: ["basePrompt"],
+    });
+
+    assert.equal(textOf(answer), `HTTP ${String(status)}\n${body}`);
+    assert.equal(answer.isError, true);
+    assert.equal(api.calls.length, 2, String(status));
+  }
+});
+
+test("a settings read the API refuses is relayed by update_lead_settings, which writes nothing", async () => {
+  const body = JSON.stringify({ error: { code: "NotFound", message: "n" } });
+  const { api, call } = toolsOf({}, () => ({ status: 404, body }));
+
+  const answer = await call("update_lead_settings", {
+    expectedRevision: 5,
+    set: { mode: "Paused" },
+  });
+
+  assert.equal(textOf(answer), `HTTP 404\n${body}`);
+  assert.deepEqual(
+    api.calls.map(({ method }) => method),
+    ["GET"],
+  );
+});
+
+test("each settings and placement tool's refusal sends no request", async () => {
+  const { api, call } = toolsOf();
+
+  for (const [name, args] of [
+    ["read_lead_settings", { path: [{}] }],
+    ["read_lead_settings", { offset: -1 }],
+    ["update_lead_settings", { expectedRevision: 5 }],
+    ["update_lead_settings", { expectedRevision: 5, set: {}, clear: [] }],
+    ["update_lead_settings", { set: { mode: "Paused" } }],
+    ["update_lead_settings", { expectedRevision: 5, set: { mode: "Off" } }],
+    ["update_lead_settings", { expectedRevision: 5, set: { pause: true } }],
+    [
+      "update_lead_settings",
+      { expectedRevision: 5, set: { basePrompt: "b".repeat(2 ** 20) } },
+    ],
+    [
+      "update_lead_settings",
+      { expectedRevision: 5, set: { limits: { dispatchesPerDecision: 0 } } },
+    ],
+    ["update_lead_settings", { expectedRevision: 5, clear: ["pause"] }],
+    [
+      "update_lead_settings",
+      {
+        expectedRevision: 5,
+        set: { northStar: "n", mode: "Paused" },
+        clear: ["mode"],
+      },
+    ],
+    ["update_placement", {}],
+    ["update_placement", { lead: "Elsewhere" }],
+    ["update_placement", { leadOffering: "Free" }],
+  ]) {
+    const answer = await call(name, args);
+    assert.equal(answer.isError, true, `${name} ${JSON.stringify(args)}`);
+  }
+  assert.deepEqual(api.calls, []);
+});
+
+test("read_placement relays the placement as the route answered it", async () => {
+  const body = JSON.stringify(placementRead);
+  const { api, call } = toolsOf({}, () => ({ status: 200, body }));
+
+  assert.equal(textOf(await call("read_placement", {})), `HTTP 200\n${body}`);
+  assert.deepEqual(
+    api.calls.map(({ method, path }) => [method, path]),
+    [["GET", placementPath]],
+  );
+});
+
+test("update_placement writes every route read and always names the offering, a bare Pool lead running on its own", async () => {
+  for (const [args, written] of [
+    [
+      { lead: "Pool" },
+      { thread: "InCluster", lead: "Pool", leadOffering: "Own" },
+    ],
+    [
+      { thread: "Pool" },
+      { thread: "Pool", lead: "InCluster", leadOffering: "Subsidized" },
+    ],
+    [
+      { lead: "InCluster" },
+      { thread: "InCluster", lead: "InCluster", leadOffering: "Subsidized" },
+    ],
+    [
+      { leadOffering: "Own" },
+      { thread: "InCluster", lead: "InCluster", leadOffering: "Own" },
+    ],
+  ]) {
+    const { api, call } = toolsOf({}, () => ({
+      status: 200,
+      body: JSON.stringify(placementRead),
+    }));
+
+    const answer = await call("update_placement", args);
+
+    assert.equal(answer.isError, undefined, textOf(answer));
+    assert.deepEqual(
+      api.calls.map(({ method, path }) => [method, path]),
+      [
+        ["GET", placementPath],
+        ["PUT", placementPath],
+      ],
+    );
+    assert.deepEqual(
+      JSON.parse(api.calls[1].init.body),
+      written,
+      JSON.stringify(args),
+    );
+  }
+});
+
+test("update_placement relays the API's refusal of its write unaltered", async () => {
+  for (const [status, code] of [
+    [403, "HostedRunsNotGranted"],
+    [422, "LeadOfferingNotAdmitted"],
+  ]) {
+    const body = JSON.stringify({ error: { code, message: "m" } });
+    const { api, call } = toolsOf({}, (_path, init) =>
+      (init?.method ?? "GET") === "GET"
+        ? { status: 200, body: JSON.stringify(placementRead) }
+        : { status, body },
+    );
+
+    const answer = await call("update_placement", {
+      lead: "InCluster",
+      leadOffering: "Subsidized",
+    });
+
+    assert.equal(textOf(answer), `HTTP ${String(status)}\n${body}`);
+    assert.equal(answer.isError, true);
+    assert.equal(api.calls.length, 2);
+  }
+});
+
+test("no session's roster allows a settings tool", () => {
+  const settings = chuggyToolCapabilities.ProjectSettings.map(
+    (tool) => `${chuggyToolPrefix}${tool}`,
+  );
+  assert.ok(settings.length > 0);
+  for (let subset = 0; subset < 2 ** sessionCapabilities.length; subset += 1) {
+    const roster = sessionCapabilities.filter(
+      (_, index) => ((subset >> index) & 1) === 1,
+    );
+    const { allowedTools, disallowedTools } = sessionAllowedTools(roster);
+    for (const tool of settings) {
+      assert.ok(!allowedTools.includes(tool), `${roster.join(",")} ${tool}`);
+      assert.ok(disallowedTools.includes(tool), `${roster.join(",")} ${tool}`);
+    }
+  }
 });

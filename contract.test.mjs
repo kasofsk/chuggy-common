@@ -1195,7 +1195,11 @@ const everyToolArgument = {
   description: "d",
   visibility: "Active",
   tickets: [7],
+  clear: ["northStar"],
 };
+
+/** What a tool whose parameter shares a name with another tool's takes in place of `everyToolArgument`'s. */
+const toolArgumentInPlace = { update_placement: { thread: "Pool" } };
 
 /** The routes of the tools' table one path matches. */
 function toolRoutesMatching(pathname) {
@@ -1232,7 +1236,7 @@ test("the pod's tools reach exactly the routes the contract gives them", async (
     await chuggyToolHandler(
       { ...definition, call: (args) => definition.call(context, args) },
       z,
-    )(everyToolArgument);
+    )({ ...everyToolArgument, ...toolArgumentInPlace[definition.name] });
 
     if (definition.name === "read_docs") {
       assert.deepEqual(paths, [], "read_docs asked chuggy's API");
