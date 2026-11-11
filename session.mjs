@@ -115,6 +115,7 @@ import {
   chuggyToolContext,
   chuggyToolServer,
   sessionAllowedTools,
+  sessionBuiltInTools,
 } from "./chuggyTools.mjs";
 import { claudeCredentialPrepared } from "./claude.mjs";
 import {
@@ -543,7 +544,8 @@ function sessionForkFrom(facts) {
 }
 
 /**
- * The objectives the session carries, appended to the runtime's own preset.
+ * The objectives the session carries, appended to the runtime's own preset,
+ * or, for a session on its own prompt, the whole prompt.
  *
  * THE PRESET RATHER THAN A CUSTOM PROMPT, because the preset is what loads the
  * checkout's `CLAUDE.md`, and `settingSources` must name `'project'` for it to.
@@ -561,11 +563,16 @@ function sessionForkFrom(facts) {
  * cannot reach means the runtime reports none loaded, with no warning and no
  * start it delayed.
  *
+ * A SESSION ITS FACTS MARK `systemPromptOwn` IS GRANTED NONE OF THAT. It runs
+ * on chuggy's credential for a tenant whose tree it reads, so its prompt is the
+ * environment lines this pod writes and then the objectives, its
+ * `settingSources` is empty, and `sessionQueryOptions` confines its tools.
+ *
  * `snapshot: false` RENDERS THE PROMPT FROM EACH QUERY'S OWN OPTIONS, which
- * every pod start passes in full. It is said rather than omitted because
- * omitting it is the runtime's default, and the default records the rendered
- * prompt in the transcript and sends that record on every later request and
- * every resume, whatever `append` the resume passes. A record carrying the
+ * every pod start passes in full, on either prompt. It is said rather than
+ * omitted because omitting it is the runtime's default, and the default records
+ * the rendered prompt in the transcript and sends that record on every later
+ * request and every resume, whatever the resume passes. A record carrying the
  * session's tools can outweigh a store batch, and a pod resuming from the store
  * would run under what the store kept of it. A record buys nothing here: chuggy
  * replaces a lead whose prompt changed rather than resuming it.
@@ -575,14 +582,60 @@ function sessionForkFrom(facts) {
  * with the preset's own objectives is worse than one with the project's and is
  * not a reason to refuse the turn.
  */
-function sessionSystemPrompt(facts) {
+function sessionSystemPrompt(facts, checkout, tools) {
   const append = facts.systemPrompt;
+  const objectives =
+    typeof append === "string" && append.length > 0 ? append : undefined;
+  if (sessionPromptOwn(facts))
+    return {
+      type: "custom",
+      prompt: [
+        sessionPromptOwnLines(facts, checkout, tools).join(" "),
+        ...(objectives === undefined ? [] : [objectives]),
+      ].join("\n\n"),
+      snapshot: false,
+    };
   return {
     type: "preset",
     preset: "claude_code",
     snapshot: false,
-    ...(typeof append === "string" && append.length > 0 ? { append } : {}),
+    ...(objectives === undefined ? {} : { append: objectives }),
   };
+}
+
+const sessionToolList = new Intl.ListFormat("en", { type: "conjunction" });
+
+/** Whether the session runs on its own prompt and loads nothing of its project's settings. */
+function sessionPromptOwn(facts) {
+  return facts.systemPromptOwn === true;
+}
+
+/**
+ * The environment a session on its own prompt is told it runs in: what a
+ * lead's turn hands it and how the turn ends, an inquiry's reader, and where
+ * the checkout `tools` read is.
+ */
+function sessionPromptOwnLines(facts, checkout, tools) {
+  const reads =
+    tools.length === 0 ? "" : `; ${sessionToolList.format(tools)} read it`;
+  return [
+    ...(facts.kind === "Lead"
+      ? [
+          "Each turn's user message is the selector's observation document (JSON).",
+        ]
+      : []),
+    checkout?.directory === undefined
+      ? "This session holds no checkout of the project's repository."
+      : `A read-only checkout of the project's repository is at ${checkout.directory}${reads}.`,
+    ...((facts.capabilities ?? []).includes(leadDecision)
+      ? [
+          "End the turn by calling the decision tools; your final text is not read by anyone.",
+        ]
+      : []),
+    ...(facts.kind === "Inquiry"
+      ? ["Your final text is your answer, and the member who asked reads it."]
+      : []),
+  ];
 }
 
 /**
@@ -612,6 +665,17 @@ function sessionTakesStops(facts) {
  * bare workspace's absence of one. `CLAUDE_CONFIG_DIR` does NOT move with it:
  * it is the runtime's local mirror, and a mirror written inside a git working
  * tree is pod state the lead would read back as the project's.
+ *
+ * A SESSION ON ITS OWN PROMPT IS CONFINED TO ITS `cwd`, which is never the
+ * workspace that holds `CLAUDE_CONFIG_DIR`: the checkout, or
+ * `sessionTreeEmpty` where there is none. Under `"dontAsk"` with no settings
+ * loaded, the runtime's file tools read inside `cwd` and are refused outside
+ * it, the credential mount and `/proc/self/root/` included, where
+ * `"bypassPermissions"` reads any path the process can. So `tools` is exactly
+ * the built-ins its capabilities grant, which leaves no built-in the roster
+ * does not name, and `allowedTools` names only the chuggy tools, since a bare
+ * built-in there is a rule allowing it on every path. `confinementProbe.mjs`
+ * holds this against the installed runtime.
  *
  * MOVING `cwd` DOES NOT MOVE A STORE STREAM. The runtime derives `projectKey`
  * from the sanitised `cwd` and `./sessionStore.mjs` discards it, so a session
@@ -645,10 +709,14 @@ export function sessionQueryOptions(
   );
   const model = facts.model ?? environment[sessionModelVariable];
   const fork = sessionForkFrom(facts);
+  const own = sessionPromptOwn(facts);
+  const builtIns = allowedTools.filter((tool) =>
+    sessionBuiltInTools.includes(tool),
+  );
   return {
     sessionStore: store,
     sessionStoreFlush: "eager",
-    cwd: checkout?.directory ?? workspace,
+    cwd: checkout?.directory ?? (own ? sessionTreeEmpty(workspace) : workspace),
     env: {
       ...workerEnvironmentWithout(environment, [
         ...credential.withheld,
@@ -662,11 +730,21 @@ export function sessionQueryOptions(
       ...workerGitEnvironment(environment, git),
     },
     mcpServers: servers,
-    systemPrompt: sessionSystemPrompt(facts),
-    settingSources: ["project"],
-    allowedTools,
-    disallowedTools,
-    permissionMode: "bypassPermissions",
+    systemPrompt: sessionSystemPrompt(facts, checkout, builtIns),
+    ...(own
+      ? {
+          settingSources: [],
+          tools: builtIns,
+          allowedTools: allowedTools.filter((tool) => !builtIns.includes(tool)),
+          disallowedTools,
+          permissionMode: "dontAsk",
+        }
+      : {
+          settingSources: ["project"],
+          allowedTools,
+          disallowedTools,
+          permissionMode: "bypassPermissions",
+        }),
     maxTurns: task.bounds.turnsMax,
     maxBudgetUsd: task.bounds.budgetUsd,
     loadTimeoutMs: task.bounds.loadTimeoutMs,
@@ -682,6 +760,11 @@ export function sessionQueryOptions(
       : {}),
     ...(sessionReportsLive(facts) ? { includePartialMessages: true } : {}),
   };
+}
+
+/** The empty directory a session on its own prompt runs in where it holds no checkout. */
+export function sessionTreeEmpty(workspace) {
+  return join(workspace, "empty");
 }
 
 function sessionConfigDirectory(environment, workspace) {
@@ -1527,6 +1610,8 @@ export async function sessionMain(services = {}) {
         ...held.checkout,
       },
     );
+    if (sessionPromptOwn(facts) && checkout === undefined)
+      await ensureDirectory(sessionTreeEmpty(workspace));
     return await sessionRun(context, facts, {
       environment,
       credential,
