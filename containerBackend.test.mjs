@@ -3593,6 +3593,11 @@ for (const [ending, ended, reason, read] of keptEndings)
     ended(container, context);
     await endsNamed(context.backend);
     assert.deepEqual([...context.state.volumes.keys()], [workspace]);
+    if (ending !== "gone from the engine")
+      assert.deepEqual(
+        context.state.calls.find((call) => call.argv[0] === "rm")?.argv,
+        ["rm", "-v", container.id],
+      );
     const { line, record } = await keptSaid(context, workspace);
     assert.ok(
       line?.startsWith(

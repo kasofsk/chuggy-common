@@ -1013,7 +1013,9 @@ async function workspaceKept(state, container, reason, read) {
  * runtime it was started through with it. A job's workspace goes only where
  * the job ended clean, as `keptWorkspace.mjs` says, which its record is
  * copied out first to tell; one of a container the engine no longer has is
- * kept with nothing to save or remove. A container whose logs could not be
+ * kept with nothing to save or remove. A kept workspace that is the anonymous
+ * volume of a job started through no runtime keeps every anonymous volume of
+ * its container; any other job's go with it. A container whose logs could not be
  * saved is left for the next pass to try again, rather than lost with them,
  * until `unsavedKept` says it has been kept long enough.
  *
@@ -1045,7 +1047,10 @@ async function retired(state, container, why) {
       ? undefined
       : keptWorkspaceWhy(retiredUnclean(container, why), copied.read);
   const removed = await state.seams.engine.exec(
-    removeArgv(container.id, keptWhy !== undefined),
+    removeArgv(
+      container.id,
+      keptWhy !== undefined && container.runtimeVolume === undefined,
+    ),
   );
   if (removed.code === 0) state.logFailures.delete(container.id);
   const kept = "file" in saved ? `logs saved to ${saved.file}` : "logs lost";
