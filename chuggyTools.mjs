@@ -716,29 +716,29 @@ async function readReshaped(
 }
 
 /** The longest a child's JSON may be and still be written whole in an outline. */
-export const readConfigurationChildCharsMax = 255;
+export const readAtPathChildCharsMax = 255;
 
 /** The most keys a `path` may walk. */
-const readConfigurationPathKeysMax = 64;
+const readAtPathPathKeysMax = 64;
 
 /** The longest key a `path` may name. */
-const readConfigurationKeyCharsMax = 1_024;
+const readAtPathKeyCharsMax = 1_024;
 
 /** What `value` is, as an outline or a refusal names it. */
-function readConfigurationKind(value) {
+function readAtPathKind(value) {
   if (value === null) return "null";
   return Array.isArray(value) ? "array" : typeof value;
 }
 
 /** An object's or an array's entries as key and child, an array's keyed by index. */
-function readConfigurationEntries(value) {
+function readAtPathEntries(value) {
   return Array.isArray(value)
     ? value.map((child, index) => [index, child])
     : Object.entries(value);
 }
 
 /** The index `key` names in an array of `length`, or nothing where it names none. */
-function readConfigurationIndex(key, length) {
+function readAtPathIndex(key, length) {
   const index =
     typeof key === "string" && /^(0|[1-9][0-9]*)$/.test(key)
       ? Number(key)
@@ -747,9 +747,9 @@ function readConfigurationIndex(key, length) {
 }
 
 /** The child `key` names in `value`, or nothing where `value` holds none by it. */
-function readConfigurationChild(value, key) {
+function readAtPathChild(value, key) {
   if (Array.isArray(value)) {
-    const index = readConfigurationIndex(key, value.length);
+    const index = readAtPathIndex(key, value.length);
     return index === undefined ? undefined : { child: value[index] };
   }
   return value !== null &&
@@ -777,9 +777,9 @@ function chuggyToolAnswerFitting(total, compose) {
 }
 
 /** Why `path` walks out of the document at its `depth`th key, naming what is there instead, `holds` saying whose document it is. */
-function readConfigurationMissing(holds, path, depth, value) {
+function readAtPathMissing(holds, path, depth, value) {
   const opening = `${holds} no ${JSON.stringify(path[depth])} at ${JSON.stringify(path.slice(0, depth))}`;
-  const kind = readConfigurationKind(value);
+  const kind = readAtPathKind(value);
   if (Array.isArray(value))
     return value.length === 0
       ? `${opening}, which is an empty array.`
@@ -795,26 +795,25 @@ function readConfigurationMissing(holds, path, depth, value) {
 }
 
 /** One outline entry: its key, and its child whole where that is short, or what the child is. */
-function readConfigurationOutlineEntry([key, child]) {
+function readAtPathOutlineEntry([key, child]) {
   const text = JSON.stringify(child);
-  if (text.length <= readConfigurationChildCharsMax)
-    return { key, value: child };
-  const kind = readConfigurationKind(child);
+  if (text.length <= readAtPathChildCharsMax) return { key, value: child };
+  const kind = readAtPathKind(child);
   return kind === "string"
     ? { key, kind, chars: child.length }
     : {
         key,
         kind,
-        entries: readConfigurationEntries(child).length,
+        entries: readAtPathEntries(child).length,
         chars: text.length,
       };
 }
 
 /** An object or an array too large for one answer, as the outline of its entries from `offset` that fits. */
-function readConfigurationOutline(head, path, value, offset) {
-  const kind = readConfigurationKind(value);
-  const entries = readConfigurationEntries(value);
-  const outline = entries.slice(offset).map(readConfigurationOutlineEntry);
+function readAtPathOutline(head, path, value, offset) {
+  const kind = readAtPathKind(value);
+  const entries = readAtPathEntries(value);
+  const outline = entries.slice(offset).map(readAtPathOutlineEntry);
   const compose = (listed) => {
     const left = outline.length - listed;
     const next = offset + listed;
@@ -838,7 +837,7 @@ function readConfigurationOutline(head, path, value, offset) {
  * more than the one a unit longer, because JSON escapes the lone half, so the
  * piece found never ends inside one.
  */
-function readConfigurationCut(head, path, value, offset) {
+function readAtPathCut(head, path, value, offset) {
   const compose = (taken) => {
     const next = offset + taken;
     const left = value.length - next;
@@ -865,35 +864,32 @@ function readConfigurationCut(head, path, value, offset) {
  * as a piece of it, both read on from by `offset`. A `path` the document does
  * not hold, or an `offset` past the end, is refused.
  */
-function readConfigurationAnswer(holds, status, document, path, offset = 0) {
+function readAtPathAnswer(holds, status, document, path, offset = 0) {
   let value = document;
   for (const [depth, key] of path.entries()) {
-    const held = readConfigurationChild(value, key);
+    const held = readAtPathChild(value, key);
     if (held === undefined)
-      return answered(
-        readConfigurationMissing(holds, path, depth, value),
-        true,
-      );
+      return answered(readAtPathMissing(holds, path, depth, value), true);
     value = held.child;
   }
   const head = `HTTP ${String(status)}\n`;
   const whole = `${head}${JSON.stringify(value)}`;
   if (chuggyToolAnswerFits(whole)) return answered(whole);
-  const kind = readConfigurationKind(value);
+  const kind = readAtPathKind(value);
   const length =
-    kind === "string" ? value.length : readConfigurationEntries(value).length;
+    kind === "string" ? value.length : readAtPathEntries(value).length;
   if (offset > length)
     return answered(
       `offset ${String(offset)} is past the end of this ${kind}, which has ${String(length)} ${kind === "string" ? "characters" : "entries"}.`,
       true,
     );
   return kind === "string"
-    ? answered(readConfigurationCut(head, path, value, offset))
-    : answered(readConfigurationOutline(head, path, value, offset));
+    ? answered(readAtPathCut(head, path, value, offset))
+    : answered(readAtPathOutline(head, path, value, offset));
 }
 
 /** A configuration route's body's canonical document, parsed, or nothing where the body is not one. */
-function readConfigurationDocument(text) {
+function readAtPathConfigurationDocument(text) {
   try {
     const { canonical } = JSON.parse(text) ?? {};
     return typeof canonical === "string"
@@ -905,7 +901,7 @@ function readConfigurationDocument(text) {
 }
 
 /** A body that is itself the document a `path` walks, parsed, or nothing where it is not a JSON object. */
-function readLeadSettingsDocument(text) {
+function readAtPathLeadSettingsDocument(text) {
   try {
     const document = JSON.parse(text);
     return document !== null && typeof document === "object"
@@ -920,14 +916,14 @@ function readLeadSettingsDocument(text) {
 const readAtPathRoutes = {
   configuration: {
     bytesMax: chuggyToolDispatchViewResponseBytesMax,
-    documentOf: readConfigurationDocument,
+    documentOf: readAtPathConfigurationDocument,
     whole: "this configuration",
     what: "a configuration",
     holds: "the configuration holds",
   },
   selectorSettings: {
     bytesMax: chuggyToolLeadSettingsResponseBytesMax,
-    documentOf: readLeadSettingsDocument,
+    documentOf: readAtPathLeadSettingsDocument,
     whole: "these lead settings",
     what: "lead settings",
     holds: "the lead settings hold",
@@ -937,7 +933,7 @@ const readAtPathRoutes = {
 /**
  * One body read by `path`, as `readAtPathRoutes` names its `read`. With no
  * `path`, a body that fits one answer is answered verbatim; otherwise its
- * document is parsed and answered at `path` by `readConfigurationAnswer`. It
+ * document is parsed and answered at `path` by `readAtPathAnswer`. It
  * is drawn under a bound its whole document fits, which the route's own body
  * bound is not.
  */
@@ -954,13 +950,7 @@ async function readAtPath(context, path, read, at, offset) {
         `the ${read} route answered HTTP ${String(body.status)} with a body that is not ${what} as the contract answers it.`,
         true,
       )
-    : readConfigurationAnswer(
-        holds,
-        body.status,
-        parsed.document,
-        at ?? [],
-        offset,
-      );
+    : readAtPathAnswer(holds, body.status, parsed.document, at ?? [], offset);
 }
 
 /** Why a ticket filed in a listed binding would not run, or nothing where it would. */
@@ -1757,8 +1747,8 @@ const chuggyPathReadDescription =
 /** The `path` and `offset` a read by `path` takes, `path` described as walking into what `into` names. */
 const pathArguments = (z, into) => ({
   path: z
-    .array(z.union([z.string().max(readConfigurationKeyCharsMax), count(z)]))
-    .max(readConfigurationPathKeysMax)
+    .array(z.union([z.string().max(readAtPathKeyCharsMax), count(z)]))
+    .max(readAtPathPathKeysMax)
     .describe(into)
     .optional(),
   offset: count(z)

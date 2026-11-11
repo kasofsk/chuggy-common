@@ -64,7 +64,7 @@ import {
   chuggyToolServer,
   chuggyToolSignal,
   chuggyTranscriptBodyBytesMax,
-  readConfigurationChildCharsMax,
+  readAtPathChildCharsMax,
   sessionAllowedTools,
   sessionBuiltInTools,
   sessionCapabilityTools,
@@ -1660,7 +1660,7 @@ test("an outline too long for one answer is read to its end by offset", async ()
     ]),
   );
   for (const child of Object.values(workloads))
-    assert.ok(JSON.stringify(child).length <= readConfigurationChildCharsMax);
+    assert.ok(JSON.stringify(child).length <= readAtPathChildCharsMax);
   const { call } = configurationToolsOf({ version: 2, workloads });
 
   const pieces = await configurationReadOn(
