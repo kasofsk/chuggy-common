@@ -19,18 +19,22 @@ A worker pool outside the cluster runs `poolLoop.mjs` over a backend of its own,
 
 A runner removes a job's workspace, a container's volume or a host job's directory, only where the job exited 0 and the record its core writes at the workspace's root says its work is safe, as `keptWorkspace.mjs` says. Every other workspace is kept, its runner's log says why and whose work it holds, and a record of it is written beside the saved logs. Nothing removes one but its operator. `containerKeptWorkspaces` and `hostKeptWorkspaces` list them with their sizes and the ticket, attempt and stage each record names.
 
-The record is `chuggy-workspace.json`, and the records a runner keeps are in `kept-workspaces/` of its log directory; a host runner renames a kept job directory to begin `kept-`. <!-- runtime -->
+The record is `chuggy-workspace.json`, and the records a runner keeps are in `kept-workspaces/` of its log directory, each named for its workspace's volume or the base name of its directory, `<workspace>.json`; a host runner renames a kept job directory to begin `kept-`, and one it cannot move it keeps where it is, which its record keeps from the next start's sweep. <!-- runtime -->
+
+A job started through chuggy's runtime has its workspace in a volume of the workspace label, which the first command below lists. One started without the runtime has an anonymous volume with no label, which only its record names, as its `workspace`, and `containerKeptWorkspaces` lists. Where the engine named no volume for it, the record names it as the anonymous workspace of its container, and it is one of `docker volume ls --filter dangling=true`. <!-- runtime -->
 
 ```sh
-# The kept workspace volumes (podman takes the same commands).
+# The kept workspace volumes of jobs started through chuggy's runtime (podman takes the same commands).
 docker volume ls --filter label=io.chuggy.workspace-volume --filter dangling=true
+# Every kept workspace's record, those started without the runtime included.
+cat <log directory>/kept-workspaces/*.json
 # Look inside one.
 docker run --rm -it -v <volume>:/workspace -w /workspace <image> sh
 # Get its work out: copy its checkout here, then commit what it holds and push it to a branch.
 docker run --rm -v <volume>:/workspace -v "$PWD":/out <image> tar -C /workspace -cf /out/kept.tar repository
 tar -xf kept.tar && cd repository && git add -A && git commit -m "kept workspace" && git push <remote> HEAD:refs/heads/<branch>
 # Remove it, and its record.
-docker volume rm <volume> && rm <log directory>/kept-workspaces/<volume>.json
+docker volume rm <volume> && rm <log directory>/kept-workspaces/<record>.json
 ```
 
 A kept host job's directory holds its workspace at `workspace`, and is removed with `rm -rf` and its record the same way.

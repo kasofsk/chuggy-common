@@ -764,6 +764,43 @@ for (const [ending, mode, overrides, record, reason, read] of hostKeptEndings)
     );
   });
 
+test("a kept job directory that cannot be moved to its kept name is recorded where it is and survives the next start's sweep", async (t) => {
+  const context = await harness(
+    t,
+    "exit:3",
+    {},
+    {
+      rename: async () => {
+        throw Object.assign(new Error("EBUSY: resource busy or locked"), {
+          code: "EBUSY",
+        });
+      },
+    },
+    safeRecord(true),
+  );
+  const { backend, settings, log } = context;
+  await backend.place(assignment(), "Job");
+  await backend.settled();
+  const [name, ...others] = await readdir(settings.directory);
+  assert.deepEqual(others, []);
+  assert.match(name ?? "", /^job-/u);
+  const kept = join(settings.directory, name);
+  assert.ok(
+    log.includes(
+      `${hostJobName("asg-1")}: ${kept} is kept, since its process exited 3: ticket 480, attempt attempt-7, stage 2`,
+    ),
+    log.join("\n"),
+  );
+  await hostBackend(settings, context.backendSeams).held();
+  assert.deepEqual(await readdir(settings.directory), [name]);
+  assert.deepEqual(
+    (await hostKeptWorkspaces(settings.logDir)).map((line) =>
+      line.replace(/ {2}[0-9.]+ MiB {2}.*$/u, ""),
+    ),
+    [kept],
+  );
+});
+
 test("a job past its deadline is killed and named timed out", async (t) => {
   const { backend } = await harness(t, "sleep");
   await backend.place(assignment({ deadlineSecs: 1 }), "Job");

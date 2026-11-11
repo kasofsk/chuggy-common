@@ -201,6 +201,32 @@ export async function keptWorkspaceKept(
 }
 
 /**
+ * Whether a record of a kept workspace names `workspace`, read from the one
+ * file `keptWorkspaceKept` writes for it. A record there that cannot be read
+ * is taken to name it, so nothing removes a workspace whose record is damaged.
+ *
+ * @param {string} logDir
+ * @param {string} workspace
+ */
+export async function keptWorkspaceRecorded(logDir, workspace) {
+  let text;
+  try {
+    text = await readFile(
+      join(logDir, keptWorkspaceDirectory, `${basename(workspace)}.json`),
+      "utf8",
+    );
+  } catch (failure) {
+    return /** @type {NodeJS.ErrnoException} */ (failure).code !== "ENOENT";
+  }
+  try {
+    const parsed = keptWorkspaceKeptSchema.safeParse(JSON.parse(text));
+    return !parsed.success || parsed.data.workspace === workspace;
+  } catch {
+    return true;
+  }
+}
+
+/**
  * The records of every workspace a runner kept, by the file each is in; one
  * that cannot be read is left out.
  *

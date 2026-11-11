@@ -23,8 +23,9 @@
  * owner's and, where it reads Claude's credential, that credential's kind,
  * then the job's own places. The directory goes when the job does where the
  * job ended clean, as `keptWorkspace.mjs` says, and is otherwise kept under a
- * name of `hostKeptPrefix`, logged and recorded. Any other a predecessor left
- * is removed the first time `held` is asked.
+ * name of `hostKeptPrefix`, or where it is if it cannot be moved, logged and
+ * recorded. Any other a predecessor left is removed the first time `held` is
+ * asked.
  *
  * WHAT ENDED OF ITSELF IS NAMED ONCE, after `held` stopped naming it, with this
  * backend's own reason and never the job's output, which is written to the log
@@ -68,6 +69,7 @@ import {
   keptWorkspaceKept,
   keptWorkspaceRecordName,
   keptWorkspaceRecordRead,
+  keptWorkspaceRecorded,
   keptWorkspacesListed,
   keptWorkspacesRecorded,
   keptWorkspaceWhy,
@@ -106,6 +108,7 @@ import { savedLogTrimmed } from "./savedLog.mjs";
  * @property {(pid: number, signal: NodeJS.Signals) => void} [kill] signals a process group
  * @property {Readonly<Record<string, string | undefined>>} [environment] the runner's own, which a job inherits
  * @property {(onExit: () => void) => void} [atExit] runs `onExit` as the runner ends, `hostExitWatched` where absent
+ * @property {typeof rename} [rename] moves a kept job's directory to its kept name
  * @property {(file: string, agent: string, credential?: import("./agentCredentialSet.mjs").AgentCredential) => Promise<string | undefined>} tokenFileRefusal why a job cannot read the credential file, which is `agent`'s and the credential the selector chose where it chose one, or nothing
  * @property {(line: string) => void} log
  * @property {() => number} [nowMs]
@@ -476,7 +479,8 @@ function hostJobUnclean(job, code, signal) {
 
 /**
  * Removes an ended job's directory where it ended clean, and otherwise keeps
- * it under a name of `hostKeptPrefix`, logged and recorded beside its log.
+ * it under a name of `hostKeptPrefix`, or where it is if it cannot be moved,
+ * logged and recorded beside its log.
  *
  * @param {State} state
  * @param {HostJob} job
@@ -496,22 +500,24 @@ async function hostJobDirectoryRetired(state, job, code, signal) {
     state.settings.directory,
     `${hostKeptPrefix}${basename(job.directory).replace(/^job-/u, "")}`,
   );
+  let workspace = kept;
   try {
-    await rename(job.directory, kept);
+    await (state.seams.rename ?? rename)(job.directory, kept);
   } catch (failure) {
+    workspace = job.directory;
     state.seams.log(
-      `${job.name}: ${job.directory} is kept, since ${why}, but could not be moved to ${kept}, so the next start removes it: ${failure instanceof Error ? failure.message : String(failure)}`,
+      `${job.name}: ${job.directory} could not be moved to ${kept}, so it is kept where it is, which its record keeps from the sweep: ${failure instanceof Error ? failure.message : String(failure)}`,
     );
-    return;
   }
   state.seams.log(
-    `${job.name}: ${await keptWorkspaceKept(state.settings.logDir, kept, why, read, (state.seams.nowMs ?? Date.now)())}`,
+    `${job.name}: ${await keptWorkspaceKept(state.settings.logDir, workspace, why, read, (state.seams.nowMs ?? Date.now)())}`,
   );
 }
 
 /**
  * Removes the job directories no job of this run holds, which a predecessor
- * left, and never one it kept.
+ * left, and never one it kept: one under a name of `hostKeptPrefix`, or one
+ * a kept record names where it could not be moved there.
  *
  * @param {State} state
  */
@@ -526,7 +532,11 @@ async function hostSwept(state) {
   }
   for (const name of names) {
     const directory = join(state.settings.directory, name);
-    if (!held.has(directory) && !name.startsWith(hostKeptPrefix))
+    if (
+      !held.has(directory) &&
+      !name.startsWith(hostKeptPrefix) &&
+      !(await keptWorkspaceRecorded(state.settings.logDir, directory))
+    )
       await hostDirectoryRemoved(state, directory);
   }
 }
