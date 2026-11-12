@@ -129,6 +129,26 @@ test("a file a group or anyone else can open is refused, naming its mode", async
     );
 });
 
+test("a runner's own answer to who may open the file replaces the mode bits', and is named after the file", async () => {
+  const shared = await written(JSON.stringify(registration), 0o600, (file) =>
+    poolCredentials(file, (asked, stats) => {
+      assert.equal(asked, file);
+      assert.ok(stats.isFile());
+      return "is open to Everyone (icacls)";
+    }).then(
+      () => assert.fail("the file was read"),
+      (failure) => failure.message,
+    ),
+  );
+  assert.match(shared, /pool\.json is open to Everyone \(icacls\)$/u);
+  assert.deepEqual(
+    await written(JSON.stringify(registration), 0o644, (file) =>
+      poolCredentials(file, async () => undefined),
+    ),
+    registration,
+  );
+});
+
 test("a file that is not JSON is refused without quoting it", async () => {
   assert.match(
     await refusal(`{"clientSecret": ${secret}}`),
@@ -187,6 +207,39 @@ test("a personal runner's file naming a project or pool, or no member, or a pool
     [{ ...personal, kind: "personal" }, /project.*pool|pool.*project/u],
     [{ ...registration, kind: "Personal" }, /project/u],
     [{ ...registration, kind: "Dedicated" }, /kind/u],
+  ])
+    assert.match(await refusal(JSON.stringify(document)), named);
+});
+
+/** A chat host's file: a personal runner's with no capabilities, of its own kind. */
+const chatHost = {
+  kind: "ChatHost",
+  tenant: personal.tenant,
+  owner: personal.owner,
+  tokenUrl: registration.tokenUrl,
+  audience: registration.audience,
+  planeUrl: registration.planeUrl,
+  clientId: registration.clientId,
+  clientSecret: secret,
+};
+
+test("a chat host's file is read back whole", async () => {
+  assert.deepEqual(
+    await written(JSON.stringify(chatHost), 0o600, poolCredentials),
+    chatHost,
+  );
+});
+
+test("a chat host's file declaring capabilities or the machine's host, or naming a project or no member, is refused by name", async () => {
+  const { owner, ...ownerless } = chatHost;
+  assert.equal(owner, personal.owner);
+  for (const [document, named] of [
+    [{ ...chatHost, capabilities: [] }, /capabilities/u],
+    [{ ...chatHost, host: true }, /host/u],
+    [{ ...chatHost, project: "chuggy" }, /project/u],
+    [ownerless, /owner/u],
+    [{ ...personal, kind: "ChatHost" }, /capabilities/u],
+    [{ ...chatHost, kind: "Personal" }, /capabilities/u],
   ])
     assert.match(await refusal(JSON.stringify(document)), named);
 });

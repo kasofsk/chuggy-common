@@ -8,6 +8,8 @@ import {
 import {
   assignmentOutcomeSchema,
   workerPoolEvidenceCharsMax,
+  workerRunnerCapabilitiesHeader,
+  workerRunnerCapabilitiesOf,
   workerRunnerMemoryRoomHeader,
   workerRunnerPollWaitHeader,
 } from "@chuggy/worker-contract/workerPool";
@@ -20,6 +22,11 @@ import {
   workerPoolUpdating,
 } from "./poolLoop.mjs";
 import { poolPlaneClient } from "./poolPlane.mjs";
+import {
+  agentCredentialSelector,
+  agentCredentialSets,
+} from "./agentCredentialSet.mjs";
+import { jobCapabilitiesWithheld, jobCredential } from "./job.mjs";
 
 const settings = { concurrencyMax: 1, outageBackoffMs: 1, passesMax: 1 };
 
@@ -1804,4 +1811,241 @@ test("a release at or below the runner's own is no update, and one the poll stop
     ],
   );
   assert.deepEqual(run.asked.update, []);
+});
+
+/** A runner's selector over two Claude subscription tokens, taken in order. */
+function tokensInOrder() {
+  return agentCredentialSelector(
+    agentCredentialSets({
+      claudeCredential: {
+        prefer: "OAuthOnly",
+        oauth: {
+          order: "InOrder",
+          credentials: [
+            { name: "max-1", tokenFile: "/c/max-1" },
+            { name: "max-2", tokenFile: "/c/max-2" },
+          ],
+        },
+      },
+    }),
+  );
+}
+
+/**
+ * A backend choosing each job's credential with `selector` as a runner's
+ * does, recording the name each placement ran on, and ending `ended` once.
+ */
+function choosing(selector, ended = []) {
+  const ran = [];
+  return {
+    ran,
+    backend: {
+      ...idle,
+      ended: async () => ended.splice(0),
+      place: async (offered) => {
+        const chosen = jobCredential(
+          { credentials: selector },
+          offered.capabilities,
+          offered.assignment,
+        );
+        ran.push(
+          "refused" in chosen ? chosen.refused : chosen.credential?.name,
+        );
+        return { placed: "Placed" };
+      },
+      credentialOutcomesTaken: (outcomes) => selector.outcomesTaken(outcomes),
+      capabilitiesWithheld: () => jobCapabilitiesWithheld(selector),
+    },
+  };
+}
+
+/** Catches an outcome read off the wire and dropped, or taken only after the same answer's offers were placed on the credential it benches. */
+test("a poll's credential outcome benches the credential its job ran on before that answer's offers are placed", async () => {
+  const { ran, backend } = choosing(tokensInOrder());
+  const { plane } = planeNaming(workerContractRelease, [
+    reconciled([assignment("job-1")]),
+    {
+      ...reconciled([assignment("job-2")], ["job-1"]),
+      credentialOutcomes: [
+        { assignment: "job-1", outcome: "CreditsExhausted" },
+      ],
+    },
+  ]);
+  const pooled = client({ plane, backend });
+  await workerPoolClientPass(pooled);
+  await workerPoolClientPass(pooled);
+  assert.deepEqual(ran, ["max-1", "max-2"]);
+});
+
+/** Catches a failed, timed-out or stopped run, or an answer naming no outcome, benching the credential it ran on. */
+test("a run that failed, timed out or was stopped, under an answer without the field, benches nothing", async () => {
+  const attempt = { ...assignment("job-1") };
+  const { ran, backend } = choosing(tokensInOrder(), [
+    { kind: "Job", job: attempt, why: "exited 1", ran: "Failed" },
+    {
+      kind: "Job",
+      job: attempt,
+      why: "its deadline passed",
+      killed: "Deadline",
+    },
+  ]);
+  const { plane } = planeNaming(workerContractRelease, [
+    reconciled([assignment("job-1")]),
+    reconciled([assignment("job-2")], ["job-1"]),
+    reconciled([assignment("job-3")]),
+  ]);
+  const pooled = client({ plane, backend });
+  for (let pass = 0; pass < 3; pass += 1) await workerPoolClientPass(pooled);
+  assert.deepEqual(ran, ["max-1", "max-1", "max-1"]);
+});
+
+/** A runner's selector over one Claude subscription token and one Codex API key, on a clock the test moves. */
+function oneEachSelector() {
+  const clock = { nowMs: 1_000_000 };
+  const selector = agentCredentialSelector(
+    agentCredentialSets({
+      claudeCredential: {
+        prefer: "OAuthOnly",
+        oauth: {
+          order: "InOrder",
+          credentials: [{ name: "max-1", tokenFile: "/c/max-1" }],
+        },
+      },
+      codexCredential: {
+        prefer: "ApiKeyOnly",
+        apiKey: {
+          order: "InOrder",
+          credentials: [{ name: "openai-1", apiKeyFile: "/c/openai-1" }],
+        },
+      },
+    }),
+    () => clock.nowMs,
+  );
+  return { selector, clock };
+}
+
+/**
+ * A plane client given `capabilities`, as a runner builds one, answering each
+ * poll with the next of `answers`; the capabilities each poll names, as the
+ * plane reads them, and each settlement are recorded.
+ *
+ * @param {readonly string[]} capabilities
+ * @param {object[]} answers
+ */
+function advertisedTo(capabilities, answers) {
+  const advertised = [];
+  const settled = [];
+  const plane = poolPlaneClient(
+    {
+      baseUrl: "https://pool-plane.invalid",
+      pollTimeoutMs: 1_000,
+      settleTimeoutMs: 1_000,
+      capabilities,
+    },
+    async (url, init) => {
+      const headers = { [workerContractHeader]: workerContractRelease };
+      if (init.method !== "GET") {
+        settled.push([String(url), init.body]);
+        return new globalThis.Response(null, { status: 204, headers });
+      }
+      const named = workerRunnerCapabilitiesOf(
+        init.headers[workerRunnerCapabilitiesHeader],
+      );
+      advertised.push(named.named === "Set" ? named.capabilities : named);
+      return new globalThis.Response(
+        JSON.stringify(answerBody(answers.shift() ?? reconciled())),
+        { status: 200, headers },
+      );
+    },
+  );
+  return { plane, advertised, settled };
+}
+
+/** A job requiring `agent`, as the plane offers it. */
+function requiring(named, agent) {
+  return { ...assignment(named), capabilities: [`Agent:${agent}`] };
+}
+
+/**
+ * Catches a poll advertising an agent none of whose credentials is
+ * available, one leaving out an agent that has one, the agent kept out once
+ * its bench has ended, or a job handed back by settling it other than accepted.
+ */
+test("a poll leaves out an agent whose every credential is benched, takes another agent's job as before, and names it again once the bench ends", async () => {
+  const { selector, clock } = oneEachSelector();
+  const { ran, backend } = choosing(selector);
+  const resetMs = clock.nowMs + 3_600_000;
+  const built = ["Platform:Linux:Amd64", "Agent:Claude", "Agent:Codex"];
+  const { plane, advertised, settled } = advertisedTo(built, [
+    reconciled([requiring("job-1", "Claude")]),
+    {
+      ...reconciled([requiring("job-2", "Codex")], ["job-1"]),
+      credentialOutcomes: [usageLimitedAt("job-1", resetMs)],
+    },
+  ]);
+  const pooled = client({ plane, backend });
+  for (let pass = 0; pass < 3; pass += 1) await workerPoolClientPass(pooled);
+  clock.nowMs = resetMs;
+  await workerPoolClientPass(pooled);
+  assert.deepEqual(ran, ["max-1", "openai-1"]);
+  assert.deepEqual(advertised, [
+    built,
+    built,
+    ["Platform:Linux:Amd64", "Agent:Codex"],
+    built,
+  ]);
+  assert.deepEqual(
+    settled.map(([url]) => url.split("/").slice(-2).join(" ")),
+    ["job-1 accepted", "job-2 accepted"],
+  );
+});
+
+/** A usage-limited outcome for `assignment`, reset at `resetsAtMs`. */
+function usageLimitedAt(assignment, resetsAtMs) {
+  return {
+    assignment,
+    outcome: "UsageLimited",
+    resetsAt: Math.floor(resetsAtMs / 1_000),
+  };
+}
+
+/**
+ * Catches credits exhausted on every credential counted available again
+ * before a restart, an agent the runner was not built advertising added, or a
+ * backend without a selector changing what it was built with.
+ */
+test("an agent benched until restart stays out of every poll, none is added, and a backend without a selector advertises what it was built with", async () => {
+  const { selector, clock } = oneEachSelector();
+  const { backend } = choosing(selector);
+  const built = ["Platform:Linux:Amd64", "Agent:Claude"];
+  const { plane, advertised } = advertisedTo(built, [
+    reconciled([requiring("job-1", "Claude"), requiring("job-2", "Codex")]),
+    {
+      ...reconciled([], ["job-1", "job-2"]),
+      credentialOutcomes: [
+        { assignment: "job-1", outcome: "CreditsExhausted" },
+        { assignment: "job-2", outcome: "CreditsExhausted" },
+      ],
+    },
+  ]);
+  const pooled = client({
+    plane,
+    backend,
+    settings: { ...settings, concurrencyMax: 2 },
+  });
+  await workerPoolClientPass(pooled);
+  await workerPoolClientPass(pooled);
+  clock.nowMs += 365 * 24 * 3_600_000;
+  await workerPoolClientPass(pooled);
+  await workerPoolClientPass(pooled);
+  assert.deepEqual(advertised, [
+    built,
+    built,
+    ["Platform:Linux:Amd64"],
+    ["Platform:Linux:Amd64"],
+  ]);
+
+  const unselected = advertisedTo(built, []);
+  await workerPoolClientPass(client({ plane: unselected.plane }));
+  assert.deepEqual(unselected.advertised, [built]);
 });

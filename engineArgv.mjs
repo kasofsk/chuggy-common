@@ -3,7 +3,7 @@
  * the engine's CLI. Nothing here runs anything.
  */
 
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, posix } from "node:path";
 
 import {
   mintedCredentialDirectory,
@@ -24,6 +24,12 @@ import {
 /**
  * @typedef {"docker" | "podman"} EngineName
  * @typedef {import("./poolLoop.mjs").WorkerPoolWorkloadKind} WorkerPoolWorkloadKind
+ * @typedef {import("./chatHost.mjs").ChatSupervisorContainer} ChatSupervisorContainer
+ *
+ * @typedef {object} ChatSupervisorNaming what a chat supervisor's container is called, carries and joins
+ * @property {string} name one per host
+ * @property {string} label the pool label's value, of the host
+ * @property {string} network
  *
  * @typedef {object} WorkloadContainer
  * @property {string} name
@@ -50,6 +56,7 @@ import {
  * @typedef {object} EngineSocket this machine's container engine, as a workload is handed it
  * @property {string} path the socket's path on this machine
  * @property {number} gid the socket's group on this machine, which a docker workload is added to unless it is root's and a podman one never is
+ * @property {true} [rootGroup] the socket is reached only through root's group, as Docker Desktop's is in its VM, so a docker workload is added to that group too; a runner says so only where every workload it hands the engine already holds root on the engine's machine
  *
  * @typedef {object} RuntimeVolumes a job's own volumes where it starts through chuggy's runtime
  * @property {string} volume the one holding its copy of the runtime
@@ -67,6 +74,11 @@ export const runtimeLabel = "io.chuggy.runtime";
 export const workspaceLabel = "io.chuggy.workspace";
 /** The label of each of a job's `RuntimeVolumes`, naming the container that fills them. */
 export const fillLabel = "io.chuggy.fill";
+/**
+ * The label of a job's workspace volume alone, which no sweep removes: one no
+ * container uses is a workspace its runner kept.
+ */
+export const workspaceVolumeLabel = "io.chuggy.workspace-volume";
 /**
  * The label of a named volume a runner made for its owner. Such a volume
  * carries no pool's label, so no sweep of a pool's volumes lists it.
@@ -145,9 +157,20 @@ export function imageListArgv() {
   return ["image", "ls", "--quiet", "--no-trunc"];
 }
 
-/** @param {readonly string[]} images each by id */
+/** @param {readonly string[]} images each by id or name */
 export function imageInspectManyArgv(images) {
   return ["image", "inspect", ...images];
+}
+
+/**
+ * An image's variant for one platform, which docker answers from 28.1, and
+ * podman never.
+ *
+ * @param {string} image
+ * @param {string} platform
+ */
+export function imageInspectPlatformArgv(image, platform) {
+  return ["image", "inspect", "--platform", platform, image];
 }
 
 /**
@@ -183,13 +206,23 @@ export function dockerDiskUsageArgv() {
 }
 
 /**
+ * What a pull names of the platform it pulls for.
+ *
+ * @param {string | undefined} platform
+ */
+function pullArgvPlatform(platform) {
+  return platform === undefined ? [] : ["--platform", platform];
+}
+
+/**
  * A pull as the engine's own configuration makes it, under whatever logins,
  * credential helpers and endpoint the runner's user and environment give it.
  *
  * @param {string} image
+ * @param {string} [platform] the one variant of a multi-platform image it pulls; none, and the engine's own
  */
-export function pullArgv(image) {
-  return ["pull", "--quiet", image];
+export function pullArgv(image, platform) {
+  return ["pull", "--quiet", ...pullArgvPlatform(platform), image];
 }
 
 /**
@@ -206,16 +239,23 @@ export function pullArgv(image) {
  * @param {string} image
  * @param {string} authDirectory
  * @param {string | undefined} dockerHost the endpoint `dockerContextArgv` answered; docker's alone
+ * @param {string} [platform] as `pullArgv` takes it
  * @returns {{argv: string[], environment: Record<string, string>}}
  */
-export function poolPullArgv(engine, image, authDirectory, dockerHost) {
+export function poolPullArgv(
+  engine,
+  image,
+  authDirectory,
+  dockerHost,
+  platform,
+) {
   if (engine === "docker") {
     if (dockerHost === undefined)
       throw new RangeError(
         "a docker pull under the pool's token needs the endpoint its context names",
       );
     return {
-      argv: pullArgv(image),
+      argv: pullArgv(image, platform),
       environment: {
         DOCKER_CONFIG: authDirectory,
         DOCKER_HOST: dockerHost,
@@ -227,6 +267,7 @@ export function poolPullArgv(engine, image, authDirectory, dockerHost) {
     argv: [
       "pull",
       "--quiet",
+      ...pullArgvPlatform(platform),
       "--authfile",
       join(authDirectory, registryAuthFile),
       image,
@@ -291,7 +332,8 @@ export function mintedTmpfs(engine) {
  * What a workload handed this machine's engine is run with: the engine's
  * socket, mounted read-only where docker's clients look for one, and on docker
  * the socket's group, without which the image's user cannot reach it. No
- * workload is added to root's group, so a socket of root's group adds none.
+ * workload is added to root's group, so a socket of root's group adds none,
+ * unless the runner says the socket is reached only through it.
  * Podman's workload needs no group, since keep-id maps the user running
  * podman, who owns its socket, onto the image's user.
  *
@@ -303,7 +345,7 @@ function runArgvEngineSocket(engine, socket) {
   return [
     "--mount",
     `type=bind,source=${socket.path},target=${jobEngineSocket},readonly`,
-    ...(engine === "docker" && socket.gid !== 0
+    ...(engine === "docker" && (socket.gid !== 0 || socket.rootGroup === true)
       ? ["--group-add", String(socket.gid)]
       : []),
   ];
@@ -439,16 +481,125 @@ export function runArgv(engine, workload) {
 }
 
 /**
+ * One tmpfs of a chat supervisor's. Docker takes its owner as `uid` and
+ * `gid`; podman refuses those and leaves it the container's user's, root, so
+ * a tmpfs to be anyone else's is refused there, and it copies nothing of the
+ * image's directory into it, as docker does not.
+ *
+ * @param {EngineName} engine
+ * @param {ChatSupervisorContainer["tmpfs"][number]} tmpfs
+ */
+function chatSupervisorTmpfs(engine, tmpfs) {
+  const options = [
+    "rw",
+    ...tmpfs.flags,
+    `size=${String(tmpfs.sizeBytes)}`,
+    `mode=0${tmpfs.mode.toString(8)}`,
+  ];
+  if (engine === "docker")
+    options.push(`uid=${String(tmpfs.uid)}`, `gid=${String(tmpfs.gid)}`);
+  else if (tmpfs.uid !== 0 || tmpfs.gid !== 0)
+    throw new RangeError(
+      `podman leaves a tmpfs root's, and ${tmpfs.target} is to be ${String(tmpfs.uid)}:${String(tmpfs.gid)}'s`,
+    );
+  else options.push("notmpcopyup");
+  return `${tmpfs.target}:${options.join(",")}`;
+}
+
+/**
+ * A chat supervisor's `run`, attached and removed once it exits, from the
+ * container `./chatHost.mjs` states: its input held open, its image never
+ * pulled here, since the host has pulled it, its memory capped with no swap
+ * past the cap, and no log kept by the engine, since every line is the
+ * host's to route. Its environment is named in the argv and carried in the
+ * engine's own, so no value of it is in an argv. On podman the container
+ * runs in the namespace of the user running podman whatever containers.conf
+ * says, so root inside is that user.
+ *
+ * @param {EngineName} engine
+ * @param {ChatSupervisorContainer} container
+ * @param {ChatSupervisorNaming} naming
+ * @returns {{argv: string[], environment: Record<string, string>}}
+ */
+export function chatSupervisorRunArgv(engine, container, naming) {
+  if (container.interactive !== true)
+    throw new RangeError("a chat supervisor's input is held open");
+  for (const { source, readonly } of container.binds) {
+    if (readonly !== true)
+      throw new RangeError("a chat supervisor's binds are read-only");
+    if (!bindMountNameable(source))
+      throw new RangeError(`${source} cannot be named in a bind mount`);
+  }
+  const [entrypoint, ...command] = container.command;
+  const { drop, add } = container.capabilities;
+  const memory = `${String(container.memoryBytes)}b`;
+  return {
+    argv: [
+      "run",
+      "-i",
+      "--rm",
+      "--pull=never",
+      "--name",
+      naming.name,
+      "--label",
+      `${poolLabel}=${naming.label}`,
+      "--log-driver",
+      "none",
+      "--user",
+      container.user,
+      ...(engine === "podman" ? ["--userns=host"] : []),
+      ...drop.flatMap((capability) => ["--cap-drop", capability]),
+      ...add.flatMap((capability) => ["--cap-add", capability]),
+      ...container.securityOptions.flatMap((option) => [
+        "--security-opt",
+        option,
+      ]),
+      "--memory",
+      memory,
+      "--memory-swap",
+      memory,
+      ...container.volumes.flatMap(({ volume, target }) => [
+        "--volume",
+        `${volume}:${target}`,
+      ]),
+      ...container.tmpfs.flatMap((tmpfs) => [
+        "--tmpfs",
+        chatSupervisorTmpfs(engine, tmpfs),
+      ]),
+      ...container.binds.flatMap(({ source, target }) => [
+        "--mount",
+        `type=bind,source=${source},target=${target},readonly`,
+      ]),
+      ...Object.keys(container.environment).flatMap((name) => ["--env", name]),
+      "--network",
+      naming.network,
+      "--entrypoint",
+      entrypoint,
+      container.image,
+      ...command,
+    ],
+    environment: { ...container.environment },
+  };
+}
+
+/**
  * One of a job's `RuntimeVolumes`, labelled with the pool and the assignment
  * it was made for and the container that fills it, so that what a runner
- * leaves can be found and removed.
+ * leaves can be found and removed, and the workspace labelled as one.
  *
  * @param {string} volume
  * @param {string} pool the pool label's value
  * @param {string} assignment
  * @param {string} fill
+ * @param {boolean} workspace whether it is the job's workspace
  */
-export function runtimeVolumeCreateArgv(volume, pool, assignment, fill) {
+export function runtimeVolumeCreateArgv(
+  volume,
+  pool,
+  assignment,
+  fill,
+  workspace,
+) {
   return [
     "volume",
     "create",
@@ -458,8 +609,35 @@ export function runtimeVolumeCreateArgv(volume, pool, assignment, fill) {
     `${assignmentLabel}=${assignment}`,
     "--label",
     `${fillLabel}=${fill}`,
+    ...(workspace ? ["--label", workspaceVolumeLabel] : []),
     volume,
   ];
+}
+
+/**
+ * The workspace volumes no container uses, by name: the ones kept.
+ */
+export function keptVolumesArgv() {
+  return [
+    "volume",
+    "ls",
+    "--quiet",
+    "--filter",
+    `label=${workspaceVolumeLabel}`,
+    "--filter",
+    "dangling=true",
+  ];
+}
+
+/**
+ * A copy of a file of a container, which may have stopped, to this machine.
+ *
+ * @param {string} container
+ * @param {string} path the file's, in the container
+ * @param {string} destination the file's, on this machine
+ */
+export function copiedOutArgv(container, path, destination) {
+  return ["cp", `${container}:${path}`, destination];
 }
 
 /**
@@ -472,15 +650,20 @@ export function runtimeVolumeCreateArgv(volume, pool, assignment, fill) {
  * the copy's own node, from the volume, so a runtime left unfilled fails the
  * fill, and what that node does is open the workspace, which only the
  * volume's owner may. That owner is the engine's root, so this container runs
- * as root, with no capability, no privilege escalation and no network.
+ * as root, with no capability, no privilege escalation and no network. The
+ * copy is the runtime's variant for `platform`, which an engine holding the
+ * image only for another refuses to run rather than run that one.
  *
  * @param {RuntimeVolumes} volumes
  * @param {string} runtime the runtime image
+ * @param {string} platform the job's image's
  */
-export function runtimeFillArgv(volumes, runtime) {
+export function runtimeFillArgv(volumes, runtime, platform) {
   return [
     "run",
     "--rm",
+    "--platform",
+    platform,
     "--pull=never",
     "--name",
     volumes.fill,
@@ -539,7 +722,7 @@ export function ownerVolumeCreateArgv(engine, { source, project }) {
  * @param {string} volume
  */
 function ownerVolumesOpenArgvMount(volume) {
-  return join(jobRunDirectory, "volumes", volume);
+  return posix.join(jobRunDirectory, "volumes", volume);
 }
 
 /**
@@ -622,6 +805,23 @@ export function listArgv(pool, assignment) {
   ];
 }
 
+/**
+ * A pool's containers, running or not, a line each: its name, its status and
+ * its image, as a person reads them.
+ *
+ * @param {string} pool the pool label's value
+ */
+export function listLinesArgv(pool) {
+  return [
+    "ps",
+    "--all",
+    "--filter",
+    `label=${poolLabel}=${pool}`,
+    "--format",
+    "{{.Names}}  {{.Status}}  {{.Image}}",
+  ];
+}
+
 /** Every running container on the engine, whoever ran it. */
 export function runningListArgv() {
   return ["ps", "--quiet", "--no-trunc"];
@@ -697,13 +897,14 @@ export function logsArgv(container, linesMax) {
 }
 
 /**
- * A removal, with the container's anonymous volumes: the workspace goes with
- * the workload.
+ * A removal, with the container's anonymous volumes unless they are `kept`:
+ * a job started without chuggy's runtime holds its workspace among them.
  *
  * @param {string} container
+ * @param {boolean} [kept]
  */
-export function removeArgv(container) {
-  return ["rm", "-v", container];
+export function removeArgv(container, kept = false) {
+  return kept ? ["rm", container] : ["rm", "-v", container];
 }
 
 /**

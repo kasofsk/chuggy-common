@@ -92,6 +92,12 @@
  *     nothing stands in for it. So `signedBlock` is not descended into, and an
  *     entry no clip can bring under the bound without it raises here at the
  *     write, which is the loud failure and the early one.
+ *   - A PROMPT SNAPSHOT IS ATOMIC, for the same reason and a further one. A
+ *     prompt is not a tool result, so nothing can be run again to read the
+ *     rest, and a resume that reads a shorter prompt reads a different
+ *     instruction set as if it were complete. So `promptSnapshot` is not
+ *     descended into either, its tools included, and an entry that cannot fit
+ *     without clipping it raises at the write.
  *   - IDENTITY IS PASSED OVER BY NAME, which is the section above.
  *
  * SHARING IS WHY EVERY COPY IS CUT rather than only as many as it takes to fit:
@@ -366,6 +372,14 @@ function signedBlock(value) {
 }
 
 /**
+ * The runtime's record of the system prompt it rendered and the tools it
+ * declared, which a clip leaves whole for the reason the header gives.
+ */
+function promptSnapshot(value) {
+  return value.type === "prompt_snapshot";
+}
+
+/**
  * A block whose whole worth is the source it names. Replacing one with text
  * saying what went costs the reader that source and nothing else, and leaves the
  * content list a list the API still accepts. That is true of a media block and
@@ -416,7 +430,12 @@ function entrySites(entry) {
     if (encodedString(held, key)) return take(held, key, "dropped");
     if (clippable(value))
       return take(held, key, typeof value === "string" ? "text" : "list");
-    if (value === null || typeof value !== "object" || signedBlock(value))
+    if (
+      value === null ||
+      typeof value !== "object" ||
+      signedBlock(value) ||
+      promptSnapshot(value)
+    )
       return;
     if (blocked && mediaBlock(value)) return take(held, key, "block");
     for (const inner of Object.keys(value)) {

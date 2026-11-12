@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -13,6 +14,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL, URL } from "node:url";
 
 import { resultReportCharsMax } from "@chuggy/worker-contract/workerDocuments";
+import { workTaskAnswerSchema } from "@chuggy/worker-contract/workerTask";
 
 import {
   workerChangeBaseVariable,
@@ -30,6 +32,7 @@ import {
   prepareCodexShell,
 } from "./codex.mjs";
 import { coreRuntime } from "./coreRuntime.mjs";
+import { fetchedAnswer } from "./envelope.fixture.mjs";
 
 const task = {
   worker: {
@@ -46,18 +49,23 @@ const task = {
 /** What a run's argv is composed with beside the task, its shell prepared with nothing. */
 const run = { resultSchema: "/tmp/result.json", shellArguments: [] };
 
-test("a Codex invocation is ephemeral and constrained to the result schema", () => {
+/**
+ * Catches a run that leaves no rollout to read its limit from, and one that
+ * lets a layer of Codex's configuration other than the user's turn Daybreak on.
+ */
+test("a Codex invocation is persisted, keeps Daybreak off and is constrained to the result schema", () => {
   assert.deepEqual(
     codexInvocation(task, { ...run, shellArguments: ["--config", "shell"] }),
     [
       "exec",
       "--json",
-      "--ephemeral",
       "--ignore-user-config",
       "--ignore-rules",
       "--model",
       "gpt-5.3-codex",
       "--dangerously-bypass-approvals-and-sandbox",
+      "--config",
+      "daybreak=false",
       "--output-schema",
       "/tmp/result.json",
       "--config",
@@ -125,6 +133,70 @@ test("Codex configuration records the runtime version and pinned model", async (
       { env: { CODEX_HOME: "/tmp/codex" }, maxBuffer: 4096 },
     ],
   ]);
+});
+
+/** The task `task` is, naming `effort` as its Codex mode's reasoning effort. */
+const effortTask = (effort) => ({
+  ...task,
+  worker: { mode: { ...task.worker.mode, effort } },
+});
+
+test("a Codex invocation sets the reasoning effort its task names", () => {
+  assert.deepEqual(codexInvocation(effortTask("high"), run).slice(4, 9), [
+    "--model",
+    "gpt-5.3-codex",
+    "--config",
+    'model_reasoning_effort="high"',
+    "--dangerously-bypass-approvals-and-sandbox",
+  ]);
+});
+
+/** Catches the contract a task is read under dropping the effort it names. */
+test("the effort a task the plane answers names reaches the Codex invocation", () => {
+  const answered = workTaskAnswerSchema.parse({
+    ...fetchedAnswer,
+    worker: { ...fetchedAnswer.worker, mode: effortTask("medium").worker.mode },
+  });
+  assert.ok(
+    codexInvocation(answered, run).includes('model_reasoning_effort="medium"'),
+  );
+});
+
+test("a Codex invocation whose task names no effort sets none", () => {
+  assert.equal(
+    codexInvocation(task, run).some((argument) =>
+      argument.includes("model_reasoning_effort"),
+    ),
+    false,
+  );
+});
+
+test("a task naming an effort still cannot configure Codex itself", () => {
+  assert.throws(
+    () =>
+      codexInvocation(
+        {
+          ...task,
+          worker: {
+            mode: {
+              ...task.worker.mode,
+              effort: "low",
+              arguments: ['--config=model_reasoning_effort="high"'],
+            },
+          },
+        },
+        run,
+      ),
+    /reserves Codex argument --config=/u,
+  );
+});
+
+test("Codex configuration records the effort its task names beside the model", async () => {
+  const configuration = await codexConfiguration(effortTask("xhigh"), {}, () =>
+    Promise.resolve({ stdout: "codex-cli 0.165.0\n" }),
+  );
+  assert.equal(configuration.model, "gpt-5.3-codex");
+  assert.equal(configuration.effort, "xhigh");
 });
 
 test("attached values cannot evade reserved Codex short options", () => {
@@ -210,6 +282,54 @@ test("ticket configuration cannot replace worker-owned Codex arguments", () => {
   );
 });
 
+/** Catches a configuration that puts back the flag that leaves no rollout to read a limit from. */
+test("ticket configuration cannot make a Codex run ephemeral", () => {
+  for (const argument of ["--ephemeral", "--ephemeral=true"])
+    assert.throws(
+      () =>
+        codexInvocation(
+          {
+            ...task,
+            worker: { mode: { ...task.worker.mode, arguments: [argument] } },
+          },
+          run,
+        ),
+      /reserves Codex argument --ephemeral/u,
+    );
+});
+
+/**
+ * Catches a thread lost, so the rollout cannot be found, and Codex's message
+ * dropped from the text a person reads, which is the only place it says when
+ * the limit resets.
+ */
+test("a Codex stream says its thread and the message its failed turn ended with", () => {
+  const sentence =
+    "You've hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at Nov 5th, 2026 1:26 AM.";
+  const folded = [
+    {
+      type: "thread.started",
+      thread_id: "019a4f4e-1c2b-7d3e-8f40-a1b2c3d4e5f6",
+    },
+    { type: "turn.started" },
+    { type: "error", message: sentence },
+    { type: "turn.failed", error: { message: sentence } },
+  ].reduce(codexAgent.frame, undefined);
+
+  assert.deepEqual(folded, {
+    thread: "019a4f4e-1c2b-7d3e-8f40-a1b2c3d4e5f6",
+    sentence,
+  });
+  assert.deepEqual(codexAgent.ended(undefined, folded), {
+    sentence,
+    session: undefined,
+  });
+  assert.deepEqual(codexAgent.ended(undefined, undefined), {
+    sentence: undefined,
+    session: undefined,
+  });
+});
+
 test("ticket configuration cannot override the pinned Codex model through config", () => {
   assert.throws(
     () =>
@@ -256,7 +376,7 @@ test("a mounted Codex OAuth document becomes a private writable CODEX_HOME", asy
       refresh_token: "refresh-token-long-enough",
     },
   });
-  const prepared = await prepareCodexCredential(auth, home);
+  const prepared = await prepareCodexCredential(auth, {}, home);
   assert.deepEqual(prepared.environment, { CODEX_HOME: home });
   assert.deepEqual(prepared.secrets, [
     auth,
@@ -275,9 +395,100 @@ test("a Codex API key's auth.json scrubs the key itself", async (t) => {
     tokens: null,
   });
 
-  const prepared = await prepareCodexCredential(auth, join(parent, "home"));
+  const prepared = await prepareCodexCredential(auth, {}, join(parent, "home"));
 
   assert.deepEqual(prepared.secrets, [auth, "sk-api-key-long-enough"]);
+});
+
+/** Codex's environment as a run composes it: the inherited less what is withheld, then the credential's. */
+function codexComposed(inherited, prepared) {
+  return {
+    ...Object.fromEntries(
+      Object.entries(inherited).filter(
+        ([name]) => !prepared.withheld.includes(name),
+      ),
+    ),
+    ...prepared.environment,
+  };
+}
+
+/** What a runner's environment may leave that Codex 0.165.0 reads a credential from ahead of `auth.json`. */
+const codexStray = {
+  OPENAI_API_KEY: "sk-stray-openai-api-key",
+  CODEX_API_KEY: "sk-stray-codex-api-key",
+  CODEX_ACCESS_TOKEN: "stray-codex-access-token",
+};
+
+/**
+ * Catches a Codex API-key run handed its key anywhere but where `codex exec`
+ * reads one, an `auth.json` written beside it, or a key the runner's
+ * environment left outranking it.
+ */
+test("a Codex API-key run is handed its key in CODEX_API_KEY alone, with no auth.json", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "chuggy-codex-test-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const home = join(parent, "home");
+  const key = "sk-proj-the-runner-s-own-key-0123";
+  const inherited = {
+    ...codexStray,
+    PATH: "/usr/bin",
+    CHUG_WORKER_CODEX_CREDENTIAL: JSON.stringify({ kind: "ApiKey" }),
+  };
+
+  const prepared = await prepareCodexCredential(
+    key,
+    { environment: inherited },
+    home,
+  );
+  const ran = codexComposed(inherited, prepared);
+
+  assert.deepEqual(ran, {
+    PATH: "/usr/bin",
+    CODEX_HOME: home,
+    CODEX_API_KEY: key,
+  });
+  assert.deepEqual(prepared.secrets, [key]);
+  assert.deepEqual(await readdir(home), []);
+  await assert.rejects(
+    prepareCodexCredential(
+      `${key}\nsecond`,
+      { environment: inherited },
+      join(parent, "other"),
+    ),
+    /does not hold one key alone/u,
+  );
+});
+
+/** Catches a key the runner's environment left outranking the ChatGPT login a Codex run was handed. */
+test("a Codex OAuth run reads its auth.json alone whatever key it inherits", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "chuggy-codex-test-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const auth = JSON.stringify({
+    tokens: { access_token: "access-0123456789" },
+  });
+  for (const [index, named] of [
+    {},
+    { CHUG_WORKER_CODEX_CREDENTIAL: JSON.stringify({ kind: "OAuth" }) },
+  ].entries()) {
+    const home = join(parent, String(index));
+    const inherited = { ...codexStray, ...named };
+    const prepared = await prepareCodexCredential(
+      auth,
+      { environment: inherited },
+      home,
+    );
+
+    assert.deepEqual(codexComposed(inherited, prepared), { CODEX_HOME: home });
+    assert.equal(await readFile(join(home, "auth.json"), "utf8"), `${auth}\n`);
+  }
+  await assert.rejects(
+    prepareCodexCredential(
+      auth,
+      { environment: { CHUG_WORKER_CODEX_CREDENTIAL: '{"kind":"Vertex"}' } },
+      join(parent, "refused"),
+    ),
+    /names a Codex credential this core cannot read/u,
+  );
 });
 
 /** Catches a Codex home outside HOME, the directory a job's check found writable. */
@@ -437,7 +648,7 @@ test("a Codex run is given the bundle in its own core's tree", async (t) => {
   const core = join(root, "lib", "chuggy");
   await mkdir(core, { recursive: true });
   await mkdir(join(root, "share"));
-  for (const name of ["codex.mjs", "coreRuntime.mjs"])
+  for (const name of ["codex.mjs", "codexRollout.mjs", "coreRuntime.mjs"])
     await copyFile(
       fileURLToPath(new URL(name, import.meta.url)),
       join(core, name),

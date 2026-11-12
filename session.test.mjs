@@ -4,6 +4,7 @@ import { setTimeout as wait } from "node:timers/promises";
 
 import {
   sessionPlaneAnswers,
+  sessionPlaneRoutes,
   sessionTurnResultCharsMax,
 } from "@chuggy/worker-contract/sessionPlane";
 import { chuggyToolPrefix } from "@chuggy/worker-contract/sessionTools";
@@ -34,6 +35,7 @@ import {
   credentialFile,
   environment,
   facts,
+  inputReadingQueryOf,
   leadRoster,
   mintedCredential,
   planeOf,
@@ -251,6 +253,28 @@ test("a session's agent never moves a command to the background, whatever the si
   });
 
   assert.equal(seen.options.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
+});
+
+/**
+ * Catches a session's agent killed at a Bash timeout shorter than a
+ * repository's checks, including where the site's own environment sets one.
+ */
+test("a session's agent waits on a command past Claude Code's own Bash timeout, whatever the site says", async () => {
+  const plane = planeOf([], facts);
+  const { seen, query } = queryOf(() => []);
+
+  await run({
+    request: plane.request,
+    query,
+    environment: {
+      ...environment,
+      BASH_DEFAULT_TIMEOUT_MS: "120000",
+      BASH_MAX_TIMEOUT_MS: "600000",
+    },
+  });
+
+  assert.equal(seen.options.env.BASH_DEFAULT_TIMEOUT_MS, "1800000");
+  assert.equal(seen.options.env.BASH_MAX_TIMEOUT_MS, "3000000");
 });
 
 test("the query is opened eagerly against the store, with the session's own bounds", async () => {
@@ -736,6 +760,21 @@ test("a bound that is not a positive whole number is refused too", () => {
   });
 });
 
+test("a launch with no idle bound is taken, and every other bound is still required", () => {
+  const { idleMs, ...rest } = task.bounds;
+  assert.ok(
+    idleMs !== undefined,
+    "the fixture holds no idle bound to leave out",
+  );
+  assert.equal(sessionBoundNames.includes("idleMs"), false);
+  assert.deepEqual(checkedSessionBounds(rest), rest);
+  assert.deepEqual(
+    [...sessionBoundNames].sort(),
+    Object.keys(rest).sort(),
+    "a bound besides idleMs became optional",
+  );
+});
+
 test("a credential that straddles the result's truncation is scrubbed whole", async () => {
   const plane = planeOf([turnOne], facts);
   const straddled = `${"x".repeat(sessionTurnResultCharsMax - 10)}${token}`;
@@ -773,6 +812,223 @@ test("a reference bind the plane did not accept ends the session rather than run
       !plane.calls.some(({ path }) => path === "/v1/session/turn/answer"),
       `status ${String(status)} answered a turn the plane cannot resume`,
     );
+  }
+});
+
+/**
+ * Catches a session that fails out of its turn loop leaving its input open and
+ * its runtime running, which keeps the process alive with the turn claimed.
+ */
+test("a session that fails mid-turn fails the turn, ends its input and closes its runtime", async () => {
+  const plane = planeOf(
+    [turnOne],
+    {
+      ...facts,
+      kind: "Thread",
+      capabilities: [...threadRoster],
+      agentReference: "runtime-0",
+    },
+    (path) => (path === sessionPlaneRoutes.reference.path ? 409 : undefined),
+  );
+  const runtime = inputReadingQueryOf(() => [
+    { type: "system", subtype: "init", session_id: "runtime-1" },
+    result("success", { result: "ok" }),
+  ]);
+
+  const code = await run({
+    request: plane.request,
+    requestOnce: plane.requestOnce,
+    query: runtime.query,
+  });
+
+  assert.equal(code, 1);
+  assert.deepEqual(
+    plane.calls
+      .filter(({ path }) => path === sessionPlaneRoutes.turnFailure.path)
+      .map(({ body }) => body),
+    [{ turn: "turn-1", failure: "AgentFailed" }],
+  );
+  assert.ok(runtime.seen.closed, "the runtime was left running");
+  const ended = await Promise.race([
+    runtime.seen.input.then(() => true),
+    wait(500).then(() => false),
+  ]);
+  assert.ok(ended, "the session's input was left open");
+});
+
+/** Catches a session that fails on a refused settlement asking the plane again with a failure of the same turn. */
+test("a turn whose settlement the plane refused is not settled again as the session ends", async () => {
+  const settlements = [
+    sessionPlaneRoutes.turnAnswer.path,
+    sessionPlaneRoutes.turnFailure.path,
+  ];
+  for (const refused of settlements)
+    for (const status of [400, 409]) {
+      const plane = planeOf([turnOne], facts, (path) =>
+        path === refused ? status : undefined,
+      );
+      const runtime = inputReadingQueryOf(() => [
+        { type: "system", subtype: "init", session_id: "runtime-1" },
+        result(
+          refused === sessionPlaneRoutes.turnAnswer.path
+            ? "success"
+            : "error_during_execution",
+          { result: "ok" },
+        ),
+      ]);
+
+      const code = await run({ request: plane.request, query: runtime.query });
+
+      const named = `${refused} answering ${String(status)}`;
+      assert.equal(code, 1, `${named} was treated as settled`);
+      assert.deepEqual(
+        plane.calls
+          .filter(({ path }) => settlements.includes(path))
+          .map(({ path }) => path),
+        [refused],
+        `${named} was settled again`,
+      );
+      assert.ok(runtime.seen.closed, `${named} left the runtime running`);
+    }
+});
+
+const threadSessionFacts = {
+  ...facts,
+  kind: "Thread",
+  capabilities: [...threadRoster],
+};
+
+/** Catches a member's `/clear` reaching the runtime as its command, which starts a stream the reference does not name. */
+test("a thread message naming a runtime command reaches the model as text, and its answer is the member's", async () => {
+  const turns = ["/clear", "/usr/bin is missing"].map((input, index) => ({
+    ...turnOne,
+    turn: `turn-${String(index + 1)}`,
+    ordinal: index + 1,
+    input,
+  }));
+  const plane = planeOf(turns, threadSessionFacts);
+  const asked = [];
+  const { query } = queryOf((message, index) => {
+    asked.push(message);
+    return [
+      { type: "system", subtype: "init", session_id: "runtime-1" },
+      result("success", { result: `read ${turns[index].input} as text` }),
+    ];
+  });
+
+  const code = await run({
+    request: plane.request,
+    requestOnce: plane.requestOnce,
+    query,
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(
+    asked.map((message) => [message.message.content, message.client_composed]),
+    [
+      ["/clear", true],
+      ["/usr/bin is missing", undefined],
+    ],
+  );
+  assert.deepEqual(
+    plane.calls
+      .filter(({ path }) => path === sessionPlaneRoutes.turnAnswer.path)
+      .map(({ body }) => [body.turn, body.result]),
+    [
+      ["turn-1", "read /clear as text"],
+      ["turn-2", "read /usr/bin is missing as text"],
+    ],
+  );
+});
+
+/** Catches a member's answer to an offer reaching the model as anything but the text their console posted. */
+test("a thread's offer reply reaches the model as its text, as a member's message does, and is answered in text", async () => {
+  const input = JSON.stringify({
+    version: 1,
+    offerReply: {
+      call: "toolu_01",
+      decision: "Confirmed",
+      outcome: "Succeeded",
+    },
+  });
+  const plane = planeOf(
+    [{ ...turnOne, inputKind: "OfferReply", input }],
+    threadSessionFacts,
+  );
+  const asked = [];
+  const { query } = queryOf((message) => {
+    asked.push(message);
+    return [
+      { type: "system", subtype: "init", session_id: "runtime-1" },
+      result("success", { result: "it is released" }),
+    ];
+  });
+
+  const code = await run({
+    request: plane.request,
+    requestOnce: plane.requestOnce,
+    query,
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(
+    asked.map((message) => [message.message.content, message.client_composed]),
+    [[input, undefined]],
+  );
+  assert.deepEqual(
+    plane.calls
+      .filter(({ path }) => path === sessionPlaneRoutes.turnAnswer.path)
+      .map(({ body }) => [body.turn, body.result]),
+    [["turn-1", "it is released"]],
+  );
+});
+
+/** Catches a session carrying on in a stream its reference does not name, which the next resume would not bring back. */
+test("a runtime that leaves the stream its reference names ends the session and fails the turn", async () => {
+  const moves = {
+    "a new session id": {
+      type: "system",
+      subtype: "init",
+      session_id: "runtime-2",
+    },
+    "a reset conversation": {
+      type: "conversation_reset",
+      new_conversation_id: "runtime-2",
+      session_id: "runtime-1",
+      trigger: "clear",
+    },
+  };
+  for (const [move, moved] of Object.entries(moves)) {
+    const second = { ...turnOne, turn: "turn-2", ordinal: 2 };
+    const plane = planeOf([turnOne, second], threadSessionFacts);
+    const runtime = inputReadingQueryOf((_asked, index) => [
+      { type: "system", subtype: "init", session_id: "runtime-1" },
+      ...(index === 1 ? [moved] : []),
+      result("success", { result: "ok" }),
+    ]);
+
+    const code = await run({
+      request: plane.request,
+      requestOnce: plane.requestOnce,
+      query: runtime.query,
+    });
+
+    assert.equal(code, 1, `${move} did not end the session`);
+    assert.deepEqual(
+      plane.calls
+        .filter(({ path }) => path === sessionPlaneRoutes.reference.path)
+        .map(({ body }) => body),
+      [{ reference: "runtime-1" }],
+      `${move} was bound`,
+    );
+    assert.deepEqual(
+      plane.calls
+        .filter(({ path }) => path === sessionPlaneRoutes.turnFailure.path)
+        .map(({ body }) => body),
+      [{ turn: "turn-2", failure: "AgentFailed" }],
+      `${move} did not fail its turn`,
+    );
+    assert.ok(runtime.seen.closed, `${move} left the runtime running`);
   }
 });
 
@@ -853,7 +1109,7 @@ test("a session with no ProjectRead registers no read and disallows every one by
     assert.ok(disallowed.includes(tool), `${tool} was left ungoverned`);
 });
 
-test("the session's objectives ride on the preset prompt, recorded for the conversation", async () => {
+test("the session's objectives ride on the preset prompt, rendered for every query", async () => {
   const plane = planeOf([], leadFacts);
   const { seen, query } = queryOf(() => []);
 
@@ -862,10 +1118,73 @@ test("the session's objectives ride on the preset prompt, recorded for the conve
   assert.deepEqual(seen.options.systemPrompt, {
     type: "preset",
     preset: "claude_code",
-    snapshot: true,
+    snapshot: false,
     append: leadFacts.systemPrompt,
   });
   assert.deepEqual(seen.options.settingSources, ["project"]);
+});
+
+/**
+ * The system prompt the pinned runtime sends on a resume: the last prompt
+ * snapshot the transcript holds, unless the query turned recording off, when it
+ * renders the preset with the query's own append. That is what driving the
+ * runtime over a stored stream showed; this suite does not drive it.
+ */
+function resumedSystemPrompt(entries, systemPrompt) {
+  const recorded = entries.findLast(
+    (entry) => entry.attachment?.type === "prompt_snapshot",
+  );
+  if (systemPrompt.snapshot !== false && recorded !== undefined)
+    return recorded.attachment.systemPrompt;
+  return [systemPrompt.append];
+}
+
+/**
+ * The live leads and threads already hold a snapshot the store clipped, and
+ * none of them is closed first. A resume over one runs under the append its
+ * launch passed, not under the note the store kept.
+ */
+test("a lead resumed over a clipped prompt snapshot runs under the append its launch passed", async () => {
+  const clipped = {
+    type: "attachment",
+    attachment: {
+      type: "prompt_snapshot",
+      systemPrompt: [
+        "[the session store dropped the 11 values here, 10456 bytes; part of a list reads as all of it, so run the tool again]",
+      ],
+      tools: [],
+    },
+    uuid: "9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a",
+    sessionId: "runtime-1",
+  };
+  const plane = planeOf([turnOne], {
+    ...leadFacts,
+    agentReference: "runtime-1",
+  });
+  const request = async (asking, held, path, ...rest) =>
+    path.startsWith("/v1/session/store/runtime-1?")
+      ? {
+          status: 200,
+          json: async () => ({
+            batches: [{ batch: 1, content: `${JSON.stringify(clipped)}\n` }],
+          }),
+        }
+      : plane.request(asking, held, path, ...rest);
+  let prompt;
+  const { query } = queryOf((_asked, _index, options) => [
+    async () => {
+      const loaded = await options.sessionStore.load({
+        sessionId: options.resume,
+      });
+      prompt = resumedSystemPrompt(loaded, options.systemPrompt);
+    },
+    { type: "system", subtype: "init", session_id: "runtime-1" },
+    result("success", { result: "ok" }),
+  ]);
+
+  await run({ request, query });
+
+  assert.deepEqual(prompt, [leadFacts.systemPrompt]);
 });
 
 test("a session row that carries no objectives still takes its turn", async () => {
@@ -878,8 +1197,87 @@ test("a session row that carries no objectives still takes its turn", async () =
   assert.deepEqual(seen.options.systemPrompt, {
     type: "preset",
     preset: "claude_code",
-    snapshot: true,
+    snapshot: false,
   });
+});
+
+test("a lead whose facts name a compaction window runs under it as a flag-level setting", async () => {
+  const plane = planeOf([], { ...leadFacts, autoCompactWindow: 200_000 });
+  const { seen, query } = queryOf(() => []);
+
+  await run({ request: plane.request, query });
+
+  assert.equal(seen.options.settings.autoCompactWindow, 200_000);
+  assert.ok(
+    !("CLAUDE_CODE_AUTO_COMPACT_WINDOW" in seen.options.env),
+    "the variable that overrides the setting was set",
+  );
+});
+
+test("a session whose facts name no compaction window is given no settings", async () => {
+  const plane = planeOf([], leadFacts);
+  const { seen, query } = queryOf(() => []);
+
+  await run({ request: plane.request, query });
+
+  assert.ok(!("settings" in seen.options), "settings were given");
+});
+
+test("a session whose facts name a model runs on it over the site's", async () => {
+  const plane = planeOf([], { ...leadFacts, model: "claude-sonnet-5-5" });
+  const { seen, query } = queryOf(() => []);
+
+  await run({
+    request: plane.request,
+    query,
+    environment: { ...environment, [sessionModelVariable]: "opus" },
+  });
+
+  assert.equal(seen.options.model, "claude-sonnet-5-5");
+});
+
+test("a session whose facts name no model runs on the site's", async () => {
+  const plane = planeOf([], leadFacts);
+  const { seen, query } = queryOf(() => []);
+
+  await run({
+    request: plane.request,
+    query,
+    environment: { ...environment, [sessionModelVariable]: "opus" },
+  });
+
+  assert.equal(seen.options.model, "opus");
+});
+
+test("a session whose facts name an effort runs at it, unoutranked by the effort variable", async () => {
+  const plane = planeOf([], { ...leadFacts, effort: "medium" });
+  const { seen, query } = queryOf(() => []);
+
+  await run({
+    request: plane.request,
+    query,
+    environment: { ...environment, CLAUDE_CODE_EFFORT_LEVEL: "high" },
+  });
+
+  assert.equal(seen.options.effort, "medium");
+  assert.ok(
+    !("CLAUDE_CODE_EFFORT_LEVEL" in seen.options.env),
+    "the variable that outranks the effort was left in",
+  );
+});
+
+test("a session whose facts name no effort is given none and keeps the effort variable", async () => {
+  const plane = planeOf([], leadFacts);
+  const { seen, query } = queryOf(() => []);
+
+  await run({
+    request: plane.request,
+    query,
+    environment: { ...environment, CLAUDE_CODE_EFFORT_LEVEL: "high" },
+  });
+
+  assert.ok(!("effort" in seen.options), "an effort was given");
+  assert.equal(seen.options.env.CLAUDE_CODE_EFFORT_LEVEL, "high");
 });
 
 test("an observation answered with decision tools posts the document they composed", async () => {
@@ -1056,8 +1454,9 @@ test("a composed decision is scrubbed of what the pod was handed, exactly as pro
 test("a project tool reaches the API under the session's own bearer", async () => {
   const plane = planeOf([observationTurn], leadFacts);
   const seenApi = [];
-  const { query } = queryOf((_asked, _index, options) => [
+  const { query } = queryOf((_asked, index, options) => [
     async () => {
+      if (index > 0) return;
       await options.mcpServers.chuggy.tools
         .find((tool) => tool.name === "read_ticket")
         .handler({ ticket: 4 });
@@ -1165,7 +1564,7 @@ test("a lead is served neither origination nor revocation, and each is disallowe
   }
 });
 
-test("a thread's own objectives ride on the preset prompt, recorded for the conversation", async () => {
+test("a thread's own objectives ride on the preset prompt, rendered for every query", async () => {
   const plane = planeOf([], threadFacts);
   const { seen, query } = queryOf(() => []);
 
@@ -1174,8 +1573,69 @@ test("a thread's own objectives ride on the preset prompt, recorded for the conv
   assert.deepEqual(seen.options.systemPrompt, {
     type: "preset",
     preset: "claude_code",
-    snapshot: true,
+    snapshot: false,
     append: threadFacts.systemPrompt,
+  });
+});
+
+/** A member's own thread, as the plane answers its facts: its owner's reserved partition, `MemberRead` alone and objectives of its own. */
+const memberFacts = {
+  ...facts,
+  project: `@member-${"a".repeat(64)}`,
+  kind: "Thread",
+  capabilities: ["MemberRead"],
+  systemPrompt:
+    "# Whose thread this is\n\nYou are geoff's own thread in vteng, opened with no project selected.",
+};
+
+/** Catches a member's own session cloned for, given a tool its roster does not hold, or told objectives other than its own. */
+test("a member's own session runs with no tree, the member tools alone and its own objectives", async () => {
+  const plane = planeOf([], memberFacts, () => undefined, mintedCredential);
+  const { seen, query } = queryOf(() => []);
+  const checkouts = [];
+
+  const code = await run({
+    environment: {
+      ...environment,
+      [sessionTaskVariable]: JSON.stringify({
+        ...task,
+        project: memberFacts.project,
+        kind: "Thread",
+        capabilities: ["MemberRead"],
+      }),
+    },
+    request: plane.request,
+    query,
+    checkout: async (...asked) => {
+      const checkout = await sessionCheckout(...asked);
+      checkouts.push(checkout);
+      return checkout;
+    },
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(checkouts, [undefined]);
+  assert.equal(seen.options.cwd, "/workspace");
+  assert.deepEqual(
+    plane.calls.filter(({ path }) => path === "/v1/session/credential"),
+    [],
+  );
+  const member = sessionCapabilityTools.MemberRead;
+  assert.deepEqual(
+    seen.options.mcpServers.chuggy.tools.map(({ name }) => name).sort(),
+    [...member].sort(),
+  );
+  assert.deepEqual(
+    [...seen.options.allowedTools].sort(),
+    member.map((tool) => `${chuggyToolPrefix}${tool}`).sort(),
+  );
+  for (const tool of sessionBuiltInTools)
+    assert.ok(seen.options.disallowedTools.includes(tool), tool);
+  assert.deepEqual(seen.options.systemPrompt, {
+    type: "preset",
+    preset: "claude_code",
+    snapshot: false,
+    append: memberFacts.systemPrompt,
   });
 });
 
@@ -1661,4 +2121,66 @@ test("the checkout is handed the scrub built from this pod's own secrets", async
   const printed = handed(`git failed: token ${token} bearer ${bearer}`);
   assert.ok(!printed.includes(token), "a failed clone would print the token");
   assert.ok(!printed.includes(bearer), "a failed clone would print the bearer");
+});
+
+/** Catches a session's own credential written where every session's is, rather than under its own minted directory. */
+test("a bound session's minted credential is written under the directory it is launched with", async () => {
+  const plane = planeOf([], facts, () => undefined, mintedCredential);
+  const { query } = queryOf(() => []);
+  const written = [];
+
+  await run({
+    request: plane.request,
+    query,
+    environment: boundEnvironment,
+    minted: "/minted/session-3",
+    write: async (file) => written.push(file),
+    checkout: async () => undefined,
+  });
+
+  assert.deepEqual(written, ["/minted/session-3/chuggy-git-credential"]);
+});
+
+/** Catches a stop its launcher asked for cutting the turn being answered short, or claiming another. */
+test("a stop its launcher asks for lets the turn being answered settle and claims no other", async () => {
+  const second = { ...turnOne, turn: "turn-2", ordinal: 2 };
+  const plane = planeOf([turnOne, second], facts);
+  const stop = new globalThis.AbortController();
+  const { query } = queryOf(() => [
+    () => stop.abort(),
+    result("success", { result: "answered" }),
+  ]);
+
+  const code = await run({
+    request: plane.request,
+    query,
+    stopped: stop.signal,
+  });
+
+  assert.equal(code, 0);
+  const claims = plane.calls.filter(
+    ({ path }) => path === sessionPlaneRoutes.turn.path,
+  );
+  assert.equal(claims.length, 1);
+  assert.ok(
+    plane.calls.some(({ path }) => path === sessionPlaneRoutes.turnAnswer.path),
+    "the stopped turn was never answered",
+  );
+});
+
+test("a stop asked before the session opened its mailbox claims no turn", async () => {
+  const plane = planeOf([turnOne], facts);
+  const { query } = queryOf(() => [result("success", { result: "x" })]);
+
+  const code = await run({
+    request: plane.request,
+    query,
+    stopped: globalThis.AbortSignal.abort(),
+  });
+
+  assert.equal(code, 0);
+  assert.ok(
+    !plane.calls.some(({ path }) => path === sessionPlaneRoutes.turn.path),
+    "a stopped session claimed a turn",
+  );
 });

@@ -22,6 +22,10 @@
  * it, and `held` answers for them meanwhile. One that fails leaves `held` and
  * is logged.
  *
+ * A WORKLOAD'S IMAGE IS PULLED FOR THE ENGINE'S OWN PLATFORM, or, where it has
+ * no build for that one, for the platform its assignment requires, which an
+ * engine that emulates that platform runs.
+ *
  * WHAT IS RUNNING IS READ FROM THE ENGINE. `held` lists this pool's containers
  * by label and reads each one's assignment, kind and deadline off its labels,
  * so a restarted runner picks up what its predecessor started. A container that
@@ -35,23 +39,41 @@
  * reason, never the job's log, which can hold a secret, and a session's with
  * its phase, `Succeeded` only for a container that exited 0. A failed
  * placement's attempt is the one it held; a container's is read back from the
- * envelope it was run with. One this pool stopped is never named.
+ * envelope it was run with. One this pool stopped is never named. A job's end
+ * says how its process ended where its container was started and ended of
+ * itself.
+ *
+ * `measured` IS EACH PULL THIS PROCESS MADE, from its first try to the image
+ * being here, and each run whose container it removed, however it ended, from
+ * the start the engine names to its finish, or to the removal where it names
+ * none.
  *
  * A JOB WHOSE ASSIGNMENT NAMES A RUNTIME STARTS THROUGH IT, whatever image it
- * names, as chuggy's cluster starts one: the runtime image is got as a job's
- * image is, a volume of the job's own is filled from it, and the job's
- * container mounts that volume read-only and runs the runtime's check of the
- * image before the core, in a workspace volume of its own that every user
- * can write, as a cluster's emptyDir is. A job whose image cannot be got,
- * started or pass that check is named refused rather than ended, with the
- * image's fault in one fixed text a fault. A runtime this runner cannot get or
- * copy is the site's failure and never the image's, so that job's placement
- * fails as any does. The volumes go with the job's container, or with its
- * placement where the job never starts in them, the container filling them
- * first. Any a runner left, stopped mid-placement or refused a removal, are
- * removed by a later `held`, which never takes one of a placement in flight
- * or of a container it lists. An assignment naming no runtime runs its
- * image's own entrypoint.
+ * names, as chuggy's cluster starts one: once the job's image is here, the
+ * runtime image is got as a job's image is, for the platform the engine holds
+ * the job's image for, a volume of the job's own is filled from that variant
+ * of it, and the job's container mounts that volume read-only and runs the
+ * runtime's check of the image before the core, in a workspace volume of its
+ * own that every user can write, as a cluster's emptyDir is. One placement at
+ * a time gets and copies a runtime image, of all the runners sharing a
+ * `runtimeLock` or of this one where none is set, as `runtimeTurnTaken` says.
+ * A job whose image cannot be got, started or pass that check is named
+ * refused rather than ended, with the image's fault in one fixed text a
+ * fault. A runtime this runner cannot get or copy is the site's failure and
+ * never the image's, so that job's placement fails as any does. The volumes
+ * go with the job's container, or with its placement where the job never
+ * starts in them, the container filling them first. Any a runner left,
+ * stopped mid-placement or refused a removal, are removed by a later `held`,
+ * which never takes one of a placement in flight or of a container it lists,
+ * nor any workspace. An assignment naming no runtime runs its image's own
+ * entrypoint.
+ *
+ * A JOB'S WORKSPACE GOES WITH ITS CONTAINER ONLY WHERE THE JOB ENDED CLEAN, as
+ * `keptWorkspace.mjs` says: its record is copied out of the stopped container
+ * first, within a bound, and one that cannot be is no record. Every other
+ * job's workspace is kept, a job's started through no runtime among them,
+ * whose workspace is the engine's anonymous volume, and is logged and
+ * recorded. Nothing here removes a kept one.
  *
  * A JOB IS HANDED THIS MACHINE'S ENGINE where its runner hands jobs one: the
  * engine's socket, mounted into its container, and the variables that tell
@@ -118,7 +140,7 @@
 
 import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join, posix } from "node:path";
+import { dirname, isAbsolute, join, posix } from "node:path";
 
 import {
   workerImageFaults,
@@ -136,13 +158,17 @@ import { claudeCredentialCarried } from "./claudeCredential.mjs";
 import {
   assignmentLabel,
   bindMountNameable,
+  copiedOutArgv,
   deadlineLabel,
   dockerDiskUsageArgv,
   fillLabel,
   forcedRemoveArgv,
   heldCreateArgv,
   imageInspectArgv,
+  imageInspectManyArgv,
+  imageInspectPlatformArgv,
   inspectArgv,
+  keptVolumesArgv,
   killArgv,
   kindLabel,
   listArgv,
@@ -162,6 +188,7 @@ import {
   volumeRemoveArgv,
   workloadMountTargets,
   workspaceLabel,
+  workspaceVolumeLabel,
 } from "./engineArgv.mjs";
 import {
   engineCommandUnstarted,
@@ -170,7 +197,7 @@ import {
   enginePullRefused,
 } from "./engineErrors.mjs";
 import {
-  jobClaudeAgent,
+  jobCapabilitiesWithheld,
   jobCredentialFilesChecked,
   jobCredentialHanded,
   jobEngineSocketEnvironment,
@@ -182,19 +209,21 @@ import {
 } from "./job.mjs";
 import {
   poolIdentityDigest,
+  poolIdentityChatHost,
   poolIdentityDigestChars,
   poolIdentityPersonal,
   poolLabelValue,
   poolProjectDigest,
   poolProjectLabelValue,
 } from "./poolIdentity.mjs";
+import { poolSessionPhase } from "./poolSessionPlane.mjs";
 import {
   diskFloor,
   diskFloorCapped,
   diskFloorHeld,
   dockerDiskUsage,
 } from "./diskFloor.mjs";
-import { fileLockHolderAlive } from "./fileLock.mjs";
+import { fileLockHolderAlive, fileLockTaken } from "./fileLock.mjs";
 import {
   imageCleanup,
   imageCleanupNone,
@@ -216,7 +245,16 @@ import {
   memoryStartCutMs,
   memoryStartDecided,
 } from "./memoryBudget.mjs";
+import {
+  keptWorkspaceKept,
+  keptWorkspaceRecordName,
+  keptWorkspaceRecordRead,
+  keptWorkspacesListed,
+  keptWorkspacesRecorded,
+  keptWorkspaceWhy,
+} from "./keptWorkspace.mjs";
 import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
+import { runnerMeasures } from "./runnerReport.mjs";
 import { runtimeScratch } from "./runtimeScratch.mjs";
 import {
   savedLogBytesMax,
@@ -243,9 +281,10 @@ import {
  * @typedef {object} ContainerBackendSettings
  * @property {"docker" | "podman"} engine
  * @property {PoolIdentity} pool
- * @property {string} tokenFile the Claude credential file, which each workload mounts but one whose job requires another agent `agentCredentialFiles` names
+ * @property {string} [tokenFile] the Claude credential file, which each workload mounts but one whose job requires another agent `agentCredentialFiles` names; required where no selector is given
  * @property {import("./claudeCredential.mjs").ClaudeCredentialSetting} [claudeCredential] the kind of credential `tokenFile` is; none, and a workload's core reads it as a subscription's token, as it does a site pool's
  * @property {Readonly<Record<string, string>>} [agentCredentialFiles] the credential file of each agent but Claude, by the name its `Agent:` capability gives it, which a job requiring that agent mounts in place of `tokenFile`; none, and such a job mounts `tokenFile`
+ * @property {import("./agentCredentialSet.mjs").AgentCredentialSelector} [credentials] the runner's selector, which chooses the credential each job and session mounts in place of the three above
  * @property {string | undefined} registryHost the one registry the pool's token is presented to
  * @property {string | undefined} dockerHost the endpoint docker's context names, which a pull of the pool's registry is told; docker's alone
  * @property {number} timeoutSecsMax
@@ -266,6 +305,7 @@ import {
  * @property {string} [memoryLock] the file every runner using this engine as this user takes the memory lock at, which a budget needs; none, and no budget is kept
  * @property {number} [memoryReservedBytes] what the budget reserves from jobs, which no job may ask past the rest of; none or 0, and a job may ask the whole budget
  * @property {string} [memoryClaimLock] the file every runner using this engine as this user takes the claim lock at, to ask a plane that claims by room for jobs; none, and the runner asks it as it asks any plane
+ * @property {string} [runtimeLock] the file every runner using this engine as this user takes the runtime lock at, to get and copy chuggy's runtime; none, and only this runner's placements take turns at it
  *
  * @typedef {z.infer<typeof ownerVolumesSchema>[number]} OwnerVolumeListed a volume as its owner lists it, which `ownerVolumesServed` makes one a job mounts
  *
@@ -276,12 +316,13 @@ import {
  * @typedef {object} ContainerBackendSeams
  * @property {Engine} engine
  * @property {WorkerPoolTokens} tokens the pool's own, which the loop shares
- * @property {(file: string, agent: string) => Promise<string | undefined>} tokenFileRefusal why this machine cannot hand a job the credential file the backend mounts, which is `agent`'s, or nothing: the runner's to judge, since whether a job can read it turns on how its engine maps users
+ * @property {(file: string, agent: string, credential?: import("./agentCredentialSet.mjs").AgentCredential) => Promise<string | undefined>} tokenFileRefusal why this machine cannot hand a job the credential file the backend mounts, which is `agent`'s and the credential the selector chose where it chose one, or nothing: the runner's to judge, since whether a job can read it turns on how its engine maps users
  * @property {() => number} nowMs
  * @property {(ms: number, signal: AbortSignal) => Promise<void>} sleep
  * @property {(line: string) => void} log
  * @property {() => Promise<import("./diskFloor.mjs").DiskFree>} [diskFree] the bytes free where the engine stores what it holds, the runner's to measure, since an engine in a VM answers for the VM's disk; none, and no floor is kept
- * @property {(pid: number) => boolean} [holderAlive] whether the process a memory hold names is running; `fileLockHolderAlive` where none
+ * @property {(pid: number) => boolean} [holderAlive] whether the process a memory hold or the runtime lock names is running; `fileLockHolderAlive` where none
+ * @property {() => AbortSignal} [workspaceRecordCut] what ends a copy of a job's workspace record out of its container; `workspaceRecordReadMsMax` where none
  *
  * @typedef {object} InFlightPlacement
  * @property {string} assignment
@@ -310,9 +351,10 @@ import {
  *   runtime: PlacementRuntime | undefined,
  *   volumes: readonly OwnerVolume[] | undefined,
  *   pulled: Map<string, string>,
+ *   platformRequired: string | undefined,
  *   controller: AbortController,
  *   done: Promise<void>,
- * }} Placement each image it pulled in `pulled`, by the id it was pulled as; how long its container may run in `runSecs`; its hold in `memory`, none for a session or without a budget, and whether that hold is on the engine in `holding`
+ * }} Placement each image it pulled in `pulled`, by the id it was pulled as; the platform its assignment requires in `platformRequired`, as `placementPlatformRequired` reads it; how long its container may run in `runSecs`; its hold in `memory`, none for a session or without a budget, and whether that hold is on the engine in `holding`
  *
  * @typedef {object} PoolContainer
  * @property {string} id
@@ -323,8 +365,9 @@ import {
  * @property {number | undefined} exitCode
  * @property {number | undefined} deadlineEpochSecs
  * @property {number | undefined} startedMs where the engine says it started
+ * @property {number | undefined} finishedMs where the engine says it finished, which before it has is a time before it started
  * @property {string | undefined} runtimeVolume the volume holding its copy of chuggy's runtime, where it was started through one
- * @property {string | undefined} workspaceVolume the volume its workspace is, where it was started through chuggy's runtime
+ * @property {string | undefined} workspaceVolume the volume its workspace is: its own where it was started through chuggy's runtime, and otherwise the anonymous one the engine made
  *
  * @typedef {WorkerPoolBackend & {
  *   inFlight: () => InFlightPlacement[],
@@ -343,6 +386,7 @@ import {
  * @typedef {object} ContainerEnd how a workload's container ended
  * @property {string} why in this backend's words, which a job's end carries
  * @property {boolean} succeeded whether it exited 0, which a session's end carries
+ * @property {true} [ran] where its workload ran to an end of its own, which a job's end carries as `succeeded` says; none for one never started
  * @property {WorkerPoolJobRefusal} [refusal] where this site refused the job for its image's fault rather than ran it, which a job's end carries
  * @property {"Deadline" | "DiskLow"} [killed] where `held` killed it, at its deadline or for low disk, which a job's end carries
  *
@@ -357,6 +401,8 @@ import {
  * @property {Map<string, number>} logFailures when each listed container's logs first could not be saved, by its id
  * @property {import("./diskFloor.mjs").DiskFloor | undefined} disk
  * @property {import("./memoryBudget.mjs").MemoryBudget | undefined} memory
+ * @property {Map<string, Promise<unknown>>} runtimeTurns the turn last queued at each runtime image, which `runtimeTurnTaken` gives one placement at a time
+ * @property {import("./runnerReport.mjs").RunnerMeasures} measures the pulls it made and the runs whose containers it removed
  *
  * @typedef {z.infer<typeof inspectedSchema>[number]} InspectedContainer
  */
@@ -369,6 +415,9 @@ const endedStatuses = new Set([
   "stopped",
   "configured",
 ]);
+
+/** The ended states of a container that was never started. */
+const unstartedStatuses = new Set(["created", "configured"]);
 
 /** The ended states a container ran to an exit status in. */
 const exitedStatuses = new Set(["exited", "stopped"]);
@@ -417,12 +466,13 @@ function checkedImageFault(exitCode) {
 }
 
 /**
- * How long after its first pull a job's image may go on failing to pull for
- * a cause that can pass before the failure is read as the image's: the
+ * How long after its first failure a job's image may go on failing to pull
+ * for a cause that can pass before the failure is read as the image's: the
  * counterpart of the dwell chuggy's cluster reads a pull by,
  * `kubernetesPullFailureDwellSecs` in chuggy's
- * `src/adapters/kubernetes/podFaults.ts`. It is counted from that pull, so a
- * runtime slow to pull before it takes none of it.
+ * `src/adapters/kubernetes/podFaults.ts`. It is counted from that failure, so
+ * neither a runtime slow to pull before it nor a pull slow to fail takes any
+ * of it.
  */
 export const pullFailureDwellMs = 120_000;
 
@@ -473,13 +523,32 @@ const inspectedSchema = z.array(
       Labels: z.record(z.string(), z.string()).nullish(),
       Env: z.array(z.string()).nullish(),
     }),
+    Mounts: z
+      .array(
+        z.object({
+          Type: z.string(),
+          Name: z.string().optional(),
+          Destination: z.string(),
+        }),
+      )
+      .nullish(),
     State: z.object({
       Status: z.string(),
       ExitCode: z.number().optional(),
       StartedAt: z.string().optional(),
+      FinishedAt: z.string().optional(),
     }),
   }),
 );
+
+/** An image's inspection, of which only the platform it is for is read. */
+const inspectedImageSchema = z.tuple([
+  z.object({
+    Os: z.string().min(1),
+    Architecture: z.string().min(1),
+    Variant: z.string().optional(),
+  }),
+]);
 
 const inspectedVolumesSchema = z.array(
   z.object({
@@ -510,8 +579,17 @@ function containerNameSegment(pool) {
   return poolIdentityPersonal(pool) ? "personal" : pool.pool;
 }
 
-/** @param {ContainerBackendSettings} settings */
+/**
+ * The settings as given, or a throw naming what is wrong with them; a chat
+ * host's identity is refused, since a chat host runs no job.
+ *
+ * @param {ContainerBackendSettings} settings
+ */
 export function checkedContainerBackendSettings(settings) {
+  if (poolIdentityChatHost(settings.pool))
+    throw new RangeError(
+      "a chat host runs no job, so its credentials run no container backend",
+    );
   const segment = containerNameSegment(settings.pool);
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/u.test(segment))
     throw new RangeError(
@@ -535,7 +613,11 @@ export function checkedContainerBackendSettings(settings) {
     if (floor !== undefined && (!Number.isSafeInteger(floor) || floor < 0))
       throw new RangeError(`${key} must be a whole number of bytes, 0 or more`);
   }
-  for (const key of /** @type {const} */ (["memoryLock", "memoryClaimLock"]))
+  for (const key of /** @type {const} */ ([
+    "memoryLock",
+    "memoryClaimLock",
+    "runtimeLock",
+  ]))
     if (settings[key] !== undefined && settings[key].length === 0)
       throw new RangeError(`${key} must name a file`);
   return settings;
@@ -549,6 +631,7 @@ function poolContainer(inspected) {
   const labels = inspected.Config.Labels ?? {};
   const deadline = Number(labels[deadlineLabel]);
   const started = Date.parse(inspected.State.StartedAt ?? "");
+  const finished = Date.parse(inspected.State.FinishedAt ?? "");
   return {
     id: inspected.Id,
     name: inspected.Name.replace(/^\//u, ""),
@@ -558,8 +641,14 @@ function poolContainer(inspected) {
     exitCode: inspected.State.ExitCode,
     deadlineEpochSecs: Number.isSafeInteger(deadline) ? deadline : undefined,
     startedMs: Number.isNaN(started) ? undefined : started,
+    finishedMs: Number.isNaN(finished) ? undefined : finished,
     runtimeVolume: labels[runtimeLabel],
-    workspaceVolume: labels[workspaceLabel],
+    workspaceVolume:
+      labels[workspaceLabel] ??
+      inspected.Mounts?.find(
+        (mount) =>
+          mount.Type === "volume" && mount.Destination === jobWorkspace,
+      )?.Name,
   };
 }
 
@@ -789,8 +878,9 @@ async function poolVolumes(state) {
  * Removes the volumes of chuggy's runtime that nothing answers for: each of
  * an assignment `held` listed no container of and found no placement of in
  * flight, the placements read again as each is removed, since a placement
- * makes its volumes after it is placed. The container filling them goes
- * first. A sweep that could not finish leaves `strays` set for the next.
+ * makes its volumes after it is placed, and never a workspace, which is kept
+ * where its job did not end clean. The container filling them goes first. A
+ * sweep that could not finish leaves `strays` set for the next.
  *
  * @param {State} state
  * @param {ReadonlySet<string>} listed the assignments `held` found in flight or listed a container of
@@ -807,6 +897,7 @@ async function strayVolumesRemoved(state, listed) {
     const assignment = labels?.[assignmentLabel];
     if (
       assignment === undefined ||
+      Object.hasOwn(labels ?? {}, workspaceVolumeLabel) ||
       listed.has(assignment) ||
       state.placements.has(assignment)
     )
@@ -824,20 +915,141 @@ async function strayVolumesRemoved(state, listed) {
   }
 }
 
+/** How long a stopped job's workspace record may take to copy out of its container. */
+export const workspaceRecordReadMsMax = 10_000;
+
+/**
+ * A stopped job's workspace record, copied out of its container to this
+ * machine through the engine and read there, or why it could not be: bounded
+ * by `workspaceRecordReadMsMax`, or by the seam's cut where it gives one. A
+ * container the engine no longer has is `gone`.
+ *
+ * @param {State} state
+ * @param {PoolContainer} container
+ * @returns {Promise<{read: import("./keptWorkspace.mjs").KeptWorkspaceRead, gone: boolean}>}
+ */
+async function workspaceRecordCopied(state, container) {
+  const { settings, seams } = state;
+  const cut =
+    seams.workspaceRecordCut?.() ??
+    globalThis.AbortSignal.timeout(workspaceRecordReadMsMax);
+  let directory;
+  try {
+    await mkdir(settings.runtimeDir, { recursive: true, mode: 0o700 });
+    directory = await mkdtemp(
+      join(settings.runtimeDir, runtimeScratch("record")),
+    );
+    const file = join(directory, keptWorkspaceRecordName);
+    const copied = await seams.engine.exec(
+      copiedOutArgv(
+        container.id,
+        posix.join(jobWorkspace, keptWorkspaceRecordName),
+        file,
+      ),
+      { cut },
+    );
+    if (copied.code === 0)
+      return { read: await keptWorkspaceRecordRead(file), gone: false };
+    const gone = engineFailure(copied) === "NoSuchContainer";
+    return {
+      read: {
+        unread: gone ? "its container is gone" : engineFailureLine(copied),
+      },
+      gone,
+    };
+  } catch (failure) {
+    return {
+      read: {
+        unread: cut.aborted
+          ? "it was not copied out in time"
+          : failure instanceof Error
+            ? failure.message
+            : String(failure),
+      },
+      gone: false,
+    };
+  } finally {
+    if (directory !== undefined)
+      await rm(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Why a retired job's end keeps its workspace whatever its record says, or
+ * nothing where it ended of itself with status 0 through chuggy's runtime.
+ *
+ * @param {PoolContainer} container as it was found before it was retired
+ * @param {string} why what retired it
+ */
+function retiredUnclean(container, why) {
+  if (container.runtimeVolume === undefined)
+    return "it was started without chuggy's runtime";
+  if (!endedStatuses.has(container.status)) return `it ${why}`;
+  if (!exitedStatuses.has(container.status) || container.exitCode === undefined)
+    return `its container was left ${container.status}`;
+  if (container.exitCode !== 0)
+    return `its container exited with status ${String(container.exitCode)}`;
+  return undefined;
+}
+
+/**
+ * Logs and records a job's workspace kept.
+ *
+ * @param {State} state
+ * @param {PoolContainer} container
+ * @param {string} reason
+ * @param {import("./keptWorkspace.mjs").KeptWorkspaceRead} read
+ */
+async function workspaceKept(state, container, reason, read) {
+  const workspace =
+    container.workspaceVolume ?? `the anonymous workspace of ${container.name}`;
+  state.seams.log(
+    `${container.name}: ${await keptWorkspaceKept(state.settings.logDir, workspace, reason, read, state.seams.nowMs())}`,
+  );
+}
+
 /**
  * Saves a container's logs and removes it, and the volumes of chuggy's
- * runtime it was started through with it. A container whose logs could not
- * be saved is left for the next pass to try again, rather than lost with
- * them, until `unsavedKept` says it has been kept long enough.
+ * runtime it was started through with it. A job's workspace goes only where
+ * the job ended clean, as `keptWorkspace.mjs` says, which its record is
+ * copied out first to tell; one of a container the engine no longer has is
+ * kept with nothing to save or remove. A container whose logs could not be
+ * saved is left for the next pass to try again, rather than lost with them,
+ * until `unsavedKept` says it has been kept long enough.
  *
  * @param {State} state
  * @param {PoolContainer} container
  * @param {string} why
  */
 async function retired(state, container, why) {
+  const copied =
+    container.kind === "Job"
+      ? await workspaceRecordCopied(state, container)
+      : undefined;
+  if (copied?.gone === true) {
+    await workspaceKept(
+      state,
+      container,
+      "its container was gone",
+      copied.read,
+    );
+    await runtimeVolumesRemoved(state, container.name, [
+      container.runtimeVolume,
+    ]);
+    return;
+  }
   const saved = await savedLogs(state, container);
   if ("why" in saved && unsavedKept(state, container, why, saved.why)) return;
-  const removed = await state.seams.engine.exec(removeArgv(container.id));
+  const keptWhy =
+    copied === undefined
+      ? undefined
+      : keptWorkspaceWhy(retiredUnclean(container, why), copied.read);
+  const removed = await state.seams.engine.exec(
+    removeArgv(
+      container.id,
+      keptWhy !== undefined && container.runtimeVolume === undefined,
+    ),
+  );
   if (removed.code === 0) state.logFailures.delete(container.id);
   const kept = "file" in saved ? `logs saved to ${saved.file}` : "logs lost";
   state.seams.log(
@@ -845,11 +1057,33 @@ async function retired(state, container, why) {
       ? `${container.name} ${why}; ${kept}, container removed`
       : `${container.name} ${why}; ${kept}, not removed: ${engineFailureLine(removed)}`,
   );
-  if (removed.code === 0)
-    await runtimeVolumesRemoved(state, container.name, [
-      container.runtimeVolume,
-      container.workspaceVolume,
-    ]);
+  if (removed.code !== 0) return;
+  retiredRan(state, container);
+  await runtimeVolumesRemoved(state, container.name, [
+    container.runtimeVolume,
+    ...(keptWhy === undefined ? [container.workspaceVolume] : []),
+  ]);
+  if (keptWhy !== undefined && copied !== undefined)
+    await workspaceKept(state, container, keptWhy, copied.read);
+}
+
+/**
+ * Measures the run of a container removed, from its start to its finish, or
+ * to now where the engine names no finish after its start: one killed since
+ * it was listed. One the engine names no start for, or the zero time it names
+ * for one never started, is not measured.
+ *
+ * @param {State} state
+ * @param {PoolContainer} container
+ */
+function retiredRan(state, container) {
+  const { startedMs, finishedMs } = container;
+  if (startedMs === undefined || startedMs <= 0) return;
+  const endMs =
+    finishedMs !== undefined && finishedMs >= startedMs
+      ? finishedMs
+      : state.seams.nowMs();
+  state.measures.ran(container.kind, (endMs - startedMs) / 1000);
 }
 
 /**
@@ -892,6 +1126,7 @@ function containerEnded(container) {
       ? `its container exited with status ${String(container.exitCode)}`
       : `its container was left ${container.status}`,
     succeeded: exited && container.exitCode === 0,
+    ...(unstartedStatuses.has(container.status) ? {} : { ran: true }),
   };
 }
 
@@ -911,18 +1146,30 @@ const deadlineEnd = {
  * @returns {WorkerPoolEnded}
  */
 function workloadEnd(kind, attempt, end) {
+  const ended = workloadEndStopped(kind, end);
+  return ended.kind === "Session"
+    ? { ...ended, session: attempt }
+    : { ...ended, job: attempt };
+}
+
+/**
+ * An end as a stop that found it answers it, which names no attempt.
+ *
+ * @param {WorkerPoolWorkloadKind} kind
+ * @param {ContainerEnd} end
+ * @returns {import("./poolLoop.mjs").WorkerPoolStopEnded}
+ */
+function workloadEndStopped(kind, end) {
   if (kind === "Session")
-    return {
-      kind,
-      session: attempt,
-      phase: end.succeeded ? "Succeeded" : "Failed",
-    };
+    return { kind, phase: poolSessionPhase(end.succeeded) };
   return {
     kind,
-    job: attempt,
     why: end.why,
     ...(end.refusal === undefined ? {} : { refusal: end.refusal }),
     ...(end.killed === undefined ? {} : { killed: end.killed }),
+    ...(end.ran === undefined
+      ? {}
+      : { ran: end.succeeded ? "Succeeded" : "Failed" }),
   };
 }
 
@@ -935,6 +1182,23 @@ function endedAssignment(ended) {
   return ended.kind === "Session"
     ? ended.session.assignment
     : ended.job.assignment;
+}
+
+/**
+ * An end as a stop that found it answers it, without the attempt it names.
+ *
+ * @param {WorkerPoolEnded} ended
+ * @returns {import("./poolLoop.mjs").WorkerPoolStopEnded}
+ */
+function endedStopped(ended) {
+  if (ended.kind === "Session") return { kind: ended.kind, phase: ended.phase };
+  return {
+    kind: ended.kind,
+    why: ended.why,
+    ...(ended.refusal === undefined ? {} : { refusal: ended.refusal }),
+    ...(ended.killed === undefined ? {} : { killed: ended.killed }),
+    ...(ended.ran === undefined ? {} : { ran: ended.ran }),
+  };
 }
 
 /**
@@ -1132,6 +1396,8 @@ async function heldAssignments(state) {
     await diskFloorHeld(state.disk, {
       ...state.seams,
       reclaimed: (signal, made) => state.images.reclaimed(signal, made),
+      kept: async () =>
+        (await keptWorkspacesRecorded(state.settings.logDir)).length,
       killed: async (why) => {
         const killed = await diskLowKilled(state, running, why);
         if (killed !== undefined) held.delete(killed);
@@ -1388,16 +1654,75 @@ async function imagePresent(state, image, named) {
 }
 
 /**
+ * The platform the engine holds an image for, as `--platform` names one, or
+ * nothing where it holds no image of that name. Docker's classic store and
+ * podman hold one variant by a name; of the several docker's containerd store
+ * can hold, it answers the one nearest this machine's.
+ *
+ * @param {State} state
+ * @param {string} image
+ * @param {string} named how a failure names the image: `its image` for the job's own
+ */
+async function imagePlatform(state, image, named) {
+  const answer = await state.seams.engine.exec(imageInspectManyArgv([image]));
+  if (answer.code !== 0 && engineFailure(answer) === "NotFound")
+    return undefined;
+  if (answer.code !== 0)
+    throw new ImageCallFailed(
+      `${named} could not be inspected: ${engineFailureLine(answer)}`,
+      answer,
+    );
+  let inspected;
+  try {
+    [inspected] = inspectedImageSchema.parse(JSON.parse(answer.stdout));
+  } catch {
+    throw new Error(
+      `${state.settings.engine} answered an inspection of ${named} that names no platform this runner can read`,
+    );
+  }
+  const { Os, Architecture, Variant } = inspected;
+  return Variant === undefined || Variant === ""
+    ? `${Os}/${Architecture}`
+    : `${Os}/${Architecture}/${Variant}`;
+}
+
+/**
+ * Whether an image held for `held` is one for `wanted`: the same system and
+ * architecture, and the same variant where both name one, since an image
+ * naming none is its architecture's default variant.
+ *
+ * @param {string} held
+ * @param {string} wanted
+ */
+function imagePlatformMatched(held, wanted) {
+  const [heldOs, heldArchitecture, heldVariant] = held.split("/");
+  const [wantedOs, wantedArchitecture, wantedVariant] = wanted.split("/");
+  return (
+    heldOs === wantedOs &&
+    heldArchitecture === wantedArchitecture &&
+    (heldVariant === undefined ||
+      wantedVariant === undefined ||
+      heldVariant === wantedVariant)
+  );
+}
+
+/**
  * One pull, made as `registryPull` makes it.
  *
  * @param {State} state
  * @param {string} image
+ * @param {string | undefined} platform
  * @param {import("./registryAuth.mjs").RegistryCredential | undefined} credential
  * @param {AbortSignal} signal
  */
-function pullAttempt(state, image, credential, signal) {
-  return registryPull(state.settings, image, credential, (argv, environment) =>
-    state.seams.engine.exec(argv, { environment, signal }),
+function pullAttempt(state, image, platform, credential, signal) {
+  return registryPull(
+    state.settings,
+    image,
+    platform,
+    credential,
+    (argv, environment) =>
+      state.seams.engine.exec(argv, { environment, signal }),
   );
 }
 
@@ -1430,9 +1755,19 @@ function placementSignal(state, placement, late) {
  * @param {Placement} placement
  * @param {string} image
  * @param {string} named how a failure names the image: `its image` for the job's own
+ * @param {string} [platform] the one variant pulled; none, and the engine's own
+ * @param {number} [startedMs] when the first try at this pull was made; none, and this is it
  */
-async function pulled(state, placement, image, named) {
-  await pullMade(state, placement, image, named);
+async function pulled(
+  state,
+  placement,
+  image,
+  named,
+  platform,
+  startedMs = state.seams.nowMs(),
+) {
+  await pullMade(state, placement, image, named, platform);
+  state.measures.pulled((state.seams.nowMs() - startedMs) / 1000);
   const id = await state.images.pulledId(image);
   if (id !== undefined) placement.pulled.set(image, id);
 }
@@ -1444,14 +1779,15 @@ async function pulled(state, placement, image, named) {
  * @param {Placement} placement
  * @param {string} image
  * @param {string} named how a failure names the image: `its image` for the job's own
+ * @param {string | undefined} platform
  */
-async function pullMade(state, placement, image, named) {
+async function pullMade(state, placement, image, named, platform) {
   const { settings, seams } = state;
   const host = imageRegistryHost(image);
   const late = `${named} was not pulled`;
   if (host !== settings.registryHost) {
     const signal = placementSignal(state, placement, late);
-    const answer = await pullAttempt(state, image, undefined, signal);
+    const answer = await pullAttempt(state, image, platform, undefined, signal);
     if (answer.code === 0) return;
     throw new ImageCallFailed(
       `${named} could not be pulled: ${engineFailureLine(answer)}`,
@@ -1467,7 +1803,13 @@ async function pullMade(state, placement, image, named) {
       );
     if (acquired.acquired === "Token") {
       const credential = { host, token: acquired.token };
-      const answer = await pullAttempt(state, image, credential, signal);
+      const answer = await pullAttempt(
+        state,
+        image,
+        platform,
+        credential,
+        signal,
+      );
       if (answer.code === 0) return;
       if (engineFailure(answer) !== "Unauthorized")
         throw new ImageCallFailed(
@@ -1483,6 +1825,63 @@ async function pullMade(state, placement, image, named) {
         `${placement.name}: no token to pull with yet: ${acquired.evidence}`,
       );
     await seams.sleep(settings.pullRetryMs, signal);
+  }
+}
+
+/**
+ * The platform an assignment's capabilities require, as `--platform` names
+ * one, or nothing where they name no Linux one.
+ *
+ * @param {readonly string[]} capabilities
+ */
+function placementPlatformRequired(capabilities) {
+  for (const capability of capabilities) {
+    const [, architecture] =
+      /^Platform:Linux:([A-Za-z0-9]+)$/u.exec(capability) ?? [];
+    if (architecture !== undefined)
+      return `linux/${architecture.toLowerCase()}`;
+  }
+  return undefined;
+}
+
+/**
+ * A placement's image pulled for the engine's own platform, or, where the
+ * image has no build for it, for the platform its assignment requires, which
+ * an engine that emulates that platform runs.
+ *
+ * @param {State} state
+ * @param {Placement} placement
+ * @param {number} [startedMs] as `pulled` takes it
+ */
+async function placementImagePulled(
+  state,
+  placement,
+  startedMs = state.seams.nowMs(),
+) {
+  try {
+    await pulled(
+      state,
+      placement,
+      placement.image,
+      "its image",
+      undefined,
+      startedMs,
+    );
+  } catch (failure) {
+    if (
+      !(failure instanceof ImageCallFailed) ||
+      engineFailure(failure.answer) !== "PlatformUnbuilt" ||
+      placement.platformRequired === undefined
+    )
+      throw failure;
+    await pulled(
+      state,
+      placement,
+      placement.image,
+      "its image",
+      placement.platformRequired,
+      startedMs,
+    );
   }
 }
 
@@ -1506,8 +1905,9 @@ function unpullable(failure) {
  * a pull that fails is the image's fault: at once where the registry refused
  * the image or the reference names none, and otherwise, since any other cause
  * can pass, only once it has gone on failing until `pullFailureDwellMs` after
- * the first pull. An engine that could not be reached, a pool with no
- * token to pull with and the deadline are this runner's, never the image's.
+ * the first such failure. An engine that could not be reached, a pool with no
+ * token to pull with, a transfer the network cut short and the deadline are
+ * this runner's, never the image's.
  *
  * @param {State} state
  * @param {Placement} placement
@@ -1515,9 +1915,11 @@ function unpullable(failure) {
 async function jobImagePulled(state, placement) {
   const { settings, seams } = state;
   const firstPullMs = seams.nowMs();
+  /** @type {number | undefined} */
+  let firstFailureMs;
   for (;;) {
     try {
-      await pulled(state, placement, placement.image, "its image");
+      await placementImagePulled(state, placement, firstPullMs);
       return;
     } catch (failure) {
       if (
@@ -1525,11 +1927,12 @@ async function jobImagePulled(state, placement) {
         engineFailure(failure.answer) === "Unreachable"
       )
         throw failure;
-      if (
-        enginePullRefused(failure.answer) ||
-        seams.nowMs() - firstPullMs >= pullFailureDwellMs
-      )
-        throw unpullable(failure);
+      if (enginePullRefused(failure.answer)) throw unpullable(failure);
+      if (engineFailure(failure.answer) !== "TransferCut") {
+        firstFailureMs ??= seams.nowMs();
+        if (seams.nowMs() - firstFailureMs >= pullFailureDwellMs)
+          throw unpullable(failure);
+      }
       seams.log(
         `${placement.name}: its image could not be pulled yet, and is pulled again: ${engineFailureLine(failure.answer)}`,
       );
@@ -1542,25 +1945,30 @@ async function jobImagePulled(state, placement) {
 }
 
 /**
- * A job's image here where its job starts through chuggy's runtime: an
- * inspection the engine refused because the reference names no image is the
- * image's fault as a pull's would be, and any other is this runner's.
+ * A job's image here where its job starts through chuggy's runtime, and the
+ * platform the engine holds it for: an inspection the engine refused because
+ * the reference names no image is the image's fault as a pull's would be, and
+ * any other is this runner's.
  *
  * @param {State} state
  * @param {Placement} placement
  */
 async function jobImageHere(state, placement) {
-  let present;
+  let platform;
   try {
-    present = await imagePresent(state, placement.image, "its image");
+    platform = await imagePlatform(state, placement.image, "its image");
   } catch (failure) {
     if (failure instanceof ImageCallFailed && enginePullRefused(failure.answer))
       throw unpullable(failure);
     throw failure;
   }
-  if (present) return;
+  if (platform !== undefined) return platform;
   placement.phase = "Pulling";
   await jobImagePulled(state, placement);
+  platform = await imagePlatform(state, placement.image, "its image");
+  if (platform === undefined)
+    throw new Error("its image was pulled and then was not here");
+  return platform;
 }
 
 /**
@@ -1572,7 +1980,7 @@ async function jobImageHere(state, placement) {
 async function imageHere(state, placement) {
   if (await imagePresent(state, placement.image, "its image")) return;
   placement.phase = "Pulling";
-  await pulled(state, placement, placement.image, "its image");
+  await placementImagePulled(state, placement);
 }
 
 /**
@@ -1594,19 +2002,148 @@ function runtimeFailure(failure, what) {
 }
 
 /**
- * Chuggy's runtime image here, pulled as any image is where it is not.
+ * Whether the engine holds an image for `platform`. Where `imagePlatform`
+ * answers another, docker's containerd store can still hold one for it, so
+ * docker is asked at `platform`, and one before 28.1, which cannot answer, is
+ * taken to hold none.
+ *
+ * @param {State} state
+ * @param {string} image
+ * @param {string} platform
+ * @param {string} named how a failure names the image
+ */
+async function imageHeldFor(state, image, platform, named) {
+  const held = await imagePlatform(state, image, named);
+  if (held === undefined) return false;
+  if (imagePlatformMatched(held, platform)) return true;
+  if (state.settings.engine !== "docker") return false;
+  const answer = await state.seams.engine.exec(
+    imageInspectPlatformArgv(image, platform),
+  );
+  if (answer.code === 0) return true;
+  if (
+    ["PlatformAbsent", "FlagUnknown", "NotFound"].includes(
+      engineFailure(answer),
+    )
+  )
+    return false;
+  throw new ImageCallFailed(
+    `${named} could not be inspected for ${platform}: ${engineFailureLine(answer)}`,
+    answer,
+  );
+}
+
+/** Between two looks at a runtime lock another runner holds. */
+const runtimeLockPollMs = 500;
+
+/**
+ * The runtime lock, taken once no other runner holds it, or failing where the
+ * placement's signal aborts first: what lets it go, or nothing where no lock
+ * is set. A lock is abandoned once its holder's process is gone or it is
+ * older than this runner's longest placement, so two runners whose holds
+ * outlast that can both hold it, and a copy of either can then fail as a pull
+ * of the other's platform takes its variant.
+ *
+ * @param {State} state
+ * @param {Placement} placement
+ * @returns {Promise<(() => Promise<void>) | undefined>}
+ */
+async function runtimeLockTaken(state, placement) {
+  const { settings, seams } = state;
+  if (settings.runtimeLock === undefined) return undefined;
+  await mkdir(dirname(settings.runtimeLock), { recursive: true, mode: 0o700 });
+  for (;;) {
+    const release = await fileLockTaken(
+      settings.runtimeLock,
+      { heldMsMax: settings.timeoutSecsMax * 1000 },
+      {
+        pid: process.pid,
+        nowMs: Date.now,
+        wait: (ms) => seams.sleep(ms, placement.controller.signal),
+        holderAlive: seams.holderAlive ?? fileLockHolderAlive,
+      },
+    );
+    if (release !== undefined) return release;
+    await seams.sleep(
+      runtimeLockPollMs,
+      placementSignal(state, placement, "the runtime lock was not taken"),
+    );
+  }
+}
+
+/**
+ * Waits until no other placement of this runner is getting or copying a
+ * runtime image, then takes the runtime lock where one is set, or fails where
+ * the placement's signal aborts first, and returns what ends its own turn:
+ * where an engine holds one variant of an image by its name, a pull of it for
+ * one platform would take the name from another's about to be copied.
+ *
+ * @param {State} state
+ * @param {Placement} placement
+ * @param {string} image
+ * @returns {Promise<() => Promise<void>>}
+ */
+async function runtimeTurnTaken(state, placement, image) {
+  const ahead = state.runtimeTurns.get(image) ?? Promise.resolve();
+  const own = Promise.withResolvers();
+  const queued = ahead.then(() => own.promise);
+  state.runtimeTurns.set(image, queued);
+  const ended = () => {
+    own.resolve(undefined);
+    if (state.runtimeTurns.get(image) === queued)
+      state.runtimeTurns.delete(image);
+  };
+  try {
+    const signal = placementSignal(state, placement, "the runtime was not got");
+    const aborted = new Promise((_, reject) => {
+      signal.addEventListener(
+        "abort",
+        () =>
+          reject(
+            new globalThis.DOMException("the turn was not taken", {
+              name: "AbortError",
+              cause: signal.reason,
+            }),
+          ),
+        { once: true },
+      );
+    });
+    await Promise.race([ahead, aborted]);
+    const release = await runtimeLockTaken(state, placement);
+    return async () => {
+      try {
+        await release?.();
+      } finally {
+        ended();
+      }
+    };
+  } catch (failure) {
+    ended();
+    throw failure;
+  }
+}
+
+/**
+ * Chuggy's runtime image here for the platform of the job's image, pulled for
+ * it where the engine holds it for no other, in the placement's turn at it,
+ * whose end it returns.
  *
  * @param {State} state
  * @param {Placement} placement
  * @param {PlacementRuntime} runtime
+ * @param {string} platform the job's image's
  */
-async function runtimeHere(state, placement, runtime) {
+async function runtimeHere(state, placement, runtime, platform) {
+  let turnEnded = async () => undefined;
   try {
-    if (!(await imagePresent(state, runtime.image, "the runtime"))) {
+    turnEnded = await runtimeTurnTaken(state, placement, runtime.image);
+    if (!(await imageHeldFor(state, runtime.image, platform, "the runtime"))) {
       placement.phase = "Pulling";
-      await pulled(state, placement, runtime.image, "the runtime");
+      await pulled(state, placement, runtime.image, "the runtime", platform);
     }
+    return turnEnded;
   } catch (failure) {
+    await turnEnded();
     throw runtimeFailure(
       failure,
       `this runner could not get chuggy's runtime ${runtime.image}`,
@@ -1622,8 +2159,9 @@ async function runtimeHere(state, placement, runtime) {
  * @param {State} state
  * @param {Placement} placement
  * @param {PlacementRuntime} runtime
+ * @param {string} platform the job's image's, whose variant of the runtime is copied
  */
-async function runtimeFilled(state, placement, runtime) {
+async function runtimeFilled(state, placement, runtime, platform) {
   const { settings, seams } = state;
   const stem = `${placement.name}-${randomBytes(4).toString("hex")}`;
   const volumes = {
@@ -1639,6 +2177,7 @@ async function runtimeFilled(state, placement, runtime) {
           poolLabelValue(settings.pool),
           placement.assignment,
           volumes.fill,
+          volume === volumes.workspace,
         ),
       );
       if (created.code !== 0)
@@ -1649,7 +2188,7 @@ async function runtimeFilled(state, placement, runtime) {
     }
     runtime.volumes = volumes;
     const filled = await seams.engine.exec(
-      runtimeFillArgv(volumes, runtime.image),
+      runtimeFillArgv(volumes, runtime.image, platform),
       {
         signal: placementSignal(state, placement, "the runtime was not copied"),
       },
@@ -1879,10 +2418,10 @@ function workloadEngineSocket(settings, placement) {
 
 /**
  * The environment a workload's env file carries beside its envelope: the
- * runner's, then the kind of Claude credential where it mounts Claude's and
- * the runner names one, what a job handed this machine's engine is told of
- * it, and for a job started through chuggy's runtime the workspace its check
- * is to find writable, which is the one its envelope names.
+ * runner's, then what the workload is told of the credential it mounts, its
+ * type and name and never its value, what a job handed this machine's engine
+ * is told of it, and for a job started through chuggy's runtime the workspace
+ * its check is to find writable, which is the one its envelope names.
  *
  * @param {ContainerBackendSettings} settings
  * @param {Placement} placement
@@ -1891,9 +2430,7 @@ function workloadEnvironment(settings, placement) {
   const socket = workloadEngineSocket(settings, placement);
   return {
     ...settings.environment,
-    ...(placement.credential.agent === jobClaudeAgent
-      ? claudeCredentialCarried(settings.claudeCredential)
-      : {}),
+    ...placement.credential.carried,
     ...(socket === undefined
       ? {}
       : jobEngineSocketEnvironment(settings.engine, socket.path)),
@@ -2346,13 +2883,35 @@ async function placementRun(state, placement, assignment, envelope) {
 }
 
 /**
- * Gets what a placement starts from and starts it: chuggy's runtime first
- * where the job starts through one, then the job's image, then the job's
- * volumes of the runtime, then its owner's. The runtime's are removed where
- * the job did not start in them, as where a predecessor's container was found
- * already running the job, and where it failed the container filling them
- * goes first: a stop or the deadline ends only the engine's CLI, and leaves
- * that container holding them.
+ * The job's image here, then chuggy's runtime for its platform, copied into
+ * the job's own volumes before the placement's turn at the runtime ends.
+ *
+ * @param {State} state
+ * @param {Placement} placement
+ * @param {PlacementRuntime} runtime
+ */
+async function runtimeReady(state, placement, runtime) {
+  const platform = await jobImageHere(state, placement);
+  const turnEnded = await runtimeHere(state, placement, runtime, platform);
+  try {
+    placement.controller.signal.throwIfAborted();
+    placement.phase = "Starting";
+    await runtimeFilled(state, placement, runtime, platform);
+  } finally {
+    await turnEnded();
+  }
+}
+
+/**
+ * Gets what a placement starts from and starts it: the job's image first,
+ * then, where the job starts through chuggy's runtime, that runtime for the
+ * image's platform and the job's volumes of it, then its owner's volumes. A
+ * job whose image and runtime both cannot be got is refused for its image,
+ * since the runtime is got for the platform read from it. The runtime's
+ * volumes are removed where the job did not start in them, as where a
+ * predecessor's container was found already running the job, and where it
+ * failed the container filling them goes first: a stop or the deadline ends
+ * only the engine's CLI, and leaves that container holding them.
  *
  * @param {State} state
  * @param {Placement} placement
@@ -2364,13 +2923,9 @@ async function placementStarted(state, placement, assignment, envelope) {
   let outcome;
   try {
     if (runtime === undefined) await imageHere(state, placement);
-    else {
-      await runtimeHere(state, placement, runtime);
-      await jobImageHere(state, placement);
-    }
+    else await runtimeReady(state, placement, runtime);
     placement.controller.signal.throwIfAborted();
     placement.phase = "Starting";
-    if (runtime !== undefined) await runtimeFilled(state, placement, runtime);
     if (placement.kind === "Job") await ownerVolumesReady(state, placement);
     outcome = await memoryStarted(state, placement, (cut) =>
       started(state, placement, assignment, envelope, cut),
@@ -2405,8 +2960,9 @@ function placementFailure(placement, failure) {
 }
 
 /**
- * The bounds a workload's envelope carries. A session's time is its
- * assignment's own, since the runner's cap is a job's.
+ * The bounds a workload's envelope carries. A job's time is the sooner of its
+ * assignment's and the runner's cap, and a session's is its assignment's own,
+ * since the runner's cap is a job's.
  *
  * @param {ContainerBackendSettings} settings
  * @param {WorkerPoolAssignment} assignment
@@ -2416,7 +2972,9 @@ function placementFailure(placement, failure) {
 function workloadBounds(settings, assignment, kind) {
   return {
     timeoutSecsMax:
-      kind === "Session" ? assignment.deadlineSecs : settings.timeoutSecsMax,
+      kind === "Session"
+        ? assignment.deadlineSecs
+        : Math.min(assignment.deadlineSecs, settings.timeoutSecsMax),
     outputBytesMax: settings.outputBytesMax,
   };
 }
@@ -2439,6 +2997,7 @@ async function placed(state, assignment, kind) {
     settings,
     assignment.capabilities,
     seams.tokenFileRefusal,
+    assignment.assignment,
   );
   if ("refused" in credential)
     return { placed: "Refused", evidence: credential.refused };
@@ -2466,11 +3025,9 @@ async function placed(state, assignment, kind) {
       containerImageOf(settings.images ?? [], assignment)
     ),
     phase: "Placing",
-    deadlineEpochSecs:
-      Math.floor(placedMs / 1000) +
-      Math.min(assignment.deadlineSecs, bounds.timeoutSecsMax),
+    deadlineEpochSecs: Math.floor(placedMs / 1000) + bounds.timeoutSecsMax,
     memoryMib: assignment.memoryMib,
-    runSecs: Math.min(assignment.deadlineSecs, bounds.timeoutSecsMax),
+    runSecs: bounds.timeoutSecsMax,
     memory: undefined,
     holding: false,
     credential,
@@ -2480,6 +3037,7 @@ async function placed(state, assignment, kind) {
         : undefined,
     volumes: volumes?.served,
     pulled: new Map(),
+    platformRequired: placementPlatformRequired(assignment.capabilities),
     controller: new globalThis.AbortController(),
     done: Promise.resolve(),
   };
@@ -2575,6 +3133,8 @@ function stopAnswer(answer) {
  * one past its deadline. The kill is judged by the container it leaves, since
  * a workload that ended on its own just before refuses one; a workload that
  * has ended is stopped even where its container is kept for `held` to retire.
+ * A kill that took found the workload running, and one refused by a container
+ * that had ended found it ended as that container says.
  *
  * @param {State} state
  * @param {string} id
@@ -2588,7 +3148,36 @@ async function containerStopped(state, id) {
   const [container] = inspectionContainers(state, inspected).map(poolContainer);
   if (!endedStatuses.has(container.status)) return stopAnswer(killed);
   await retired(state, container, "was stopped");
-  return { stopped: "Stopped" };
+  return {
+    stopped: "Stopped",
+    found:
+      killed.code === 0
+        ? { found: "Running" }
+        : {
+            found: "Ended",
+            ended: workloadEndStopped(
+              container.kind,
+              containerEnded(container),
+            ),
+          },
+  };
+}
+
+/**
+ * What a stop found of a workload, of what it found of each part: running
+ * where any part ran, else ended as the first part found ended says, else
+ * nothing it can tell.
+ *
+ * @param {readonly (import("./poolLoop.mjs").WorkerPoolStopFound | undefined)[]} parts
+ * @returns {WorkerPoolStopped}
+ */
+function stoppedFound(parts) {
+  const found =
+    parts.find((part) => part?.found === "Running") ??
+    parts.find((part) => part !== undefined);
+  return found === undefined
+    ? { stopped: "Stopped" }
+    : { stopped: "Stopped", found };
 }
 
 /**
@@ -2596,7 +3185,9 @@ async function containerStopped(state, id) {
  * flight is cancelled and waited out first, so a `run` it was already making
  * is killed too rather than left behind. Its container is found by its
  * labels, as `held` finds it, so one a run under another naming started is
- * found too. Its end is never named, and one already waiting to be is dropped.
+ * found too. Its end is never named, and one already waiting to be is dropped,
+ * and answered as how it ended unless a placement or container of it was
+ * still running.
  *
  * @param {State} state
  * @param {string} assignment
@@ -2606,6 +3197,9 @@ async function stopped(state, assignment) {
   state.ends.accounted.add(assignment);
   /** @param {WorkerPoolEnded} ended */
   const kept = (ended) => endedAssignment(ended) !== assignment;
+  const queued = [...state.ends.pending, ...state.ends.ready].find(
+    (ended) => !kept(ended),
+  );
   state.ends.pending = state.ends.pending.filter(kept);
   state.ends.ready = state.ends.ready.filter(kept);
   const placement = state.placements.get(assignment);
@@ -2617,11 +3211,19 @@ async function stopped(state, assignment) {
     listArgv(poolLabelValue(state.settings.pool), assignment),
   );
   if (listed.code !== 0) return stopAnswer(listed);
+  /** @type {(import("./poolLoop.mjs").WorkerPoolStopFound | undefined)[]} */
+  const parts = [
+    placement === undefined ? undefined : { found: "Running" },
+    queued === undefined
+      ? undefined
+      : { found: "Ended", ended: endedStopped(queued) },
+  ];
   for (const id of listedIds(listed)) {
     const answer = await containerStopped(state, id);
     if (answer.stopped !== "Stopped") return answer;
+    parts.push(answer.found);
   }
-  return { stopped: "Stopped" };
+  return stoppedFound(parts);
 }
 
 /**
@@ -2656,6 +3258,8 @@ export function containerBackend(settings, seams) {
       bytesReserved: checked.memoryReservedBytes,
       claimLockFile: checked.memoryClaimLock,
     }),
+    runtimeTurns: new Map(),
+    measures: runnerMeasures(),
   };
   const claimLock = state.memory?.claimLockFile;
   return {
@@ -2663,6 +3267,9 @@ export function containerBackend(settings, seams) {
     stop: (assignment) => stopped(state, assignment),
     held: () => heldAssignments(state),
     ended: async () => state.ends.ready.splice(0),
+    credentialOutcomesTaken: (outcomes) =>
+      state.settings.credentials?.outcomesTaken(outcomes),
+    capabilitiesWithheld: () => jobCapabilitiesWithheld(checked.credentials),
     inFlight: () =>
       [...state.placements.values()].map((placement) => ({
         assignment: placement.assignment,
@@ -2683,6 +3290,7 @@ export function containerBackend(settings, seams) {
       (state.memory === undefined || memoryBudgetTakes(state.memory, byRoom)),
     memoryRoom: () =>
       state.memory === undefined ? undefined : memoryRoom(state.memory),
+    measured: () => state.measures.measured(),
     ...(claimLock === undefined
       ? {}
       : { claimed: () => memoryClaimTaken(claimLock) }),
@@ -2693,4 +3301,32 @@ export function containerBackend(settings, seams) {
       await state.images.settled();
     },
   };
+}
+
+/**
+ * The operator's listing of the workspace volumes a container runner kept, as
+ * `keptWorkspacesListed` lines them: each one recorded in `logDir`, and each
+ * no container uses that no record names. Their sizes are docker's to say;
+ * podman's are unknown. A record of a host job's directory is the host
+ * backend's to list.
+ *
+ * @param {"docker" | "podman"} engineName
+ * @param {Engine} engine
+ * @param {string} logDir
+ */
+export async function containerKeptWorkspaces(engineName, engine, logDir) {
+  const kept = (await keptWorkspacesRecorded(logDir)).filter(
+    ({ workspace }) => !isAbsolute(workspace),
+  );
+  const listed = await engine.exec(keptVolumesArgv());
+  const usage =
+    engineName === "docker"
+      ? await engine.exec(dockerDiskUsageArgv())
+      : undefined;
+  return keptWorkspacesListed(
+    kept,
+    (usage?.code === 0 ? dockerDiskUsage(usage.stdout)?.volumes : undefined) ??
+      new Map(),
+    listed.code === 0 ? listedIds(listed) : [],
+  );
 }

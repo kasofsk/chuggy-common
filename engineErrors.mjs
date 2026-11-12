@@ -8,13 +8,13 @@
 /**
  * @typedef {import("./engine.mjs").EngineAnswer} EngineAnswer
  *
- * @typedef {"Unreachable" | "NoSuchContainer" | "NoSuchVolume" | "NameConflict" | "ImageInUse" | "Unauthorized" | "NotFound" | "Other"} EngineFailure
+ * @typedef {"Unreachable" | "NoSuchContainer" | "NoSuchVolume" | "NameConflict" | "ImageInUse" | "Unauthorized" | "PlatformAbsent" | "PlatformUnbuilt" | "FlagUnknown" | "NotFound" | "TransferCut" | "Other"} EngineFailure
  */
 
 const engineFailures = /** @type {const} */ ([
   [
     "Unreachable",
-    /cannot connect to the docker daemon|permission denied while trying to connect to the docker daemon|cannot connect to podman/iu,
+    /cannot connect to the docker daemon|permission denied while trying to connect to the docker (?:daemon|api)|failed to connect to the docker api|cannot connect to podman/iu,
   ],
   ["NoSuchContainer", /no such container/iu],
   ["NoSuchVolume", /no such volume/iu],
@@ -27,7 +27,17 @@ const engineFailures = /** @type {const} */ ([
     "Unauthorized",
     /unauthorized|authentication required|no basic auth credentials/iu,
   ],
+  ["PlatformAbsent", /was found but (?:its platform|does not provide)/iu],
+  [
+    "PlatformUnbuilt",
+    /no matching manifest for|no image found in (?:image index|manifest list) for architecture/iu,
+  ],
+  ["FlagUnknown", /unknown flag|requires api version/iu],
   ["NotFound", /no such image|image not known|manifest unknown|not found/iu],
+  [
+    "TransferCut",
+    /unexpected eof|connection reset by peer|i\/o timeout|tls handshake timeout/iu,
+  ],
 ]);
 
 /**

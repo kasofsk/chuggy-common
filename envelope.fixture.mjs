@@ -51,6 +51,7 @@ export const pushed = workTaskDocumentSchema.strict().parse({
     setup: [],
     files: [],
   },
+  targetRef: "refs/heads/main",
   workerPlane: {
     url: "http://worker-plane.test:3001",
     capabilityFile: "/run/worker-plane.test/bearer",
@@ -110,4 +111,12 @@ export const poolHeldSessionAnswer = sessionTaskAnswerSchema.parse({
     budgetUsd: 3,
   },
   model: "pool-model",
+});
+
+/** What the task route answers a member's own thread on their chat host: their reserved partition, `MemberRead` alone, and no repository. */
+export const memberSessionAnswer = sessionTaskAnswerSchema.parse({
+  ...poolHeldSessionAnswer,
+  project: `@member-${"a".repeat(64)}`,
+  kind: "Thread",
+  capabilities: ["MemberRead"],
 });

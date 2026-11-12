@@ -4,9 +4,17 @@
  * the room left, stops what it is told to and places what it is offered.
  * chuggy's `src/interpreter/workerPoolClient.ts` is the same loop in
  * TypeScript, and a change to one is a change to both, but for a runner's
- * update of itself, which that cluster client never makes, and a backend
+ * update of itself, which that cluster client never makes, the credential
+ * outcomes a member's personal runner is answered with, which a cluster's
+ * never is, and a backend
  * that takes no job while its disk is low or its engine's memory has no
  * room, and claims jobs by that room, which a cluster leaves to its kubelet.
+ *
+ * A CREDENTIAL OUTCOME IS TAKEN BEFORE ANYTHING IS PLACED. The backend's
+ * selector benches the credential it chose for each assignment an answer names
+ * an outcome for, so what that answer offers runs on another. Each poll
+ * withholds the capabilities the backend withholds then, which is how an
+ * agent none of whose credentials is available stops being offered jobs.
  *
  * A JOB AND A SESSION ARE COUNTED APART. Each kind has its own ceiling, its
  * own room on the poll and its own offers, so a session never takes a job's
@@ -56,6 +64,7 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolAssignment} WorkerPoolAssignment
  * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolSessionAssignment} WorkerPoolSessionAssignment
  * @typedef {import("@chuggy/worker-contract/workerPool").AssignmentOutcome} AssignmentOutcome
+ * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolCredentialOutcome} WorkerPoolCredentialOutcome
  * @typedef {import("@chuggy/worker-contract/sessionPlane").SessionContainerEnd} SessionContainerEnd
  * @typedef {import("@chuggy/worker-contract/workerEnvironment").WorkerImageFault} WorkerImageFault
  *
@@ -70,7 +79,9 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @typedef {Pick<WorkerPoolAssignment, "assignment" | "callbackUrl" | "bearer">} WorkerPoolAttempt what an assignment's own plane is reached at, and under
  *
  * @typedef {{placed: "Placed"} | {placed: "Refused", evidence: string} | {placed: "Unavailable"}} WorkerPoolPlacement
- * @typedef {{stopped: "Stopped"} | {stopped: "Refused", evidence: string} | {stopped: "Unavailable", evidence: string}} WorkerPoolStopped
+ * @typedef {{stopped: "Stopped", found?: WorkerPoolStopFound} | {stopped: "Refused", evidence: string} | {stopped: "Unavailable", evidence: string}} WorkerPoolStopped `found` none where the backend cannot tell what the stop found
+ * @typedef {{found: "Running"} | {found: "Ended", ended: WorkerPoolStopEnded}} WorkerPoolStopFound whether the stop interrupted the workload, or found it already ended, and how
+ * @typedef {Omit<WorkerPoolJobEnd, "job"> | Omit<WorkerPoolSessionEnd, "session">} WorkerPoolStopEnded
  *
  * @typedef {object} WorkerPoolJobEnd a job that ended of itself, which its harness may never have reported
  * @property {"Job"} kind
@@ -78,6 +89,7 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @property {string} why the backend's own words, never the workload's, which may carry a secret no scrub here holds
  * @property {WorkerPoolJobRefusal} [refusal] where the backend refused the job for its image's fault rather than ran it, `why` being the refusal's evidence
  * @property {"Deadline" | "DiskLow"} [killed] where the backend killed it: at its deadline, or for its machine's low disk
+ * @property {"Succeeded" | "Failed"} [ran] how its process ended where it ran to an end of its own, `Succeeded` only for one that exited 0; none where it never ran or was killed
  *
  * @typedef {object} WorkerPoolJobRefusal
  * @property {WorkerImageFault} fault what the job's image lacks
@@ -95,9 +107,12 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @property {(assignment: string) => Promise<WorkerPoolStopped>} stop idempotent, whichever kind it is
  * @property {() => Promise<readonly WorkerPoolHeld[]>} held every workload of either kind, each with the kind it was placed as
  * @property {() => Promise<readonly WorkerPoolEnded[]>} ended each one once, after `held` stopped naming it; never one this pool stopped
+ * @property {(outcomes: readonly WorkerPoolCredentialOutcome[]) => void} [credentialOutcomesTaken] benches the credential each outcome's assignment ran on, where its selector chose it; none for a backend that holds no selector
+ * @property {() => readonly string[]} [capabilitiesWithheld] the capabilities a poll leaves out now: each agent's of which its selector has no credential available; none for a backend that holds no selector
  * @property {(byRoom: boolean) => boolean} [jobsTaken] whether it takes a job now, as its last `held` found, from a plane that claims by room or one that does not; false while its machine's disk is low or its engine's memory has no room for it, and true for a backend that keeps neither
  * @property {() => WorkerPoolMemoryRoom | undefined} [memoryRoom] its engine's memory as its last `held` found; none for a backend that keeps no budget
  * @property {() => Promise<(() => Promise<void>) | undefined>} [claimed] takes its engine's claim without waiting: what lets it go, or nothing while another pool holds it; none for a backend that keeps no claim lock
+ * @property {() => import("./runnerReport.mjs").RunnerMeasured} [measured] the image pulls it made and the runs that ended, since it was made; none for a backend that measures neither
  *
  * @typedef {object} WorkerPoolMemoryRoom in MiB
  * @property {number} roomMib what jobs may take now, none where the count failed
@@ -105,12 +120,13 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  *
  * @typedef {{polled: "Reconciled", assignments: readonly WorkerPoolAssignment[],
  *   sessions: readonly WorkerPoolSessionAssignment[], stop: readonly string[], release?: WorkerRunnerRelease,
- *   jobsWaiting?: boolean}
- *   | {polled: "Stale"} | {polled: "Denied", evidence: string} | {polled: "Unavailable", evidence: string}} WorkerPoolPolled `jobsWaiting` where the plane claims by room: whether a job waits that fits what the poll named
+ *   jobsWaiting?: boolean, chatImage?: string, credentialOutcomes?: readonly WorkerPoolCredentialOutcome[]}
+ *   | {polled: "Stale"} | {polled: "Denied", evidence: string} | {polled: "Unavailable", evidence: string}} WorkerPoolPolled `jobsWaiting` where the plane claims by room: whether a job waits that fits what the poll named; `chatImage` the image a chat host's sessions run in, where the plane names one; `credentialOutcomes` how the credential stopped each job of `stop` the plane names one for
  *
  * @typedef {object} WorkerPoolPollTerms what a poll names beside its query
  * @property {WorkerPoolMemoryRoom} [memory] the room it offers jobs, and its ceiling
  * @property {number} [waitSecs] the longest the plane may wait before it answers; none, and the plane's own
+ * @property {readonly string[]} [withheld] the capabilities it leaves out of those its plane client names
  *
  * @typedef {"Settled" | "Lost" | "Stale" | "Denied" | "Unavailable"} WorkerPoolSettled
  *
@@ -118,6 +134,11 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @property {(token: string, held: readonly string[], wanted: number, wantedSessions: number, terms?: WorkerPoolPollTerms) => Promise<WorkerPoolPolled>} poll
  * @property {(token: string, assignment: string, outcome: AssignmentOutcome) => Promise<WorkerPoolSettled>} settle
  * @property {() => boolean | undefined} [claimsByRoom] whether its last reconciled answer said whether a job waits, undefined before it has one; none, and it never does
+ * @property {() => WorkerContractVersion | undefined} [polledVersion] the version its last poll's answer named, undefined where it named none or never came
+ * @property {(token: string, body: string) => Promise<WorkerPoolReported>} [report] posts a runner's report, its body as JSON
+ *
+ * @typedef {{reported: "Reported"} | {reported: "Failed", evidence: string}} WorkerPoolReported
+ * @typedef {import("@chuggy/worker-contract/workerContract").WorkerContractVersion} WorkerContractVersion
  *
  * @typedef {"Ended" | "Refused" | "Unavailable"} WorkerPoolEndAnswer
  *
@@ -682,7 +703,9 @@ async function workerPoolClientReconciled(client, token, held, taking, terms) {
     taking.sessions
       ? workerPoolClientRoom(client.settings, held, "Session")
       : 0,
-    terms,
+    client.backend.capabilitiesWithheld === undefined
+      ? terms
+      : { ...terms, withheld: client.backend.capabilitiesWithheld() },
   );
   if (polled.polled === "Stale") {
     client.tokens.invalidate(token);
@@ -690,6 +713,8 @@ async function workerPoolClientReconciled(client, token, held, taking, terms) {
   }
   if (polled.polled !== "Reconciled")
     return { passed: polled.polled, evidence: polled.evidence };
+  if (polled.credentialOutcomes !== undefined)
+    client.backend.credentialOutcomesTaken?.(polled.credentialOutcomes);
   const stopped = await workerPoolClientStopped(client, polled.stop);
   if ("passed" in stopped) return stopped;
   const jobs = await workerPoolClientPlaced(

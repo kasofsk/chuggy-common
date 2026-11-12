@@ -9,7 +9,13 @@
  * manager an unlogged one is a pool that silently stopped working. A pass that
  * throws ends the run, and the service manager's restart begins the next from
  * what the backend lists.
+ *
+ * A RUNNER REPORTS ON ITSELF ONLY WHERE ITS COMPANION SAYS SO, as
+ * `runnerReport.mjs` says, and its reports end with its run. Off, its client
+ * is composed as it would be with no reports at all.
  */
+
+import { hostname } from "node:os";
 
 import { poolJobPlaneClient } from "./poolJobPlane.mjs";
 import {
@@ -21,6 +27,7 @@ import {
 import { poolPlaneClient } from "./poolPlane.mjs";
 import { poolSessionPlaneClient } from "./poolSessionPlane.mjs";
 import { poolClientTokens } from "./poolTokens.mjs";
+import { runnerReporting } from "./runnerReport.mjs";
 
 /**
  * @typedef {import("./poolCredentials.mjs").PoolCredentials} PoolCredentials
@@ -29,6 +36,17 @@ import { poolClientTokens } from "./poolTokens.mjs";
  * @typedef {import("./poolLoop.mjs").WorkerPoolPass} WorkerPoolPass
  * @typedef {import("./poolLoop.mjs").WorkerPoolUpdates} WorkerPoolUpdates
  * @typedef {import("./runnerUpdate.mjs").RunnerIdentity} RunnerIdentity
+ * @typedef {import("./runnerReport.mjs").RunnerReportingSeams} RunnerReportingSeams
+ *
+ * @typedef {WorkerPoolClient & {reporting?: import("./runnerReport.mjs").RunnerReporting}} PoolRunnerClient `reporting` where the runner reports on itself
+ *
+ * @typedef {object} PoolRunnerReports
+ * @property {boolean} on whether the runner reports on itself, which one given no `reports` does not
+ * @property {(line: string) => void} log where a report's failure is said
+ * @property {RunnerReportingSeams["machine"]} [machine]
+ * @property {string} [host] the machine's name; `os.hostname()` where absent
+ * @property {RunnerReportingSeams["uptimeSecs"]} [uptimeSecs]
+ * @property {RunnerReportingSeams["wait"]} [wait]
  *
  * @typedef {object} PoolRunnerLimits
  * @property {number} concurrencyMax
@@ -72,16 +90,28 @@ export function poolRunnerTokens(credentials) {
 /**
  * @param {PoolCredentials} credentials
  * @param {RunnerIdentity} [runner] the runner's package and version, which each poll names
- * @param {readonly string[]} [capabilities] the runner's capabilities, which each poll names; none, and the set its registration recorded stands
+ * @param {readonly string[]} [capabilities] the runner's capabilities, which each poll names less what its backend withholds then; none, and the set its registration recorded stands
+ * @param {number} [idleSecs] how long a session a chat host claims may sit idle, which each poll names; a chat host's alone
+ * @param {typeof globalThis.fetch} [fetcher] the fetch the plane is reached by, when not the global one
  * @returns {WorkerPoolClient["plane"]}
  */
-export function poolRunnerPlane(credentials, runner, capabilities) {
-  return poolPlaneClient({
-    baseUrl: credentials.planeUrl,
-    ...planeSettings,
-    ...(runner === undefined ? {} : { runner }),
-    ...(capabilities === undefined ? {} : { capabilities }),
-  });
+export function poolRunnerPlane(
+  credentials,
+  runner,
+  capabilities,
+  idleSecs,
+  fetcher,
+) {
+  return poolPlaneClient(
+    {
+      baseUrl: credentials.planeUrl,
+      ...planeSettings,
+      ...(runner === undefined ? {} : { runner }),
+      ...(capabilities === undefined ? {} : { capabilities }),
+      ...(idleSecs === undefined ? {} : { idleSecs }),
+    },
+    fetcher,
+  );
 }
 
 /**
@@ -90,13 +120,20 @@ export function poolRunnerPlane(credentials, runner, capabilities) {
  * @param {PoolCredentials} credentials
  * @param {WorkerPoolBackend} backend
  * @param {PoolRunnerLimits} limits
- * @param {{tokens?: WorkerPoolClient["tokens"], fetch?: typeof globalThis.fetch, runner?: RunnerIdentity, capabilities?: readonly string[]}} [seams] the token source when not the pool file's, the fetch a job's or a session's plane is reached by when not the global one, and the runner and the capabilities each poll names
- * @returns {WorkerPoolClient}
+ * @param {{tokens?: WorkerPoolClient["tokens"], fetch?: typeof globalThis.fetch, planeFetch?: typeof globalThis.fetch, runner?: RunnerIdentity, capabilities?: readonly string[], idleSecs?: number, reports?: PoolRunnerReports}} [seams] the token source when not the pool file's, the fetch a job's or a session's plane is reached by and the one the pool's plane is when not the global one, the runner, the capabilities and a chat host's idle bound each poll names, and whether and how the runner reports on itself
+ * @returns {PoolRunnerClient}
  */
 export function poolRunnerClient(credentials, backend, limits, seams = {}) {
-  return {
+  /** @type {WorkerPoolClient} */
+  const client = {
     tokens: seams.tokens ?? poolRunnerTokens(credentials),
-    plane: poolRunnerPlane(credentials, seams.runner, seams.capabilities),
+    plane: poolRunnerPlane(
+      credentials,
+      seams.runner,
+      seams.capabilities,
+      seams.idleSecs,
+      seams.planeFetch,
+    ),
     jobs: poolJobPlaneClient(jobPlaneSettings, seams.fetch),
     sessions: poolSessionPlaneClient(sessionPlaneSettings, seams.fetch),
     backend,
@@ -107,6 +144,18 @@ export function poolRunnerClient(credentials, backend, limits, seams = {}) {
       passesMax: 1,
     }),
   };
+  const { reports } = seams;
+  if (reports?.on !== true) return client;
+  const reported = runnerReporting(client, {
+    log: reports.log,
+    host: reports.host ?? hostname(),
+    ...(reports.machine === undefined ? {} : { machine: reports.machine }),
+    ...(reports.uptimeSecs === undefined
+      ? {}
+      : { uptimeSecs: reports.uptimeSecs }),
+    ...(reports.wait === undefined ? {} : { wait: reports.wait }),
+  });
+  return Object.assign(reported.client, { reporting: reported });
 }
 
 /**
@@ -124,11 +173,26 @@ export function poolRunnerPassLine(pass) {
  * The pool loop until the plane denies the pool, or until the runner has
  * installed the release it updates itself to, which it is restarted on.
  *
- * @param {WorkerPoolClient} client
+ * @param {PoolRunnerClient} client
  * @param {{sleep: (ms: number) => Promise<void>, log: (line: string) => void, updates?: WorkerPoolUpdates, nowMs?: () => number}} seams `updates` where the runner updates itself or says a release is out
  * @returns {Promise<Extract<WorkerPoolPass, {passed: "Denied" | "Updated"}>>}
  */
 export async function poolRunnerLoop(client, seams) {
+  try {
+    return await poolRunnerPasses(client, seams);
+  } finally {
+    client.reporting?.ended();
+  }
+}
+
+/**
+ * The passes of `poolRunnerLoop`.
+ *
+ * @param {WorkerPoolClient} client
+ * @param {Parameters<typeof poolRunnerLoop>[1]} seams
+ * @returns {Promise<Extract<WorkerPoolPass, {passed: "Denied" | "Updated"}>>}
+ */
+async function poolRunnerPasses(client, seams) {
   const updating =
     seams.updates === undefined
       ? undefined

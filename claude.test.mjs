@@ -18,10 +18,11 @@ import {
 } from "./checks.mjs";
 import {
   claudeAgent,
+  claudeBrief,
   claudeCredentialPrepared,
-  claudeEnvironment,
   claudeInvocation,
   claudeResult,
+  claudeResumeInvocation,
   claudeShellScript,
   prepareClaudeShell,
 } from "./claude.mjs";
@@ -31,6 +32,12 @@ import {
   strayEnvironment,
   strayLeftFor,
 } from "./claudeCredential.fixture.mjs";
+import { codexAgent } from "./codex.mjs";
+import {
+  limitResult,
+  limitSentence,
+  limitSession,
+} from "./rateLimit.fixture.mjs";
 import { agentShells, posixShells } from "./shells.fixture.mjs";
 
 /** Catches a job's agent moving a long command to the background, where the headless run kills it unseen. */
@@ -40,6 +47,13 @@ test("a Claude job never moves a command to the background", () => {
       .CLAUDE_CODE_DISABLE_BACKGROUND_TASKS,
     "1",
   );
+});
+
+/** Catches a job's agent killed at Claude Code's own Bash timeout before a repository's checks end. */
+test("a Claude job waits on a command past Claude Code's own Bash timeout", () => {
+  const { environment } = claudeAgent.prepareCredential("token");
+  assert.equal(environment.BASH_DEFAULT_TIMEOUT_MS, "1800000");
+  assert.equal(environment.BASH_MAX_TIMEOUT_MS, "3000000");
 });
 
 /** Catches a run's Claude Code replacing itself, which an image's environment no longer prevents. */
@@ -63,19 +77,57 @@ test("a configured Claude worker composes a valid default Claude invocation", as
     briefing: { text: "briefing" },
   };
 
-  assert.deepEqual(claudeInvocation(task).slice(-4), [
+  assert.deepEqual(claudeInvocation(task).slice(-2), [
     '--mcp-config={"mcpServers":{}}',
     "--allowedTools=Bash,Edit,Read,Write,Glob,Grep",
-    "--",
-    "briefing",
   ]);
-  assert.deepEqual(claudeInvocation(task).slice(0, 5), [
+  assert.deepEqual(claudeInvocation(task).slice(0, 7), [
     "-p",
+    "--input-format",
+    "stream-json",
     "--output-format",
     "stream-json",
     "--verbose",
     "--json-schema",
   ]);
+  assert.equal(claudeBrief(task), "briefing");
+});
+
+/**
+ * Catches a resumed run that drops an option of the run it continues, is told
+ * its briefing again, or a session that lands where an option taking every
+ * word after it would swallow it.
+ */
+test("a resumed run is the same run in the conversation it left, told the limit reset", () => {
+  const task = {
+    worker: { mode: { arguments: ["--allowedTools", "Bash"] } },
+    briefing: { text: "briefing" },
+  };
+  const first = claudeInvocation(task);
+
+  const resumed = claudeResumeInvocation(task, "the-session");
+
+  assert.deepEqual(resumed, [...first, "--resume", "the-session"]);
+  assert.match(claudeBrief(task, "the-session"), /limit .*has reset/u);
+  assert.ok(!claudeBrief(task, "the-session").includes("briefing"));
+  assert.equal(claudeAgent.resumeInvocation, claudeResumeInvocation);
+  assert.equal(claudeAgent.brief, claudeBrief);
+});
+
+/** Which runtime may resume is what decides whether a limit can be waited out. */
+test("a Codex run has no conversation to resume, so no limit of its is waited out", () => {
+  assert.equal(codexAgent.resumeInvocation, undefined);
+});
+
+test("a result frame says what the runtime said and which conversation it ended", () => {
+  assert.deepEqual(claudeAgent.ended(limitResult), {
+    sentence: limitSentence,
+    session: limitSession,
+  });
+  assert.deepEqual(claudeAgent.ended(undefined), {
+    sentence: undefined,
+    session: undefined,
+  });
 });
 
 test("the final structured event is retained after streamed progress", () => {
@@ -90,11 +142,11 @@ test("the final structured event is retained after streamed progress", () => {
 });
 
 /**
- * Catches the briefing taken as a value of the option before it, which
- * `--mcp-config` and a worker's own variadic option both take every word
- * after them for, and which leaves a run with no prompt.
+ * Catches the briefing back on the command line, where no message after it
+ * could be sent, or the MCP configuration given as a word `--mcp-config` would
+ * take the next option's words with.
  */
-test("a Claude briefing is the prompt whatever options precede it", () => {
+test("a Claude run reads its briefing from stdin, whatever options precede it", () => {
   for (const configured of [[], ["--allowedTools", "Bash", "Read"]]) {
     const argv = claudeInvocation({
       worker: {
@@ -103,14 +155,16 @@ test("a Claude briefing is the prompt whatever options precede it", () => {
       briefing: { text: "briefing" },
     });
 
-    assert.deepEqual(argv.slice(-2), ["--", "briefing"]);
-    assert.equal(argv.indexOf("--"), argv.length - 2);
+    assert.ok(!argv.includes("briefing"));
+    assert.ok(!argv.includes("--"));
+    assert.equal(argv[argv.indexOf("--input-format") + 1], "stream-json");
+    assert.deepEqual(argv.slice(argv.length - configured.length), configured);
     assert.ok(argv.includes('--mcp-config={"mcpServers":{}}'));
     assert.ok(!argv.includes("--mcp-config"));
   }
 });
 
-/** Catches a worker's `--` making the run's own `--` and briefing two prompts. */
+/** Catches a worker's `--` making the words after it a prompt beside the briefing stdin carries. */
 test("ticket configuration cannot end the run's options itself", () => {
   assert.throws(
     () =>
@@ -287,22 +341,52 @@ function composed(inherited, prepared) {
 }
 
 /**
- * Catches a site pool's Claude Code, whose runner names no kind, given any
- * environment but the one every run had before a kind could be named: a token
- * and the two switches over everything inherited, a stray key included.
+ * Catches an inherited API key outranking the token a run was handed: a site
+ * pool's runner names no kind, and a runner's selector names a subscription's,
+ * and either way the token is the only credential Claude Code finds.
  */
-test("where no kind is named, a Claude run's credential is a subscription's token over an untouched environment", () => {
-  const prepared = claudeCredentialPrepared(token, {
-    path: "/var/run/chuggy/credentials/claude-code",
-    environment: strayEnvironment,
-  });
+test("a Claude OAuth run, named or not, runs on its token alone whatever key it inherits", () => {
+  const inherited = { ...strayEnvironment, ANTHROPIC_API_KEY: key };
+  for (const environment of [
+    inherited,
+    { ...inherited, [claudeCredentialVariable]: '{"kind":"Subscription"}' },
+  ]) {
+    const prepared = claudeCredentialPrepared(token, {
+      path: "/var/run/chuggy/credentials/claude-code",
+      environment,
+    });
+    const ran = composed(inherited, prepared);
 
-  assert.deepEqual(prepared, {
-    environment: { ...claudeEnvironment, CLAUDE_CODE_OAUTH_TOKEN: token },
-    withheld: [],
-    secrets: [token],
-  });
-  assert.deepEqual(claudeAgent.prepareCredential(token), prepared);
+    assert.deepEqual(
+      decidingVariables.filter((name) => Object.hasOwn(ran, name)),
+      ["CLAUDE_CODE_OAUTH_TOKEN"],
+    );
+    assert.equal(ran.CLAUDE_CODE_OAUTH_TOKEN, token);
+    assert.deepEqual(prepared.secrets, [token]);
+  }
+  assert.deepEqual(
+    claudeAgent.prepareCredential(token).withheld,
+    claudeCredentialPrepared(token, {
+      environment: { [claudeCredentialVariable]: '{"kind":"Subscription"}' },
+    }).withheld,
+  );
+});
+
+/** Catches an inherited token outranked by, or outranking, the API key a run was handed. */
+test("a Claude API-key run runs on its key alone whatever token it inherits", () => {
+  const inherited = { ...strayEnvironment, CLAUDE_CODE_OAUTH_TOKEN: token };
+  const ran = composed(
+    inherited,
+    claudeCredentialPrepared(key, {
+      environment: { [claudeCredentialVariable]: '{"kind":"ApiKey"}' },
+    }),
+  );
+
+  assert.deepEqual(
+    decidingVariables.filter((name) => Object.hasOwn(ran, name)),
+    ["ANTHROPIC_API_KEY"],
+  );
+  assert.equal(ran.ANTHROPIC_API_KEY, key);
 });
 
 /** Each kind as its setting, its file, and what it sets that decides the credential Claude Code runs on. */
@@ -398,6 +482,8 @@ test("a named kind is run as a host's, with a cloud provider's telemetry left of
     assert.equal(environment.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST, "1");
     assert.equal(environment.DISABLE_TELEMETRY, telemetry, setting.kind);
     assert.equal(environment.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
+    assert.equal(environment.BASH_DEFAULT_TIMEOUT_MS, "1800000");
+    assert.equal(environment.BASH_MAX_TIMEOUT_MS, "3000000");
     assert.equal(environment.DISABLE_AUTOUPDATER, "1");
   }
 });

@@ -44,6 +44,10 @@
  * under `workerSetupEnvironmentVariable`, and one the pod inherited is dropped,
  * so no other shell finds it set.
  *
+ * THOSE SHELLS ARE HANDED EACH HELD CREDENTIAL'S FILE (`heldCredentials.mjs`)
+ * under the variable the plane names for it, over any value the pod, the image
+ * or the setup lines hold for it.
+ *
  * THOSE SHELLS ARE HANDED THE ATTEMPT'S GIT CONFIGURATION, through the
  * variables git reads entries from after every file it reads, appended to any
  * the pod holds. The pod's own entries are named again beside the attempt's,
@@ -58,8 +62,8 @@
  * runs is handed what the stage's would be. The agent is started from what
  * they inherit, and its shell is handed the moved values, the attempt's own
  * change base, which job it is in and its git configuration by the agent's own
- * means, with what its setup passed on, beside what the agent itself was given
- * to run with.
+ * means, with what its setup passed on and its held credentials' files,
+ * beside what the agent itself was given to run with.
  *
  * THE FIRST FAILURE STOPS THE STAGE, and a command killed by a signal is a
  * failure like any other. What follows a command that did not exit cleanly
@@ -73,7 +77,8 @@
  * WHAT A COMMAND WRITES GOES TWO PLACES. It is streamed to the worker's own
  * stdout as it arrives, so a stage that dies mid-run leaves the pod log the
  * account it reached; and it is captured, bounded, for the diagnostic artifact
- * the plane keeps.
+ * the plane keeps: all of it where it fits, and otherwise its start and its
+ * end, marked where output between them was dropped.
  *
  * THE CAPTURE IS BOUNDED AGAINST THE UPLOAD AND NOT AGAINST MEMORY. The
  * artifact the plane refuses is the one that turns a stage's Fail into a
@@ -138,6 +143,9 @@ export const workerSummaryCharsMax = Math.floor(
 
 /** What the report says before the failing command's output, which is what makes the excerpt readable as one. */
 const checkReportExcerptLabel = "; last output of ";
+
+/** What a capture holds where it dropped output, between the head it kept and the end. */
+const checkCaptureMarker = "\n[capture dropped output here]\n";
 
 /** What a scrub is where the caller hands none, which is the suite's case and never the worker's. */
 const checkNoScrub = (text) => text;
@@ -377,14 +385,22 @@ export function workerGitEnvironment(environment, git) {
  * handed by the agent's own means: each variable `check.sh` moved aside, back
  * under its own name; `handed.setupEnvironment`, what the job's setup lines
  * passed on, over those; `handed.changeBase` where the attempt knows one;
- * `handed.job`, what `workerJobEnvironment` tells a job's shells; and
- * `handed.git`, the entries the attempt's git configuration adds.
+ * `handed.heldCredentials`, each held credential's variable naming its file,
+ * over those; `handed.job`, what `workerJobEnvironment` tells a job's shells;
+ * and `handed.git`, the entries the attempt's git configuration adds.
  */
 export function workerShellEnvironment(environment, handed = {}) {
-  const { setupEnvironment = {}, changeBase, job = {}, git = [] } = handed;
+  const {
+    setupEnvironment = {},
+    heldCredentials = {},
+    changeBase,
+    job = {},
+    git = [],
+  } = handed;
   return {
     ...workerImageEnvironment(environment),
     ...setupEnvironment,
+    ...heldCredentials,
     ...(changeBase === undefined
       ? {}
       : { [workerChangeBaseVariable]: changeBase }),
@@ -413,17 +429,13 @@ async function runCheckCommand(command, room, services) {
     env: services.environment,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  let output = "";
-  let truncated = false;
-  const capture = (chunk) => {
-    services.write(chunk);
-    const left = Math.min(workerCheckOutputCharsMax, room) - output.length;
-    if (chunk.length > left) truncated = true;
-    output += chunk.slice(0, Math.max(left, 0));
-  };
+  const capture = checkCapture(Math.min(workerCheckOutputCharsMax, room));
   for (const stream of [child.stdout, child.stderr]) {
     stream.setEncoding("utf8");
-    stream.on("data", capture);
+    stream.on("data", (chunk) => {
+      services.write(chunk);
+      capture.take(chunk);
+    });
   }
   const [code, signal] = await new Promise((settle, refuse) => {
     child.once("error", refuse);
@@ -431,7 +443,53 @@ async function runCheckCommand(command, room, services) {
       settle([exitCode, exitSignal]),
     );
   });
-  return { command, ...checkExit(code, signal), truncated, output };
+  return { command, ...checkExit(code, signal), ...capture.kept() };
+}
+
+/**
+ * A command's output within `units` code units: everything, while it fits, and
+ * otherwise its head and a rolling tail of what came last, joined by the
+ * dropped marker where the marker fits, so the capture still ends where the
+ * command did. Until output is dropped the tail holds whatever room the head
+ * left, and at the first drop the head is cut to its half and the tail to the
+ * other. The tail is cut before it is added to, so the two together never hold
+ * more than `units`, and keeps none of itself where what came last was cut, so
+ * what is dropped is one stretch.
+ */
+function checkCapture(units) {
+  const marker = units >= checkCaptureMarker.length ? checkCaptureMarker : "";
+  const headUnits = Math.floor((units - marker.length) / 2);
+  const tailUnits = units - marker.length - headUnits;
+  let head = "";
+  let headOpen = true;
+  let tail = "";
+  let truncated = false;
+  return {
+    take(chunk) {
+      const taken = headOpen
+        ? checkHead(chunk, units - tailUnits - head.length)
+        : "";
+      head += taken;
+      if (taken.length === chunk.length) return;
+      headOpen = false;
+      const rest = chunk.slice(taken.length);
+      const dropped =
+        tail.length + rest.length >
+        (truncated ? tailUnits : units - head.length);
+      if (dropped && !truncated) head = checkHead(head, headUnits);
+      truncated ||= dropped;
+      const room = truncated ? tailUnits : units - head.length;
+      const end = checkTail(rest, room);
+      tail =
+        end.length < rest.length
+          ? end
+          : checkTail(tail, room - end.length) + end;
+    },
+    kept: () => ({
+      truncated,
+      output: truncated ? `${head}${marker}${tail}` : `${head}${tail}`,
+    }),
+  };
 }
 
 /** How one command's end reads in the stage's report. */
@@ -484,12 +542,10 @@ function checkHead(text, units) {
 
 /** The longest tail of a well-formed text within this many code units that starts on a code point. */
 function checkTail(text, units) {
-  let tail = "";
-  for (const point of [...text].reverse()) {
-    if (tail.length + point.length > units) break;
-    tail = point + tail;
-  }
-  return tail;
+  if (text.length <= units) return text;
+  const start = text.length - units;
+  const lowSurrogate = /^[\uDC00-\uDFFF]$/u.test(text[start]);
+  return text.slice(lowSurrogate ? start + 1 : start);
 }
 
 /**
@@ -529,9 +585,10 @@ function checkReport(commands, ran, scrub) {
  * Runs one check stage: every command in order, stopping at the first that does
  * not exit cleanly, and reporting each command's own status through the
  * caller's credential scrub. `context` names the directory the commands run in,
- * what the job's setup lines passed on, the commit the change started from
- * where the attempt knows it, what a job's shells are told of which job they
- * are in, and the attempt's git configuration where it has one.
+ * what the job's setup lines passed on, the variables naming its held
+ * credentials' files, the commit the change started from where the attempt
+ * knows it, what a job's shells are told of which job they are in, and the
+ * attempt's git configuration where it has one.
  */
 export async function runChecks(context, commands, services = {}) {
   if (commands.length === 0)
@@ -543,6 +600,7 @@ export async function runChecks(context, commands, services = {}) {
   } = services;
   const environment = workerStageEnvironment(process.env, {
     setupEnvironment: context.setupEnvironment,
+    heldCredentials: context.heldCredentials,
     changeBase: context.changeBase,
     job: context.job,
     git: context.git,

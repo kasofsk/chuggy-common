@@ -350,12 +350,13 @@ test("a runner the contract cannot name is refused at once, and a release it can
 });
 
 /**
- * The header each poll of a client given `capabilities` sends, as the plane
- * reads it.
+ * The header each poll of a client given `capabilities` sends under `terms`,
+ * as the plane reads it.
  *
  * @param {readonly string[] | undefined} capabilities
+ * @param {import("./poolLoop.mjs").WorkerPoolPollTerms} [terms]
  */
-async function capabilitiesNamed(capabilities) {
+async function capabilitiesNamed(capabilities, terms = {}) {
   const headers = [];
   const plane = poolPlaneClient(
     capabilities === undefined
@@ -369,8 +370,8 @@ async function capabilitiesNamed(capabilities) {
       );
     },
   );
-  await plane.poll("pool-token", [], 1);
-  await plane.poll("pool-token", [], 1);
+  await plane.poll("pool-token", [], 1, 0, terms);
+  await plane.poll("pool-token", [], 1, 0, terms);
   return headers.map((sent) => ({
     present: workerRunnerCapabilitiesHeader in sent,
     named: workerRunnerCapabilitiesOf(sent[workerRunnerCapabilitiesHeader]),
@@ -397,6 +398,32 @@ test("a runner's every poll names its capabilities as a set the plane reads, eac
       }),
       JSON.stringify(given),
     );
+});
+
+/**
+ * Catches a withheld capability reaching a poll, one the client was not given
+ * added, or a client given none naming a set because its poll withholds one.
+ */
+test("a poll names the capabilities its client was given less those its terms withhold, and adds none", async () => {
+  const given = ["Platform:Linux:Amd64", "Agent:Claude", "Tool:Bazel"];
+  for (const [withheld, set] of [
+    [["Agent:Claude"], ["Platform:Linux:Amd64", "Tool:Bazel"]],
+    [["Agent:Codex"], given],
+    [[], given],
+    [given, []],
+  ])
+    assert.deepEqual(
+      await capabilitiesNamed(given, { withheld }),
+      Array(2).fill({
+        present: true,
+        named: { named: "Set", capabilities: set },
+      }),
+      JSON.stringify(withheld),
+    );
+  assert.deepEqual(
+    await capabilitiesNamed(undefined, { withheld: ["Agent:Claude"] }),
+    Array(2).fill({ present: false, named: { named: "None" } }),
+  );
 });
 
 /** Catches a client given no capabilities naming a set, which would replace the one its registration recorded. */
@@ -561,4 +588,130 @@ test("a plane refusing this client's release ends the pool rather than losing an
     (await answering(409, "").poll("pool-token", [], 1)).polled,
     "Unavailable",
   );
+});
+
+test("a chat host's every poll names how long a session it claims may sit idle, and the image the answer names its sessions is passed on", async () => {
+  const seen = [];
+  /** @type {Record<string, unknown>} */
+  let body = {
+    assignments: [],
+    sessions: [session],
+    stop: [],
+    chatImage: `registry.invalid/chuggy/chat@sha256:${"a".repeat(64)}`,
+  };
+  const plane = poolPlaneClient(
+    { ...planeSettings, idleSecs: 600 },
+    async (input) => {
+      seen.push(String(input));
+      return answered(200, JSON.stringify(body));
+    },
+  );
+  assert.deepEqual(await plane.poll("pool-token", ["one"], 0, 1), {
+    polled: "Reconciled",
+    assignments: [],
+    sessions: [session],
+    stop: [],
+    chatImage: body.chatImage,
+  });
+  body = { assignments: [], sessions: [], stop: [] };
+  const unnamed = await plane.poll("pool-token", [], 0, 0);
+  assert.equal("chatImage" in unnamed, false);
+  assert.deepEqual(seen, [
+    "https://pool-plane.invalid/v1/assignments?held=one&wanted=0&wantedSessions=1&idleSecs=600",
+    "https://pool-plane.invalid/v1/assignments?wanted=0&wantedSessions=0&idleSecs=600",
+  ]);
+});
+
+test("a client given no idle bound names none, and an idle bound that is no positive whole number is refused at once", async () => {
+  const seen = [];
+  const plane = poolPlaneClient(planeSettings, async (input) => {
+    seen.push(String(input));
+    return answered(
+      200,
+      JSON.stringify({ assignments: [], sessions: [], stop: [] }),
+    );
+  });
+  await plane.poll("pool-token", [], 1, 1);
+  assert.equal(seen[0].includes("idleSecs"), false);
+  for (const idleSecs of [0, -1, 1.5, Number.NaN, 2 ** 53])
+    assert.throws(
+      () => checkedPoolPlaneClientSettings({ ...planeSettings, idleSecs }),
+      /^RangeError: pool plane idleSecs must be a positive integer$/u,
+    );
+});
+
+test("an answer naming a chat image the contract cannot read is an outage", async () => {
+  for (const chatImage of ["", "i".repeat(4096), 7])
+    assert.equal(
+      (
+        await answering(
+          200,
+          JSON.stringify({
+            assignments: [],
+            sessions: [],
+            stop: [],
+            chatImage,
+          }),
+        ).poll("pool-token", [], 0)
+      ).polled,
+      "Unavailable",
+    );
+});
+
+test("a report is posted to its route as JSON under the token it is given, naming this client's release, and is taken only where the plane answers 204", async () => {
+  const seen = [];
+  let status = 204;
+  const plane = poolPlaneClient(planeSettings, async (input, init) => {
+    seen.push({ url: String(input), init });
+    return answered(status, "{}");
+  });
+  assert.deepEqual(await plane.report("pool-token", '{"host":"a"}'), {
+    reported: "Reported",
+  });
+  assert.equal(seen[0].url, "https://pool-plane.invalid/v1/runner-report");
+  assert.equal(seen[0].init.method, "POST");
+  assert.equal(seen[0].init.body, '{"host":"a"}');
+  assert.equal(seen[0].init.headers.authorization, "Bearer pool-token");
+  assert.equal(seen[0].init.headers["content-type"], "application/json");
+  assert.equal(
+    seen[0].init.headers[workerContractHeader],
+    workerContractRelease,
+  );
+  for (status of [200, 400, 401, 404, 500])
+    assert.deepEqual(await plane.report("pool-token", "{}"), {
+      reported: "Failed",
+      evidence: `the plane answered ${String(status)}`,
+    });
+  const unreached = poolPlaneClient(planeSettings, async () => {
+    throw new TypeError("fetch failed");
+  });
+  assert.deepEqual(await unreached.report("pool-token", "{}"), {
+    reported: "Failed",
+    evidence: "the plane could not be reached",
+  });
+});
+
+test("the client keeps the version its last poll's answer named, and none where that answer named none or never came", async () => {
+  let answer = () =>
+    answered(200, '{"assignments":[],"sessions":[],"stop":[]}');
+  const plane = poolPlaneClient(planeSettings, async () => answer());
+  assert.equal(plane.polledVersion(), undefined);
+  await plane.poll("pool-token", [], 1);
+  const [major, minor] = workerContractRelease.split(".").map(Number);
+  assert.deepEqual(plane.polledVersion(), { major, minor });
+  answer = () => new globalThis.Response("bad gateway", { status: 502 });
+  await plane.poll("pool-token", [], 1);
+  assert.equal(plane.polledVersion(), undefined);
+  answer = () =>
+    new globalThis.Response("{}", {
+      status: 500,
+      headers: { [workerContractHeader]: "1.27.3" },
+    });
+  await plane.poll("pool-token", [], 1);
+  assert.deepEqual(plane.polledVersion(), { major: 1, minor: 27 });
+  answer = () => {
+    throw new TypeError("fetch failed");
+  };
+  await plane.poll("pool-token", [], 1);
+  assert.equal(plane.polledVersion(), undefined);
 });

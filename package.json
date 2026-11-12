@@ -7,7 +7,7 @@
   },
   "private": true,
   "dependencies": {
-    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.25.0/chuggy-worker-contract-1.25.0.tgz"
+    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.73.0/chuggy-worker-contract-1.73.0.tgz"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -18,22 +18,34 @@
     "prettier": "^3.9.6",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.68.0",
-    "zod": "4.5.4"
+    "zod": "4.6.7"
   },
   "peerDependencies": {
     "zod": "^4.4.3"
   },
   "files": [
     "agent.mjs",
+    "agentCredentialSet.mjs",
     "boundedResponse.mjs",
+    "chatChannel.mjs",
+    "chatCheckout.mjs",
+    "chatHost.mjs",
+    "chatHostBackend.mjs",
+    "chatHostLog.mjs",
+    "chatSession.mjs",
+    "chatSupervisor.mjs",
     "check.sh",
     "checks.mjs",
     "chuggyApi.mjs",
     "chuggyTools.mjs",
     "claude.mjs",
+    "claudeControl.mjs",
     "claudeCredential.mjs",
     "codex.mjs",
+    "codexRollout.mjs",
+    "confinementProbe.mjs",
     "containerBackend.mjs",
+    "contextReading.mjs",
     "contractProbe.mjs",
     "control.mjs",
     "coreRuntime.mjs",
@@ -45,11 +57,13 @@
     "fileLock.mjs",
     "git-askpass.sh",
     "gitRemote.mjs",
+    "heldCredentials.mjs",
     "hostBackend.mjs",
     "imageCleanup.mjs",
     "imageRecord.mjs",
     "imageSweep.mjs",
     "job.mjs",
+    "keptWorkspace.mjs",
     "leadDecision.mjs",
     "lease.mjs",
     "localSignIn.mjs",
@@ -72,6 +86,8 @@
     "repository.mjs",
     "result.mjs",
     "runEvidence.mjs",
+    "runHold.mjs",
+    "runnerReport.mjs",
     "runnerUpdate.mjs",
     "runtimeScratch.mjs",
     "savedLog.mjs",
@@ -92,5 +108,8 @@
     "transcriptPage.mjs",
     "transport.mjs",
     "wire.mjs"
-  ]
+  ],
+  "overrides": {
+    "minimatch": "^11.0.1"
+  }
 }

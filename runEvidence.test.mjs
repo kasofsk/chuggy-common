@@ -4,12 +4,34 @@ import test from "node:test";
 import { setImmediate } from "node:timers";
 
 import {
+  creditsDepletedSnapshot,
+  creditsDepletedTypes,
+  fiveHourResetsAtSecs,
+  limitReachedTypes,
+  limitSnapshot,
+  rolloutObservedAtSecs,
+  rolloutTimestamp,
+  weeklyResetsAtSecs,
+} from "./codexRollout.fixture.mjs";
+import {
   runEndedEvidences,
   runModelCharsMax,
   runTranscriptBatchBytesMax,
   runTranscriptBatchesMax,
   runTurnSeriesMax,
+  workerRunContextSchema,
+  workerRunEndedSchema,
+  workerRunLimitSchema,
+  workerRunTotalsSchema,
+  workerRunTurnsSchema,
+  workerRunUsageSchema,
 } from "@chuggy/worker-contract/workerPlane";
+
+import {
+  workerContractCredentialOutcome,
+  workerContractHeader,
+  workerContractRelease,
+} from "@chuggy/worker-contract/workerContract";
 
 import { drawnSecrets, drawnText, seeded } from "./credentialText.fixture.mjs";
 import {
@@ -22,6 +44,7 @@ import {
   runCloneFailed,
   runCommitFailed,
   runEvidenceRecorder,
+  runLimit,
   runPushFailed,
   runSetupFailed,
   runStep,
@@ -29,9 +52,24 @@ import {
   runTotals,
   runTranscriptEventBytesMax,
   runTurn,
+  runUsage,
   truncatedEvent,
 } from "./runEvidence.mjs";
-import { observeRateLimit, rateLimitSightings } from "./rateLimit.mjs";
+import {
+  observeCodexRollout,
+  observeRateLimit,
+  rateLimitReadings,
+  rateLimitSightings,
+  rateLimited,
+} from "./rateLimit.mjs";
+import { contextWindow } from "./contextReading.mjs";
+import { contextUsage } from "./contextUsage.fixture.mjs";
+import {
+  creditsRefused,
+  creditsResult,
+  limitRejected,
+  limitResetsAtSecs,
+} from "./rateLimit.fixture.mjs";
 
 /** The sightings a run that saw exactly these frames, in this order, ends with. */
 function seenBy(...events) {
@@ -40,6 +78,9 @@ function seenBy(...events) {
 
 const task = { workerPlane: { url: "http://worker-plane.test:3001" } };
 const secret = "sk-ant-oat01-0123456789abcdefghijklmnopqrstuvwxyz";
+
+/** When the harness's clock says a frame was seen, a moment past a whole second. */
+const observedAtMs = 1_793_250_000_750;
 
 function harness(options = {}) {
   const calls = [];
@@ -52,10 +93,16 @@ function harness(options = {}) {
       request: async (_task, _bearer, path, init) => {
         calls.push({ path, init });
         await options.behaviour?.(path);
-        if (path !== "/v1/run/turns") return { ok: true, status: 204 };
+        const headers = new globalThis.Headers(
+          options.release === undefined
+            ? {}
+            : { [workerContractHeader]: options.release },
+        );
+        if (path !== "/v1/run/turns") return { ok: true, status: 204, headers };
         return {
           ok: true,
           status: 200,
+          headers,
           json: async () => ({ turnsRecorded: options.turnsRecorded ?? 0 }),
         };
       },
@@ -65,6 +112,7 @@ function harness(options = {}) {
       },
       clearInterval: () => undefined,
       warn: () => undefined,
+      now: options.now ?? (() => observedAtMs),
     },
   );
   return { recorder, calls, tick: () => ticked() };
@@ -495,6 +543,196 @@ test("a turn row carries what the plane takes and nothing besides", async () => 
   ]);
 });
 
+/** The release of a plane from before turns named their subagent and runs took readings. */
+const releaseBeforeContext = "1.43.0";
+
+/** One API call's events as Claude Code streams them: one per content block, each repeating the call's id and usage. */
+function callEvents(id, blocks, extra = {}) {
+  return blocks.map((block) => ({
+    type: "assistant",
+    message: {
+      id,
+      model: "claude-opus-4",
+      content: [{ type: block }],
+      usage: { input_tokens: 10, output_tokens: 1 },
+    },
+    parent_tool_use_id: null,
+    ...extra,
+  }));
+}
+
+async function recordAll(recorder, events) {
+  for (const event of events)
+    await recorder.record(JSON.stringify(event), event);
+}
+
+/** Every turn row a plane was posted, in the order it was posted them. */
+function postedTurns(calls) {
+  return calls
+    .filter(({ path }) => path === "/v1/run/turns")
+    .flatMap(({ init }) => JSON.parse(init.body).turns);
+}
+
+test("one API call is one turn row, whatever blocks it streamed as, and ordinals stay contiguous", async () => {
+  const { recorder, calls, tick } = harness();
+  await recordAll(recorder, [
+    ...callEvents("msg_1", ["thinking", "text", "tool_use"]),
+    ...callEvents("msg_2", ["text"]),
+  ]);
+  await tick();
+
+  assert.deepEqual(
+    postedTurns(calls).map(({ ordinal }) => ordinal),
+    [1, 2],
+  );
+});
+
+test("a run with no result folds its totals from one row per API call", async () => {
+  const { recorder, calls } = harness();
+  await recordAll(
+    recorder,
+    callEvents("msg_1", ["thinking", "text", "tool_use"]),
+  );
+  await recorder.finish();
+
+  const totals = JSON.parse(
+    calls.find(({ path }) => path === "/v1/run/totals").init.body,
+  );
+  assert.equal(totals.turns, 1);
+  assert.equal(totals.tokensInput, 10);
+});
+
+test("a subagent's call names the call it was made under, to a plane that takes the field", async () => {
+  const { recorder, calls, tick } = harness({ release: workerContractRelease });
+  await recorder.configuration(Buffer.from("{}"));
+  await recordAll(recorder, [
+    ...callEvents("msg_1", ["tool_use"]),
+    ...callEvents("msg_2", ["text"], { parent_tool_use_id: "toolu_01" }),
+  ]);
+  await tick();
+
+  const turns = postedTurns(calls);
+  assert.equal(Object.hasOwn(turns[0], "parentToolUseId"), false);
+  assert.equal(turns[1].parentToolUseId, "toolu_01");
+  assert.ok(workerRunTurnsSchema.safeParse({ turns }).success);
+});
+
+test("a plane from before the field is offered no subagent", async () => {
+  const { recorder, calls, tick } = harness({ release: releaseBeforeContext });
+  await recorder.configuration(Buffer.from("{}"));
+  await recordAll(
+    recorder,
+    callEvents("msg_1", ["text"], { parent_tool_use_id: "toolu_01" }),
+  );
+  await tick();
+
+  assert.equal(Object.hasOwn(postedTurns(calls)[0], "parentToolUseId"), false);
+});
+
+const compaction = {
+  trigger: "Auto",
+  tokensBefore: 167_000,
+  tokensAfter: 9_000,
+};
+
+/** Every reading a plane was posted, in the order it was posted them. */
+function postedReadings(calls) {
+  return calls
+    .filter(({ path }) => path === "/v1/run/context")
+    .flatMap(({ init }) => JSON.parse(init.body).readings);
+}
+
+/** A reading of `cause` offered after the turns `recorder` has folded. */
+function offerReading(recorder, cause, fields = {}) {
+  recorder.context({ cause, afterTurn: recorder.turnsFolded(), ...fields });
+}
+
+test("a compaction posts one reading, after the turn it follows", async () => {
+  const { recorder, calls, tick } = harness({ release: workerContractRelease });
+  await recordAll(recorder, callEvents("msg_1", ["thinking", "text"]));
+  offerReading(recorder, "Compaction", { compaction });
+  await tick();
+
+  const readings = postedReadings(calls);
+  assert.deepEqual(readings, [
+    { ordinal: 1, afterTurn: 1, cause: "Compaction", compaction },
+  ]);
+  assert.ok(workerRunContextSchema.safeParse({ readings }).success);
+});
+
+test("readings at start, at a compaction and at end are numbered in the order offered, each with its window", async () => {
+  const { recorder, calls, tick } = harness({ release: workerContractRelease });
+  const window = contextWindow(contextUsage, (text) => text);
+  offerReading(recorder, "Start", { window });
+  await recordAll(recorder, callEvents("msg_1", ["text"]));
+  offerReading(recorder, "Compaction", { compaction, window });
+  await recordAll(recorder, callEvents("msg_2", ["text"]));
+  offerReading(recorder, "End", { window });
+  await tick();
+
+  const readings = postedReadings(calls);
+  assert.deepEqual(
+    readings.map(({ ordinal, afterTurn, cause }) => [
+      ordinal,
+      afterTurn,
+      cause,
+    ]),
+    [
+      [1, 0, "Start"],
+      [2, 1, "Compaction"],
+      [3, 2, "End"],
+    ],
+  );
+  assert.ok(readings.every((reading) => reading.window !== undefined));
+  assert.ok(workerRunContextSchema.safeParse({ readings }).success);
+});
+
+/** Catches a window the contract refuses costing the compaction it rides on, or posting a reading that is nothing but its cause. */
+test("a refused window costs a compaction only its window, and any other reading itself", async () => {
+  const { recorder, calls, tick } = harness({ release: workerContractRelease });
+  const refused = { ...contextWindow(contextUsage, (text) => text), model: "" };
+  await recordAll(recorder, callEvents("msg_1", ["text"]));
+  offerReading(recorder, "Start", { window: refused });
+  offerReading(recorder, "Compaction", { compaction, window: refused });
+  offerReading(recorder, "End", { window: refused });
+  await tick();
+
+  assert.deepEqual(postedReadings(calls), [
+    { ordinal: 1, afterTurn: 1, cause: "Compaction", compaction },
+  ]);
+});
+
+test("a plane from before readings is offered none", async () => {
+  const { recorder, calls } = harness({ release: releaseBeforeContext });
+  await recordAll(recorder, callEvents("msg_1", ["text"]));
+  offerReading(recorder, "Compaction", { compaction });
+  await recorder.finish();
+
+  assert.deepEqual(postedReadings(calls), []);
+});
+
+test("a refused reading stops the readings and nothing else of the run's evidence", async () => {
+  const { recorder, calls, tick } = harness({
+    release: workerContractRelease,
+    behaviour: async (path) => {
+      if (path === "/v1/run/context") throw new Error("refused");
+    },
+  });
+  await recordAll(recorder, callEvents("msg_1", ["text"]));
+  offerReading(recorder, "Compaction", { compaction });
+  await tick();
+  await recordAll(recorder, callEvents("msg_2", ["text"]));
+  offerReading(recorder, "Compaction", { compaction });
+  await tick();
+
+  assert.equal(
+    calls.filter(({ path }) => path === "/v1/run/context").length,
+    1,
+  );
+  assert.equal(transcriptBatches(calls).length, 2);
+  assert.equal(postedTurns(calls).length, 2);
+});
+
 test("a buffer that would exceed one body's worth is shipped first", async () => {
   const { recorder, calls, tick } = harness();
   const line = JSON.stringify({ type: "system", text: "x".repeat(1_000) });
@@ -913,6 +1151,76 @@ test("a hold outranks the turn count, because a held run had no turns to spend",
   );
 });
 
+/**
+ * Catches exhausted credits labelled for a plane whose release does not take
+ * the label, which would refuse the run's end, or labelled a hold, or outranking
+ * a step of the harness's own.
+ */
+test("exhausted credits end a run RunCreditsExhausted only to a plane whose release takes it, outranking a hold", () => {
+  const seen = seenBy(rejection, creditsRefused, creditsResult);
+  const takes = workerContractCredentialOutcome;
+  const before = { ...takes, minor: takes.minor - 1 };
+  assert.ok(runEndedEvidences.includes("RunCreditsExhausted"));
+  assert.equal(
+    endedEvidence(creditsResult, false, seen, undefined, takes),
+    "RunCreditsExhausted",
+  );
+  assert.equal(
+    endedEvidence(creditsResult, false, seen, undefined, before),
+    "RunRateLimited",
+  );
+  assert.equal(
+    endedEvidence(
+      creditsResult,
+      false,
+      seenBy(creditsRefused, creditsResult),
+      undefined,
+      before,
+    ),
+    "RunFailed",
+  );
+  assert.equal(
+    endedEvidence(creditsResult, false, seen, undefined, undefined),
+    "RunRateLimited",
+  );
+  assert.equal(
+    endedEvidence(creditsResult, false, seen, runTimedOut, takes),
+    runTimedOut,
+  );
+});
+
+/** Catches a workspace whose Codex credits are depleted labelled a limit, or a Codex limit labelled exhausted credits. */
+test("a Codex rollout naming depleted credits ends RunCreditsExhausted, and one naming a limit RunRateLimited", () => {
+  const takes = workerContractCredentialOutcome;
+  const ended = (snapshot) =>
+    endedEvidence(
+      undefined,
+      false,
+      observeCodexRollout(rateLimitSightings(), {
+        snapshot,
+        errorInfo: "usage_limit_exceeded",
+      }),
+      undefined,
+      takes,
+    );
+  for (const reached of creditsDepletedTypes) {
+    assert.equal(
+      ended(creditsDepletedSnapshot(reached)),
+      "RunCreditsExhausted",
+    );
+    assert.equal(
+      ended({ ...limitSnapshot, rate_limit_reached_type: reached }),
+      "RunCreditsExhausted",
+    );
+  }
+  for (const reached of limitReachedTypes)
+    assert.equal(
+      ended({ ...limitSnapshot, rate_limit_reached_type: reached }),
+      "RunRateLimited",
+    );
+  assert.equal(ended(undefined), "RunRateLimited");
+});
+
 test("the recorder folds the frames it ships, so the ending reads the whole run", async () => {
   const { recorder, calls } = harness();
   const line = JSON.stringify(rejection);
@@ -923,6 +1231,29 @@ test("the recorder folds the frames it ships, so the ending reads the whole run"
   const ended = calls.find(({ path }) => path === "/v1/run/ended");
   assert.deepEqual(JSON.parse(ended.init.body), {
     evidence: "RunRateLimited",
+    limit: { window: "five_hour", resetsAt: 1787823600 },
+  });
+});
+
+/** Catches a Codex limit read from its rollout but not priced as a hold, or written into the transcript as if the run had streamed it. */
+test("what a Codex rollout declared ends the run held and adds nothing to its transcript", async () => {
+  const { recorder, calls, tick } = harness();
+  recorder.rolloutObserved({
+    snapshot: limitSnapshot,
+    errorInfo: "usage_limit_exceeded",
+  });
+  await tick();
+  await recorder.ended();
+
+  assert.equal(recorder.sightings().reset.window, "seven_day");
+  assert.deepEqual(
+    calls.filter(({ path }) => path.startsWith("/v1/run/tran")),
+    [],
+  );
+  const ended = calls.find(({ path }) => path === "/v1/run/ended");
+  assert.deepEqual(JSON.parse(ended.init.body), {
+    evidence: "RunRateLimited",
+    limit: { window: "seven_day", resetsAt: weeklyResetsAtSecs },
   });
 });
 
@@ -1042,4 +1373,399 @@ test("the totals a run ends with are posted once", async () => {
   const totals = calls.filter(({ path }) => path === "/v1/run/totals");
   assert.equal(totals.length, 1);
   assert.equal(JSON.parse(totals[0].init.body).costUsdMicros, 500_000);
+});
+
+/** `event` as the stream carried it. */
+function framed(recorder, event) {
+  recorder.record(JSON.stringify(event), event);
+}
+
+/** The totals a recorder posted when it finished. */
+async function postedTotals(recorder, calls) {
+  await recorder.finish();
+  const posted = calls.find(({ path }) => path === "/v1/run/totals");
+  return JSON.parse(posted.init.body);
+}
+
+/** A process's result as the runtime wrote it: `figures` over nothing spent. */
+function processResult(figures) {
+  return { type: "result", subtype: "success", ...figures };
+}
+
+/** What the plane holds of one model's use in a process's `modelUsage`. */
+function modelUse(inputTokens, costUSD) {
+  return { "claude-opus-5-5": { inputTokens, outputTokens: 1, costUSD } };
+}
+
+/**
+ * The figures of two processes of one conversation, as a real resumed run wrote
+ * them: its usage, turns and wall time counted from the process's start, and
+ * its cost, API time and model rows carried on from the session's. Catches a
+ * run charged only its last process, which is what `observed` overwriting the
+ * first would do, and a run charged its first process's cost twice.
+ */
+test("a resumed run's totals are the sum of what each process counted alone, and the last of what the session carried", async () => {
+  const { recorder, calls } = harness();
+  recorder.observed(
+    processResult({
+      usage: {
+        input_tokens: 10,
+        output_tokens: 20,
+        cache_creation_input_tokens: 30,
+        cache_read_input_tokens: 40,
+      },
+      num_turns: 28,
+      duration_ms: 1_000,
+      duration_api_ms: 1_734,
+      total_cost_usd: 1.2,
+      modelUsage: modelUse(10, 1.2),
+      permission_denials: [{}],
+      stop_reason: "stop_sequence",
+    }),
+  );
+
+  recorder.resumed();
+  recorder.observed(
+    processResult({
+      usage: {
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_creation_input_tokens: 3,
+        cache_read_input_tokens: 4,
+      },
+      num_turns: 2,
+      duration_ms: 500,
+      duration_api_ms: 3_188,
+      total_cost_usd: 2.5,
+      modelUsage: modelUse(20, 2.5),
+      permission_denials: [{}, {}],
+      stop_reason: "end_turn",
+    }),
+  );
+
+  const totals = await postedTotals(recorder, calls);
+  assert.equal(totals.tokensInput, 11);
+  assert.equal(totals.tokensOutput, 22);
+  assert.equal(totals.tokensCacheCreation, 33);
+  assert.equal(totals.tokensCacheRead, 44);
+  assert.equal(totals.turns, 30);
+  assert.equal(totals.durationMs, 1_500);
+  assert.equal(totals.permissionDenials, 3);
+  assert.equal(totals.durationApiMs, 3_188);
+  assert.equal(totals.costUsdMicros, 2_500_000);
+  assert.deepEqual(
+    totals.models.map(({ tokensInput }) => tokensInput),
+    [20],
+  );
+  assert.equal(totals.stopReason, "end_turn");
+});
+
+/**
+ * A process that died unaccounted leaves only the turns it streamed. Catches
+ * the first process's turns counted again in what the second folds to, and the
+ * cost and model rows the first was charged being lost to a total of nothing.
+ */
+test("a resumed process that ended unaccounted adds its turns to what was already accounted for", async () => {
+  const { recorder, calls } = harness();
+  framed(recorder, assistantEvent("claude-opus-5-5", { input_tokens: 7 }));
+  recorder.observed(
+    processResult({
+      usage: { input_tokens: 7, output_tokens: 1 },
+      num_turns: 1,
+      duration_ms: 100,
+      duration_api_ms: 90,
+      total_cost_usd: 1,
+      modelUsage: modelUse(7, 1),
+    }),
+  );
+
+  recorder.resumed();
+  framed(recorder, assistantEvent("claude-opus-5-5", { input_tokens: 5 }));
+
+  const totals = await postedTotals(recorder, calls);
+  assert.equal(totals.tokensInput, 12);
+  assert.equal(totals.turns, 2);
+  assert.equal(totals.costUsdMicros, 1_000_000);
+  assert.equal(totals.durationApiMs, 90);
+  assert.deepEqual(
+    totals.models.map(({ tokensInput, costUsdMicros }) => [
+      tokensInput,
+      costUsdMicros,
+    ]),
+    [[12, 1_000_000]],
+  );
+});
+
+test("a run that was never resumed posts the totals it always did", async () => {
+  const { recorder, calls } = harness();
+  const result = processResult({
+    usage: { input_tokens: 3, output_tokens: 4 },
+    num_turns: 2,
+    total_cost_usd: 0.5,
+  });
+  recorder.observed(result);
+
+  assert.deepEqual(
+    await postedTotals(recorder, calls),
+    JSON.parse(JSON.stringify(runTotals(result, []))),
+  );
+});
+
+/**
+ * Catches a process charged a limit the one before it saw. A rejection is
+ * sticky within a process, so without this a run that came back from its hold
+ * and then failed for its own reasons would be held again, and end labelled as
+ * though the provider had refused it.
+ */
+test("a resumed process starts with nothing seen of the limit", () => {
+  const { recorder } = harness();
+  framed(recorder, { type: "assistant", error: "rate_limit", message: {} });
+  assert.ok(rateLimited(recorder.sightings()));
+
+  recorder.resumed();
+
+  assert.ok(!rateLimited(recorder.sightings()));
+});
+
+/** Catches a turn series whose ordinals start over, which the plane would read as the first process's turns sent again. */
+test("a resumed process's turns go on from the last ordinal", async () => {
+  const { recorder, calls } = harness();
+  framed(recorder, assistantEvent("claude-opus-5-5", { input_tokens: 1 }));
+
+  recorder.resumed();
+  framed(recorder, assistantEvent("claude-opus-5-5", { input_tokens: 1 }));
+  await recorder.finish();
+
+  const sent = calls
+    .filter(({ path }) => path === "/v1/run/turns")
+    .flatMap(({ init }) => JSON.parse(init.body).turns);
+  assert.deepEqual(
+    sent.map(({ ordinal }) => ordinal),
+    [1, 2],
+  );
+});
+
+test("a hold is a line of the transcript, saying until when and which window", async () => {
+  const { recorder, calls } = harness();
+
+  const line = recorder.held({
+    until: "2026-10-30T18:01:00.000Z",
+    window: "five_hour",
+  });
+  await recorder.finish();
+
+  assert.deepEqual(JSON.parse(line), {
+    type: "chuggy_run_held",
+    until: "2026-10-30T18:01:00.000Z",
+    window: "five_hour",
+  });
+  assert.ok(
+    transcriptBatches(calls).some(({ init }) =>
+      Buffer.from(init.body).toString("utf8").includes(line),
+    ),
+  );
+});
+
+/** Catches a resume the limit stopped at once emptying the rows of what the run spent. */
+test("a resumed process whose result names no model leaves the rows before it", async () => {
+  const { recorder, calls } = harness();
+  recorder.observed(
+    processResult({ total_cost_usd: 1.2, modelUsage: modelUse(10, 1.2) }),
+  );
+  recorder.resumed();
+  recorder.observed(processResult({ num_turns: 1, total_cost_usd: 1.2 }));
+
+  const totals = await postedTotals(recorder, calls);
+  assert.equal(totals.costUsdMicros, 1_200_000);
+  assert.deepEqual(
+    totals.models.map(({ tokensInput, costUsdMicros }) => ({
+      tokensInput,
+      costUsdMicros,
+    })),
+    [{ tokensInput: 10, costUsdMicros: 1_200_000 }],
+  );
+});
+
+/** The second the harness's clock says each frame was seen in. */
+const observedAtSecs = Math.floor(observedAtMs / 1_000);
+
+/** What `limitRejected`'s windows read as, seen on the harness's clock. */
+const limitReadings = {
+  five_hour: {
+    utilization: 1,
+    resetsAt: limitResetsAtSecs,
+    observedAt: observedAtSecs,
+  },
+  seven_day: {
+    utilization: 0.5,
+    resetsAt: 1_793_764_800,
+    observedAt: observedAtSecs,
+  },
+};
+
+/** The end a recorder posted, held to the contract. */
+async function postedEnded(recorder, calls, step) {
+  await recorder.ended(step);
+  const posted = calls.find(({ path }) => path === "/v1/run/ended");
+  const body = JSON.parse(posted.init.body);
+  assert.ok(workerRunEndedSchema.safeParse(body).success, posted.init.body);
+  return body;
+}
+
+test("a run's totals carry the latest reading of each window it saw, inside the contract", async () => {
+  const { recorder, calls } = harness();
+  framed(recorder, limitRejected);
+  recorder.observed(processResult({ num_turns: 1 }));
+
+  const totals = await postedTotals(recorder, calls);
+  assert.ok(workerRunTotalsSchema.safeParse(totals).success);
+  assert.deepEqual(totals.usage, limitReadings);
+});
+
+/** Catches an empty `usage` sent, and a run's totals changed by readings it never saw. */
+test("a run that saw no reading posts no usage", async () => {
+  const { recorder, calls } = harness();
+  const result = processResult({ num_turns: 1 });
+  recorder.observed(result);
+  framed(recorder, {
+    type: "rate_limit_event",
+    rate_limit_info: { status: "allowed", utilization: 50 },
+  });
+
+  assert.deepEqual(
+    await postedTotals(recorder, calls),
+    JSON.parse(JSON.stringify(runTotals(result, []))),
+  );
+});
+
+/**
+ * Catches readings dropped with the sightings when a hold ends, which would
+ * leave the plane no reading of the window the run was held at.
+ */
+test("a run's readings survive its hold, and a later reading of a window replaces the earlier", async () => {
+  const { recorder, calls } = harness();
+  framed(recorder, limitRejected);
+  recorder.resumed();
+  assert.ok(!rateLimited(recorder.sightings()));
+  framed(recorder, {
+    type: "rate_limit_event",
+    rate_limit_info: {
+      status: "allowed",
+      unifiedWindows: {
+        five_hour: { utilization: 0.01, resetsAt: 1_793_314_800 },
+      },
+    },
+  });
+  recorder.observed(processResult({ num_turns: 1 }));
+
+  assert.deepEqual((await postedTotals(recorder, calls)).usage, {
+    five_hour: {
+      utilization: 0.01,
+      resetsAt: 1_793_314_800,
+      observedAt: observedAtSecs,
+    },
+    seven_day: limitReadings.seven_day,
+  });
+});
+
+/** Catches a Codex rollout's usage made into a refusal, which would end a run with a verdict rate-limited. */
+test("a Codex rollout's usage is read without being seen as a limit", async () => {
+  const { recorder, calls } = harness();
+  recorder.rolloutUsageObserved({
+    snapshot: limitSnapshot,
+    snapshotTimestamp: rolloutTimestamp,
+    errorInfo: "usage_limit_exceeded",
+  });
+
+  assert.ok(!rateLimited(recorder.sightings()));
+  assert.deepEqual((await postedTotals(recorder, calls)).usage, {
+    five_hour: {
+      utilization: 1,
+      resetsAt: fiveHourResetsAtSecs,
+      observedAt: rolloutObservedAtSecs,
+    },
+    seven_day: {
+      utilization: 1,
+      resetsAt: weeklyResetsAtSecs,
+      observedAt: rolloutObservedAtSecs,
+    },
+  });
+});
+
+test("usage is each window read, and nothing where none was", () => {
+  assert.equal(runUsage(rateLimitReadings()), undefined);
+  assert.equal(runUsage(undefined), undefined);
+  for (const readings of [
+    limitReadings,
+    { seven_day: limitReadings.seven_day },
+  ]) {
+    const usage = runUsage(readings);
+    assert.deepEqual(usage, readings);
+    assert.ok(workerRunUsageSchema.safeParse(usage).success);
+  }
+});
+
+/** Catches a field the contract would refuse sent, which would leave the attempt to the lease sweep. */
+test("a limit carries each field of its reset the contract takes, floored, and is nothing where it takes neither", () => {
+  for (const [reset, limit] of [
+    [
+      { resetsAtSecs: 1_793_296_800, window: "five_hour" },
+      { window: "five_hour", resetsAt: 1_793_296_800 },
+    ],
+    [
+      { resetsAtSecs: 1_793_296_800.75, window: "seven_day" },
+      { window: "seven_day", resetsAt: 1_793_296_800 },
+    ],
+    [
+      { resetsAtSecs: 1_793_296_800, window: "seven_day_opus" },
+      { resetsAt: 1_793_296_800 },
+    ],
+    [
+      { resetsAtSecs: 1_793_296_800, window: undefined },
+      { resetsAt: 1_793_296_800 },
+    ],
+    [{ resetsAtSecs: 0.5, window: "five_hour" }, { window: "five_hour" }],
+    [{ resetsAtSecs: 0.5, window: "overage" }, undefined],
+    [undefined, undefined],
+  ]) {
+    assert.deepEqual(runLimit(reset), limit, JSON.stringify(reset));
+    if (limit !== undefined)
+      assert.ok(workerRunLimitSchema.safeParse(limit).success);
+  }
+});
+
+test("a run ended rate-limited carries the limit that stopped it", async () => {
+  const { recorder, calls } = harness();
+  framed(recorder, limitRejected);
+
+  assert.deepEqual(await postedEnded(recorder, calls), {
+    evidence: "RunRateLimited",
+    limit: { window: "five_hour", resetsAt: limitResetsAtSecs },
+  });
+});
+
+test("a limit whose reset the contract takes no field of is left out of the end", async () => {
+  const { recorder, calls } = harness();
+  framed(recorder, {
+    type: "rate_limit_event",
+    rate_limit_info: {
+      status: "rejected",
+      resetsAt: 0.5,
+      rateLimitType: "seven_day_opus",
+    },
+  });
+
+  assert.deepEqual(await postedEnded(recorder, calls), {
+    evidence: "RunRateLimited",
+  });
+});
+
+/** Catches a limit sent beside a label it is not kept beside. */
+test("a run ended any other way carries no limit, whatever it saw", async () => {
+  const { recorder, calls } = harness();
+  framed(recorder, limitRejected);
+
+  assert.deepEqual(await postedEnded(recorder, calls, runPushFailed), {
+    evidence: "RunPushFailed",
+  });
 });

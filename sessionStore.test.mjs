@@ -769,6 +769,80 @@ test("an entry a signed block alone puts over the bound raises rather than posti
 });
 
 /**
+ * The runtime's record of the prompt it rendered, written once its MCP tools
+ * load: the prompt as a list of sections, and every tool with its description
+ * and schema. Its text is synthesised; its shape is a stored lead's.
+ */
+function promptSnapshotEntry(tools) {
+  return {
+    parentUuid: "5a4b3c2d-1e0f-4a9b-8c7d-6e5f4a3b2c1d",
+    isSidechain: false,
+    type: "attachment",
+    attachment: {
+      type: "prompt_snapshot",
+      systemPrompt: Array.from(
+        { length: 11 },
+        (_, at) =>
+          `# Section ${String(at)}\n${"Schedule the work by the North Star. ".repeat(25)}`,
+      ),
+      tools: Array.from({ length: tools }, (_, at) => ({
+        name: `mcp__chuggy__tool_${String(at)}`,
+        description: "Reads what the project holds. ".repeat(20),
+        schema: {
+          type: "object",
+          properties: {
+            state: {
+              type: "string",
+              enum: ["Open", "Running", "Landed", "Refused", "Lifted"],
+              description: "Which tickets to read. ".repeat(10),
+            },
+          },
+          required: ["state"],
+        },
+      })),
+    },
+    uuid: "9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a",
+    timestamp: "2026-11-01T09:00:04.000Z",
+    cwd: "/workspace/repo",
+    sessionId: "fecadcca-7f72-478c-ab53-561e3a17110b",
+    version: "2.1.282",
+  };
+}
+
+/**
+ * A resume sends the record as its whole system prompt, so a clip of it is a
+ * different instruction set nothing marks as incomplete. It goes whole or the
+ * write raises.
+ */
+test("a prompt snapshot is posted whole where it fits and raises where it does not, never clipped", async () => {
+  const fits = promptSnapshotEntry(46);
+  const over = promptSnapshotEntry(56);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(fits)) < sessionStoreBatchBytesMax,
+  );
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(over)) > sessionStoreBatchBytesMax,
+  );
+
+  const posted = storeOf();
+  await posted.store.append({ sessionId: "s" }, [fits]);
+  assert.deepEqual(postedEntries(posted.calls), [fits]);
+
+  const refused = storeOf();
+  await assert.rejects(
+    refused.store.append({ sessionId: "s" }, [over]),
+    (raised) =>
+      /is a clip's to shorten/u.test(raised.message) &&
+      raised.message.includes(String(Buffer.byteLength(JSON.stringify(over)))),
+  );
+  assert.deepEqual(
+    bodies(refused.calls),
+    [],
+    "a clipped prompt snapshot was posted",
+  );
+});
+
+/**
  * A message that is not an object at all. Nothing in the runtime writes one, but
  * the clip's own claim is that weight finds bulk wherever a producer puts it, and
  * a level the walk skips is a place that claim is not true.

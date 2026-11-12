@@ -1,11 +1,11 @@
 /**
  * Every stderr in `printed`, and each a pull test lists as refused, is what
- * docker 28.1 or podman 5.8 printed for the failure it is filed under, copied
- * from a run of each against a daemon, and a local registry that challenged
- * for credentials. Those in `sourced` are built from the source that prints
- * them, each naming the file and function, where no run of that engine was
- * seen. The rest are built on what those engines print, and crun's on the
- * formats of its own source.
+ * docker 28.1, docker 29.1 on Windows or podman 5.8 printed for the failure it
+ * is filed under, copied from a run of each against a daemon, and a local
+ * registry that challenged for credentials. Those in `sourced` are built from
+ * the source that prints them, each naming the file and function, where no run
+ * of that engine was seen. The rest are built on what those engines print, and
+ * crun's on the formats of its own source.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -23,6 +23,7 @@ const printed = {
   Unreachable: [
     "Cannot connect to the Docker daemon at unix:///nonexistent/docker.sock. Is the docker daemon running?",
     'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: Get "http://%2Fvar%2Frun%2Fdocker.sock/v1.49/containers/json": dial unix /var/run/docker.sock: connect: permission denied',
+    "failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine; check if the path is correct and if the daemon is running: open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.",
     'Cannot connect to Podman. Please verify your connection to the Linux system using `podman system connection list`, or try `podman machine init` and `podman machine start` to manage a new Linux VM\nError: unable to connect to Podman socket: Get "http://d/v5.8.7/libpod/_ping": dial unix /nonexistent/podman.sock: connect: no such file or directory: unix:///nonexistent/podman.sock',
   ],
   NoSuchContainer: [
@@ -62,6 +63,12 @@ const printed = {
 };
 
 const sourced = {
+  Unreachable: [
+    // docker 29 on Linux or a Mac, moby's client/request.go: `Client.doRequest`,
+    // an engine socket that does not exist, and one its user may not open.
+    "failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory",
+    "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock",
+  ],
   ImageInUse: [
     // docker's containerd image store, moby's daemon/containerd/image_delete.go:
     // `ImageService.ImageDelete`, a stopped container's image removed by name,
@@ -75,6 +82,57 @@ const sourced = {
     // `Image.removeRecursive` wrapping storage/types/errors.go's
     // `ErrImageUsedByContainer`, after the `Error: ` podman's CLI prints.
     "Error: image is in use by a container: consider listing external containers and force-removing image",
+  ],
+  PlatformAbsent: [
+    // docker 28.1's classic store, moby's daemon/images/image.go:
+    // `ImageService.GetImage`, an image held for another platform than
+    // `--platform` names.
+    "Error response from daemon: image with reference chuggy/worker-runtime:1 was found but its platform (linux/arm64) does not match the specified platform (linux/amd64)",
+    // Its containerd store, daemon/containerd/image.go: `errPlatformNotFound`.
+    "Error response from daemon: image with reference chuggy/worker-runtime:1 was found but does not provide the specified platform (linux/amd64)",
+  ],
+  PlatformUnbuilt: [
+    // docker's classic store, moby's daemon/internal/distribution/pull_v2.go:
+    // `noMatchesErr.Error`, an index pulled with no build for the platform.
+    "Error response from daemon: no matching manifest for linux/arm64/v8 in the manifest list entries",
+    // Its containerd store, daemon/containerd/image_pull.go:
+    // `ImageService.pullTag`, wrapping containerd's own words.
+    "Error response from daemon: no matching manifest for linux/arm64/v8 in the manifest list entries: no match for platform in manifest: not found",
+    // podman, containers/container-libs's image/internal/manifest/oci_index.go
+    // and docker_schema2_list.go: `ChooseInstanceByCompression`, wrapped by
+    // image/copy/copy.go's `Image` and common/libimage/copier.go's
+    // `Copier.copyToStorage`.
+    'Trying to pull docker.io/splunk/splunk:latest...\nError: unable to copy from source docker://splunk/splunk:latest: choosing an image from manifest list docker://splunk/splunk:latest: no image found in image index for architecture "arm64", variant "v8", OS "linux"',
+    'Error: unable to copy from source docker://splunk/splunk:latest: choosing an image from manifest list docker://splunk/splunk:latest: no image found in manifest list for architecture "arm64", variant "v8", OS "linux"',
+  ],
+  FlagUnknown: [
+    // docker's CLI before 28.1, whose `image inspect` takes no `--platform`,
+    // in the words of pflag's flag.go: `FlagSet.parseLongArg`.
+    "unknown flag: --platform\nSee 'docker image inspect --help'.",
+    // docker's CLI 28.1 of a daemon before API 1.49, cli's
+    // cmd/docker/docker.go: `areFlagsSupported`.
+    'Error: "--platform" requires API version 1.49, but the Docker daemon API version is 1.47',
+  ],
+  TransferCut: [
+    // docker's CLI, docker/cli's cmd/docker/docker.go: `main`, printing alone
+    // the error a pull's stream ended with as moby's
+    // client/pkg/jsonmessage/jsonmessage.go: `Display` returns it, here Go's
+    // src/io/io.go: `ErrUnexpectedEOF`.
+    "unexpected EOF",
+    // Go's src/net/net.go: `OpError.Error`, a read the registry's end reset,
+    // in the words of src/syscall/zerrors_linux_amd64.go's `errors`.
+    "read tcp 172.17.0.2:41234->140.82.112.33:443: read: connection reset by peer",
+    // The same, a dial that timed out, in the words of
+    // src/internal/poll/fd.go: `DeadlineExceededError.Error`.
+    'Error response from daemon: Get "https://registry.chuggy.example/v2/": dial tcp 140.82.112.33:443: i/o timeout',
+    // Go's src/net/http/transport.go: `tlsHandshakeTimeoutError.Error`.
+    'Error response from daemon: Get "https://registry.chuggy.example/v2/": net/http: TLS handshake timeout',
+    // podman, containers/container-libs's image/copy/blob.go:
+    // `errorAnnotationReader.Read`, wrapped by
+    // image/storage/storage_dest.go's `putBlobToPendingFile`, image/copy's
+    // `imageCopier.copyBlobFromStream` and `Image`, and
+    // common/libimage/copier.go's `Copier.copyToStorage`.
+    'Trying to pull registry.chuggy.example/worker:1...\nError: unable to copy from source docker://registry.chuggy.example/worker:1: copying system image from manifest list: writing blob: storing blob to file "/var/tmp/container_images_storage1/1": happened during read: unexpected EOF',
   ],
 };
 
@@ -157,6 +215,11 @@ test("a pull the registry refused the image to, or whose reference names none, i
       failed: "Interrupted",
     }),
   );
+});
+
+test("a pull the network cut short is not refused", () => {
+  for (const stderr of sourced.TransferCut)
+    assert.ok(!enginePullRefused(pullAnswer(stderr)), stderr);
 });
 
 for (const [cause, stderr] of [
