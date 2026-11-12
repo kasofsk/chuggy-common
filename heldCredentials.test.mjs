@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { workerPlaneAnswers } from "@chuggy/worker-contract/workerPlane";
+import {
+  workerHeldCredentialBundleSchema,
+  workerPlaneAnswers,
+} from "@chuggy/worker-contract/workerPlane";
 
 import {
   heldCredentials,
@@ -185,6 +188,46 @@ test("an answer this pod cannot read, or one serving a name not asked, fails the
   await unread({ credentials: [{ ...trackRecord, secret: "" }] });
   await unread({ credentials: [{ ...trackRecord, credential: "forge" }] });
   await unread("not an answer");
+});
+
+/**
+ * Catches a credential served as a bundle read as one secret, which would
+ * write nothing it can name and fail the attempt with an error that names
+ * neither the credential nor the bundle.
+ */
+test("an answer serving a credential as a bundle fails the ask by name, keeping and writing nothing", async () => {
+  const bundle = {
+    credential: "forge",
+    files: [
+      { file: "token", content: { kind: "Secret", secret: "forge-secret" } },
+    ],
+    variables: [{ kind: "Path", variable: "FORGE_TOKEN_FILE", file: "token" }],
+  };
+  assert.ok(
+    workerHeldCredentialBundleSchema.safeParse(bundle).success,
+    "the case serves a bundle the contract reads",
+  );
+  const plane = heldPlane({ status: 200, body: { credentials: [bundle] } });
+  const kept = [];
+  const written = [];
+
+  await assert.rejects(
+    heldCredentials({
+      task,
+      bearer: "capability",
+      granted: ["forge"],
+      credentialFiles: {},
+      directory: "/m",
+      keep: (value) => kept.push(value),
+      request: plane.request,
+      write: async (file) => {
+        written.push(file);
+      },
+    }),
+    /as a bundle, which this pod cannot write: forge$/u,
+  );
+  assert.deepEqual(kept, []);
+  assert.deepEqual(written, []);
 });
 
 /** Catches a granted name that would write its secret outside the minted directory. */
