@@ -87,6 +87,30 @@ export const windowlessSnapshot = {
   rate_limit_reached_type: null,
 };
 
+/** The reached types `protocol.rs` declares for a workspace's depleted credits. */
+export const creditsDepletedTypes = [
+  "workspace_owner_credits_depleted",
+  "workspace_member_credits_depleted",
+];
+
+/** The reached types `protocol.rs` declares for a limit a reset reopens. */
+export const limitReachedTypes = [
+  "rate_limit_reached",
+  "workspace_owner_usage_limit_reached",
+  "workspace_member_usage_limit_reached",
+];
+
+/** The snapshot a refusal of a workspace whose credits are depleted made, `reached` being which. */
+export function creditsDepletedSnapshot(reached = creditsDepletedTypes[0]) {
+  return {
+    ...ordinarySnapshot,
+    limit_id: "codex",
+    credits: { has_credits: false, unlimited: false, balance: null },
+    plan_type: "business",
+    rate_limit_reached_type: reached,
+  };
+}
+
 /** A `token_count` carrying `snapshot`. */
 export function tokenCount(snapshot) {
   return { type: "token_count", info: null, rate_limits: snapshot };

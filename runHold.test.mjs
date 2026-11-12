@@ -1,7 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { observeRateLimit, rateLimitSightings } from "./rateLimit.mjs";
+import {
+  creditsDepletedSnapshot,
+  creditsDepletedTypes,
+  limitReachedTypes,
+  limitSnapshot,
+  weeklyResetsAtSecs,
+} from "./codexRollout.fixture.mjs";
+import {
+  observeCodexRollout,
+  observeRateLimit,
+  rateLimitSightings,
+} from "./rateLimit.mjs";
 import {
   creditsRefused,
   creditsResult,
@@ -189,4 +200,46 @@ test("the text of a run whose credits ran out names the credential and that it w
     ),
     "Claude Code exited 1\nThe credits of this run's credential are exhausted, so the run was not held.",
   );
+});
+
+/** A run whose Codex rollout declared `snapshot`, with every other condition of a hold met. */
+function stoppedByRollout(snapshot) {
+  const resumesAtMs = weeklyResetsAtSecs * 1_000 + runHoldMarginMs;
+  return {
+    resumable: true,
+    sightings: observeCodexRollout(rateLimitSightings(), {
+      snapshot,
+      errorInfo: "usage_limit_exceeded",
+    }),
+    session: limitSession,
+    nowMs: resumesAtMs - 1,
+    deadlineMs: resumesAtMs + runHoldReserveMs + 1,
+    holds: 0,
+    credential: "codex-1",
+  };
+}
+
+/** Catches a workspace whose credits are depleted held for a reset, or a Codex limit no longer held. */
+test("a Codex run whose workspace credits are depleted is never held, and one its limit stopped is", () => {
+  for (const reached of creditsDepletedTypes)
+    for (const snapshot of [
+      creditsDepletedSnapshot(reached),
+      { ...limitSnapshot, rate_limit_reached_type: reached },
+    ])
+      assert.deepEqual(runHoldDecided(stoppedByRollout(snapshot)), {
+        exhausted: { credential: "codex-1" },
+      });
+  for (const reached of limitReachedTypes)
+    assert.deepEqual(
+      runHoldDecided(
+        stoppedByRollout({
+          ...limitSnapshot,
+          rate_limit_reached_type: reached,
+        }),
+      ),
+      {
+        untilMs: weeklyResetsAtSecs * 1_000 + runHoldMarginMs,
+        window: "seven_day",
+      },
+    );
 });
