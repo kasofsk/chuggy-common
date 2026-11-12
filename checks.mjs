@@ -44,9 +44,9 @@
  * under `workerSetupEnvironmentVariable`, and one the pod inherited is dropped,
  * so no other shell finds it set.
  *
- * THOSE SHELLS ARE HANDED EACH HELD CREDENTIAL'S FILE (`heldCredentials.mjs`)
- * under the variable the plane names for it, over any value the pod, the image
- * or the setup lines hold for it.
+ * THOSE SHELLS ARE HANDED EACH HELD CREDENTIAL'S VARIABLES
+ * (`heldCredentials.mjs`), as the plane names them, over any value the pod, the
+ * image or the setup lines hold for them.
  *
  * THOSE SHELLS ARE HANDED THE ATTEMPT'S GIT CONFIGURATION, through the
  * variables git reads entries from after every file it reads, appended to any
@@ -385,9 +385,9 @@ export function workerGitEnvironment(environment, git) {
  * handed by the agent's own means: each variable `check.sh` moved aside, back
  * under its own name; `handed.setupEnvironment`, what the job's setup lines
  * passed on, over those; `handed.changeBase` where the attempt knows one;
- * `handed.heldCredentials`, each held credential's variable naming its file,
- * over those; `handed.job`, what `workerJobEnvironment` tells a job's shells;
- * and `handed.git`, the entries the attempt's git configuration adds.
+ * `handed.heldCredentials`, each variable a held credential sets, over those;
+ * `handed.job`, what `workerJobEnvironment` tells a job's shells; and
+ * `handed.git`, the entries the attempt's git configuration adds.
  */
 export function workerShellEnvironment(environment, handed = {}) {
   const {

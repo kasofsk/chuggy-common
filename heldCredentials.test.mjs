@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  heldCredentialFilePlaceholder,
   workerHeldCredentialBundleSchema,
   workerPlaneAnswers,
 } from "@chuggy/worker-contract/workerPlane";
@@ -142,7 +143,7 @@ test("a held credential is kept, then written privately under the minted directo
       {
         credential: trackRecord.credential,
         variable: trackRecord.variable,
-        file,
+        value: file,
       },
     ]);
     assert.deepEqual(kept, [trackRecord.secret]);
@@ -191,43 +192,187 @@ test("an answer this pod cannot read, or one serving a name not asked, fails the
 });
 
 /**
- * Catches a credential served as a bundle read as one secret, which would
- * write nothing it can name and fail the attempt with an error that names
- * neither the credential nor the bundle.
+ * A bundle serving a Secret file, a Text file naming it by placeholder, and a
+ * Path and a Value variable, each naming a file.
  */
-test("an answer serving a credential as a bundle fails the ask by name, keeping and writing nothing", async () => {
-  const bundle = {
-    credential: "forge",
-    files: [
-      { file: "token", content: { kind: "Secret", secret: "forge-secret" } },
-    ],
-    variables: [{ kind: "Path", variable: "FORGE_TOKEN_FILE", file: "token" }],
-  };
+const forgeBundle = {
+  credential: "forge",
+  files: [
+    { file: "token", content: { kind: "Secret", secret: "forge-secret-0123" } },
+    {
+      file: "config",
+      content: {
+        kind: "Text",
+        text: `token-file = ${heldCredentialFilePlaceholder("token")}\n`,
+      },
+    },
+  ],
+  variables: [
+    { kind: "Path", variable: "FORGE_TOKEN_FILE", file: "token" },
+    {
+      kind: "Value",
+      variable: "FORGE_ARGUMENTS",
+      value: `--config=${heldCredentialFilePlaceholder("config")}`,
+    },
+  ],
+};
+
+/**
+ * Catches a bundle's secret left out of what is kept, a file written anywhere
+ * but its credential's directory under the minted directory or readable past
+ * the pod's user, a placeholder left unfilled, a variable handed anything but
+ * its file's path or its filled value, or the legacy shape beside it changed.
+ */
+test("a bundle's files are written privately to its own directory, and its variables handed their paths and filled values", async () => {
   assert.ok(
-    workerHeldCredentialBundleSchema.safeParse(bundle).success,
+    workerHeldCredentialBundleSchema.safeParse(forgeBundle).success,
     "the case serves a bundle the contract reads",
   );
-  const plane = heldPlane({ status: 200, body: { credentials: [bundle] } });
-  const kept = [];
-  const written = [];
+  const plane = heldPlane({
+    status: 200,
+    body: { credentials: [forgeBundle, trackRecord] },
+  });
+  const directory = await mkdtemp(join(tmpdir(), "chuggy-held-"));
+  try {
+    const { held, kept } = await asked(
+      plane,
+      ["forge", "track-record"],
+      {},
+      directory,
+      writeFile,
+    );
 
-  await assert.rejects(
-    heldCredentials({
+    const bundleDirectory = join(directory, "held-forge");
+    const token = join(bundleDirectory, "token");
+    const config = join(bundleDirectory, "config");
+    const legacy = join(directory, "held-track-record");
+    assert.deepEqual(kept, [
+      forgeBundle.files[0].content.secret,
+      trackRecord.secret,
+    ]);
+    assert.deepEqual(held, [
+      { credential: "forge", variable: "FORGE_TOKEN_FILE", value: token },
+      {
+        credential: "forge",
+        variable: "FORGE_ARGUMENTS",
+        value: `--config=${config}`,
+      },
+      {
+        credential: trackRecord.credential,
+        variable: trackRecord.variable,
+        value: legacy,
+      },
+    ]);
+    assert.equal(
+      await readFile(token, "utf8"),
+      forgeBundle.files[0].content.secret,
+    );
+    assert.equal(await readFile(config, "utf8"), `token-file = ${token}\n`);
+    assert.equal(await readFile(legacy, "utf8"), trackRecord.secret);
+    for (const file of [token, config, legacy])
+      assert.equal((await stat(file)).mode & 0o777, 0o600, file);
+    assert.equal((await stat(bundleDirectory)).mode & 0o777, 0o700);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+/** Catches a bundle's file written while a secret of it is not yet among the attempt's secrets. */
+test("every Secret content of a bundle is kept before any of its files is written", async () => {
+  const bundle = {
+    ...forgeBundle,
+    files: [
+      ...forgeBundle.files,
+      { file: "key", content: { kind: "Secret", secret: "forge-key-0123" } },
+    ],
+  };
+  const plane = heldPlane({ status: 200, body: { credentials: [bundle] } });
+  const order = [];
+  await heldCredentials({
+    task,
+    bearer: "capability",
+    granted: ["forge"],
+    credentialFiles: {},
+    directory: "/m",
+    keep: (value) => order.push(`kept ${value}`),
+    request: plane.request,
+    makeDirectory: async (made) => {
+      order.push(`made ${made}`);
+    },
+    write: async (file) => {
+      order.push(`written ${file}`);
+    },
+  });
+
+  assert.deepEqual(order, [
+    "kept forge-secret-0123",
+    "kept forge-key-0123",
+    "made /m/held-forge",
+    "written /m/held-forge/token",
+    "written /m/held-forge/config",
+    "written /m/held-forge/key",
+  ]);
+});
+
+/**
+ * Catches a placeholder filled with a path read as a replacement pattern, so
+ * `$&` in it is not the path, or a path already filled in read again for a
+ * placeholder its credential's name holds.
+ */
+test("a placeholder is filled with its file's path literally, whatever the credential's name holds", async () => {
+  const token = heldCredentialFilePlaceholder("token");
+  const config = heldCredentialFilePlaceholder("config");
+  for (const credential of ["a$&b$'c$`d$$e", `c${token}`]) {
+    const bundle = {
+      ...forgeBundle,
+      credential,
+      files: [
+        forgeBundle.files[0],
+        {
+          file: "config",
+          content: { kind: "Text", text: `${config} ${token}\n` },
+        },
+      ],
+      variables: [
+        ...forgeBundle.variables,
+        { kind: "Value", variable: "FORGE_BOTH", value: `${config} ${token}` },
+      ],
+    };
+    assert.ok(
+      workerHeldCredentialBundleSchema.safeParse(bundle).success,
+      "the case serves a bundle the contract reads",
+    );
+    const plane = heldPlane({ status: 200, body: { credentials: [bundle] } });
+    const written = [];
+    const held = await heldCredentials({
       task,
       bearer: "capability",
-      granted: ["forge"],
+      granted: [credential],
       credentialFiles: {},
       directory: "/m",
-      keep: (value) => kept.push(value),
+      keep: () => {},
       request: plane.request,
-      write: async (file) => {
-        written.push(file);
+      makeDirectory: async () => {},
+      write: async (file, content) => {
+        written.push({ file, content });
       },
-    }),
-    /as a bundle, which this pod cannot write: forge$/u,
-  );
-  assert.deepEqual(kept, []);
-  assert.deepEqual(written, []);
+    });
+
+    const bundleDirectory = `/m/held-${credential}`;
+    const both = `${bundleDirectory}/config ${bundleDirectory}/token`;
+    assert.equal(
+      written.find(({ file }) => file === `${bundleDirectory}/config`).content,
+      `${both}\n`,
+    );
+    assert.equal(
+      held.find(({ variable }) => variable === "FORGE_ARGUMENTS").value,
+      `--config=${bundleDirectory}/config`,
+    );
+    assert.equal(
+      held.find(({ variable }) => variable === "FORGE_BOTH").value,
+      both,
+    );
+  }
 });
 
 /** Catches a granted name that would write its secret outside the minted directory. */

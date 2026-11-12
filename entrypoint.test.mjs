@@ -32,6 +32,7 @@ import {
 } from "@chuggy/worker-contract/workerEnvironment";
 import { resultReportCharsMax } from "@chuggy/worker-contract/workerDocuments";
 import {
+  heldCredentialFilePlaceholder,
   runConfigurationBytesMax,
   workerPlaneBytesMediaType,
   workerPlaneUploadBytesMax,
@@ -57,6 +58,7 @@ import {
   workerImageVariable,
   workerJobVariables,
   workerSetupEnvironmentVariable,
+  workerShellEnvironment,
   workerSummaryCharsMax,
 } from "./checks.mjs";
 import {
@@ -4733,6 +4735,51 @@ test("a held credential's variable the pod already holds is overridden, and the 
     handed: { [trackRecord.variable]: file },
     warned: [],
   });
+});
+
+/**
+ * Catches a credential served as a bundle reaching a job's shells as anything
+ * but its variables: a Path variable as the path its file was written at, and
+ * a Value variable as its value with that path filled in.
+ */
+test("a held credential served as a bundle reaches a job's shells as its variables", async (t) => {
+  const minted = await suiteDirectory(t, "chuggy-minted-");
+  const bundle = {
+    credential: "forge",
+    files: [
+      {
+        file: "token",
+        content: { kind: "Secret", secret: "forge-0123456789" },
+      },
+    ],
+    variables: [
+      { kind: "Path", variable: "FORGE_TOKEN_FILE", file: "token" },
+      {
+        kind: "Value",
+        variable: "FORGE_ARGUMENTS",
+        value: `--token=${heldCredentialFilePlaceholder("token")}`,
+      },
+    ],
+  };
+  const kept = [];
+  const handed = await workerHeldCredentials({
+    task: { ...task, authority: { credentials: ["forge"] } },
+    bearer: envelope.bearer,
+    credentialFiles: {},
+    minted,
+    keepSecret: (secret) => kept.push(secret),
+    request: async () => ({ json: async () => ({ credentials: [bundle] }) }),
+    environment: {},
+  });
+
+  const token = join(minted, "held-forge", "token");
+  assert.deepEqual(kept, [
+    { kind: "a credential the plane holds", value: "forge-0123456789" },
+  ]);
+  assert.equal(await readFile(token, "utf8"), "forge-0123456789");
+  const shells = workerShellEnvironment({}, { heldCredentials: handed });
+  assert.equal(shells.FORGE_TOKEN_FILE, token);
+  assert.equal(shells.FORGE_ARGUMENTS, `--token=${token}`);
 });
 
 /**

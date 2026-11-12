@@ -15,13 +15,18 @@
  *
  * THE SECRET IS WRITTEN AND NEVER PASSED. Each is written to a file of its own
  * in the minted directory, which only this pod's user reads, and a job's
- * shells are told the file under the variable the plane names for it.
+ * shells are told the file under the variable the plane names for it. A
+ * bundle's files are written to a directory of its own there, and its
+ * variables handed each its file's path or its value, either with the paths
+ * its placeholders name filled in.
  */
 
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
+  heldCredentialFilePlaceholder,
+  heldCredentialFilesPlaced,
   workerHeldCredentialsAnswerSchema,
   workerHeldCredentialsSchema,
   workerPlaneRoutes,
@@ -32,13 +37,16 @@ import { workerRequest } from "./transport.mjs";
 /** The route an attempt asks for its held credentials through. */
 export const workerHeldCredentialsPath = workerPlaneRoutes.heldCredentials.path;
 
-/** The file one held credential is written to, in the minted directory. */
+/** The file one held credential is written to, or the directory one served as a bundle is, in the minted directory. */
 function heldCredentialFile(directory, credential) {
   return join(directory, `held-${credential}`);
 }
 
 /** What each file is created with, so nothing outside this pod's user reads it. */
 const heldCredentialFileMode = 0o600;
+
+/** What a bundle's directory is created with, so nothing outside this pod's user lists it. */
+const heldCredentialDirectoryMode = 0o700;
 
 /** The names `granted` gives that `credentialFiles`, the launcher's, does not hold. */
 export function heldCredentialsUnmounted(granted, credentialFiles) {
@@ -48,8 +56,8 @@ export function heldCredentialsUnmounted(granted, credentialFiles) {
 }
 
 /**
- * The plane's answer, refused where it serves a name not asked, one no file
- * can be named by, or one as a bundle, which this pod does not write.
+ * The plane's answer, refused where it serves a name not asked, or one no file
+ * can be named by.
  */
 function heldCredentialsRead(body, asked) {
   const answer = workerHeldCredentialsAnswerSchema.safeParse(body);
@@ -57,12 +65,7 @@ function heldCredentialsRead(body, asked) {
     throw new Error(
       "the worker plane answered held credentials this pod cannot read",
     );
-  for (const served of answer.data.credentials) {
-    const { credential } = served;
-    if (!Object.hasOwn(served, "secret"))
-      throw new Error(
-        `the worker plane answered a held credential as a bundle, which this pod cannot write: ${credential}`,
-      );
+  for (const { credential } of answer.data.credentials) {
     if (!asked.includes(credential))
       throw new Error(
         `the worker plane answered a held credential this attempt did not ask for: ${credential}`,
@@ -76,11 +79,65 @@ function heldCredentialsRead(body, asked) {
 }
 
 /**
+ * `text` with each placeholder it holds filled with the path `paths` gives its
+ * file, in one pass, so no path filled in is read again for a placeholder.
+ */
+function heldCredentialsBundleFilled(text, paths) {
+  let filled = "";
+  let rest = 0;
+  for (const file of heldCredentialFilesPlaced(text)) {
+    const placeholder = heldCredentialFilePlaceholder(file);
+    const at = text.indexOf(placeholder, rest);
+    filled += text.slice(rest, at) + paths.get(file);
+    rest = at + placeholder.length;
+  }
+  return filled + text.slice(rest);
+}
+
+/**
+ * One bundle's files written to a directory of its own under `directory`,
+ * every Secret content handed to `keep` before any is written, and the
+ * variables it sets as `{credential, variable, value}`.
+ */
+async function heldCredentialsBundleWritten(
+  { credential, files, variables },
+  { directory, keep, write, makeDirectory },
+) {
+  const bundleDirectory = heldCredentialFile(directory, credential);
+  const paths = new Map(
+    files.map(({ file }) => [file, join(bundleDirectory, file)]),
+  );
+  for (const { content } of files)
+    if (content.kind === "Secret") keep(content.secret);
+  await makeDirectory(bundleDirectory, {
+    recursive: true,
+    mode: heldCredentialDirectoryMode,
+  });
+  for (const { file, content } of files)
+    await write(
+      paths.get(file),
+      content.kind === "Secret"
+        ? content.secret
+        : heldCredentialsBundleFilled(content.text, paths),
+      { mode: heldCredentialFileMode },
+    );
+  return variables.map((each) => ({
+    credential,
+    variable: each.variable,
+    value:
+      each.kind === "Path"
+        ? paths.get(each.file)
+        : heldCredentialsBundleFilled(each.value, paths),
+  }));
+}
+
+/**
  * Each credential the plane holds of the names `granted` gives that
- * `credentialFiles` does not, its secret handed to `keep` and then written
- * under `directory`: `{credential, variable, file}`, none where nothing is
- * unmounted, which asks nothing. `request` and `write` are the seams the plane
- * and the file are reached through.
+ * `credentialFiles` does not, its secrets handed to `keep` and then written
+ * under `directory`: `{credential, variable, value}` for each variable a job's
+ * shells are handed, none where nothing is unmounted, which asks nothing.
+ * `request`, `write` and `makeDirectory` are the seams the plane, a file and a
+ * bundle's directory are reached through.
  */
 export async function heldCredentials({
   task,
@@ -91,6 +148,7 @@ export async function heldCredentials({
   keep,
   request = workerRequest,
   write = writeFile,
+  makeDirectory = mkdir,
 }) {
   const asked = heldCredentialsUnmounted(granted, credentialFiles);
   if (asked.length === 0) return [];
@@ -106,11 +164,23 @@ export async function heldCredentials({
     asked,
   );
   const held = [];
-  for (const { credential, variable, secret } of answered) {
+  for (const served of answered) {
+    if (Object.hasOwn(served, "files")) {
+      held.push(
+        ...(await heldCredentialsBundleWritten(served, {
+          directory,
+          keep,
+          write,
+          makeDirectory,
+        })),
+      );
+      continue;
+    }
+    const { credential, variable, secret } = served;
     keep(secret);
     const file = heldCredentialFile(directory, credential);
     await write(file, secret, { mode: heldCredentialFileMode });
-    held.push({ credential, variable, file });
+    held.push({ credential, variable, value: file });
   }
   return held;
 }
