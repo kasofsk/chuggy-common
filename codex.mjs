@@ -88,6 +88,17 @@ export async function prepareCodexShell(handed) {
 }
 
 /**
+ * The `--config` that sets the reasoning effort `task` names, or nothing where
+ * it names none, so Codex keeps its own default.
+ */
+function codexEffortArguments(task) {
+  const effort = task.worker.mode.effort;
+  return effort === undefined
+    ? []
+    : ["--config", `model_reasoning_effort=${codexTomlString(effort)}`];
+}
+
+/**
  * The argv of one run. `run` names the result schema's file and the arguments
  * the run's shell was prepared with. The briefing comes after `--`, so it is
  * the prompt whatever precedes it: an option a worker configures may take
@@ -107,6 +118,7 @@ export function codexInvocation(task, run) {
     "--ignore-rules",
     "--model",
     task.worker.mode.model,
+    ...codexEffortArguments(task),
     "--dangerously-bypass-approvals-and-sandbox",
     "--config",
     "daybreak=false",
@@ -135,6 +147,9 @@ export async function codexConfiguration(
     agent: "Codex",
     codexVersion: version,
     model: task.worker.mode.model,
+    ...(task.worker.mode.effort === undefined
+      ? {}
+      : { effort: task.worker.mode.effort }),
     userConfig: "Ignored",
     projectRules: "Ignored",
   };
