@@ -78,14 +78,20 @@ function heldCredentialsRead(body, asked) {
   return answer.data.credentials;
 }
 
-/** `text` with each placeholder it holds filled with the path `paths` gives its file. */
+/**
+ * `text` with each placeholder it holds filled with the path `paths` gives its
+ * file, in one pass, so no path filled in is read again for a placeholder.
+ */
 function heldCredentialsBundleFilled(text, paths) {
-  let filled = text;
-  for (const file of new Set(heldCredentialFilesPlaced(text)))
-    filled = filled.replaceAll(heldCredentialFilePlaceholder(file), () =>
-      paths.get(file),
-    );
-  return filled;
+  let filled = "";
+  let rest = 0;
+  for (const file of heldCredentialFilesPlaced(text)) {
+    const placeholder = heldCredentialFilePlaceholder(file);
+    const at = text.indexOf(placeholder, rest);
+    filled += text.slice(rest, at) + paths.get(file);
+    rest = at + placeholder.length;
+  }
+  return filled + text.slice(rest);
 }
 
 /**
