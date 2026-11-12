@@ -47,14 +47,22 @@ export function heldCredentialsUnmounted(granted, credentialFiles) {
   );
 }
 
-/** The plane's answer, refused where it serves a name not asked or one no file can be named by. */
+/**
+ * The plane's answer, refused where it serves a name not asked, one no file
+ * can be named by, or one as a bundle, which this pod does not write.
+ */
 function heldCredentialsRead(body, asked) {
   const answer = workerHeldCredentialsAnswerSchema.safeParse(body);
   if (!answer.success)
     throw new Error(
       "the worker plane answered held credentials this pod cannot read",
     );
-  for (const { credential } of answer.data.credentials) {
+  for (const served of answer.data.credentials) {
+    const { credential } = served;
+    if (!Object.hasOwn(served, "secret"))
+      throw new Error(
+        `the worker plane answered a held credential as a bundle, which this pod cannot write: ${credential}`,
+      );
     if (!asked.includes(credential))
       throw new Error(
         `the worker plane answered a held credential this attempt did not ask for: ${credential}`,
