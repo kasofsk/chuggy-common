@@ -1657,6 +1657,7 @@ export async function workerRun({
   activeScrub = scrub;
   const evidence = runEvidenceRecorder(task, bearer, scrub, {
     now: () => clock.now(),
+    credential: prepared.reported?.name,
   });
   activeEvidence = evidence;
   return {
