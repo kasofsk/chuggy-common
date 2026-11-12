@@ -15,6 +15,10 @@ import test from "node:test";
 import { setTimeout as wait } from "node:timers/promises";
 
 import { workerJobVariables } from "./checks.mjs";
+import {
+  agentCredentialSelector,
+  agentCredentialSets,
+} from "./agentCredentialSet.mjs";
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import {
   checkedHostBackendSettings,
@@ -23,6 +27,7 @@ import {
   hostExitWatched,
   hostJobEnvironment,
   hostJobName,
+  hostKeptWorkspaces,
   hostPlatformsDeclared,
   hostRoutedBackend,
   hostRuns,
@@ -32,7 +37,8 @@ import { savedLogCutLine, savedLogLinesMax } from "./savedLog.mjs";
 
 /**
  * A stand-in for the worker core: it writes what it was started with to
- * `HOST_FIXTURE_OUT`, then does what `HOST_FIXTURE_MODE` says.
+ * `HOST_FIXTURE_OUT`, and `HOST_FIXTURE_RECORD` as its workspace record where
+ * that is set, then does what `HOST_FIXTURE_MODE` says.
  */
 const fixtureCore = `
 import { spawn } from "node:child_process";
@@ -54,6 +60,8 @@ if (mode === "readonly") {
   chmodSync(join(process.env.HOME, "go", "pkg"), 0o555);
   chmodSync(join(process.env.HOME, "go"), 0o555);
 }
+if (process.env.HOST_FIXTURE_RECORD !== undefined)
+  writeFileSync(join(directory, "workspace", "chuggy-workspace.json"), process.env.HOST_FIXTURE_RECORD);
 writeFileSync(out, JSON.stringify(seen));
 process.stdout.write("fixture output\\n");
 if (mode === "loud") {
@@ -83,12 +91,35 @@ function assignment(overrides = {}) {
 }
 
 /**
+ * What the fixture core is told: where to write what it saw, what to do, and
+ * what to write as its workspace record where `record` is given.
+ *
+ * @param {string} out
+ * @param {string} mode
+ * @param {string | undefined} record
+ */
+function fixtureEnvironment(out, mode, record) {
+  return {
+    HOST_FIXTURE_OUT: out,
+    HOST_FIXTURE_MODE: mode,
+    ...(record === undefined ? {} : { HOST_FIXTURE_RECORD: record }),
+  };
+}
+
+/**
  * @param {import("node:test").TestContext} t
  * @param {string} mode
  * @param {Partial<import("./hostBackend.mjs").HostBackendSettings>} [overrides]
  * @param {Partial<import("./hostBackend.mjs").HostBackendSeams>} [seams] in place of the harness's own
+ * @param {string} [record] what the job writes as its workspace record; none, and it writes none
  */
-async function harness(t, mode, overrides = {}, seams = {}) {
+async function harness(
+  t,
+  mode,
+  overrides = {},
+  seams = {},
+  record = undefined,
+) {
   const root = await mkdtemp(join(tmpdir(), "chuggy-host-"));
   const core = join(root, "core.mjs");
   await writeFile(core, fixtureCore);
@@ -108,12 +139,12 @@ async function harness(t, mode, overrides = {}, seams = {}) {
     tokenFile: join(root, "claude-token"),
     timeoutSecsMax: 7200,
     outputBytesMax: 1024 * 1024,
-    environment: { HOST_FIXTURE_OUT: out, HOST_FIXTURE_MODE: mode },
+    environment: fixtureEnvironment(out, mode, record),
     machine: { cpuMillis: 8000, memoryMib: 16384 },
     core,
     ...overrides,
   };
-  const backend = hostBackend(settings, {
+  const backendSeams = {
     environment: {
       PATH: process.env.PATH,
       OWNER_SHELL: "kept",
@@ -127,7 +158,8 @@ async function harness(t, mode, overrides = {}, seams = {}) {
     },
     log: (line) => log.push(line),
     ...seams,
-  });
+  };
+  const backend = hostBackend(settings, backendSeams);
   t.after(async () => {
     for (const onExit of exits) onExit();
     await backend.settled();
@@ -135,6 +167,7 @@ async function harness(t, mode, overrides = {}, seams = {}) {
   });
   return {
     backend,
+    backendSeams,
     settings,
     log,
     exits,
@@ -220,7 +253,7 @@ test("a job is the core run in a directory of its own, told its places and hande
   );
 });
 
-test("a job that ended of itself is named once, after held stops naming it, its directory gone and its output kept", async (t) => {
+test("a job that ended of itself is named once, after held stops naming it, its directory no longer its own and its output kept", async (t) => {
   const { backend, settings, seen } = await harness(t, "exit:3");
   await backend.place(assignment(), "Job");
   const directory = (await seen()).env.CHUGGY_HOST_JOB;
@@ -338,7 +371,13 @@ test("a job that ends leaving a process behind has its group killed", async (t) 
 });
 
 test("a job whose directory holds a read-only tree still ends, named, its directory gone", async (t) => {
-  const { backend, settings } = await harness(t, "readonly");
+  const { backend, settings } = await harness(
+    t,
+    "readonly",
+    {},
+    {},
+    safeRecord(true),
+  );
   await backend.place(assignment(), "Job");
   await backend.settled();
   await backend.held();
@@ -508,6 +547,93 @@ test("a job requiring an agent reads that agent's credential file, or the Claude
 });
 
 /**
+ * Catches a host job reading a credential its runner's selector did not
+ * choose, told another's type or name, or not told of the set's other files,
+ * which it could read as the runner's user and must scrub.
+ */
+test("a job reads the credential the runner's selector chooses, told its type and name and where every file of the set is", async (t) => {
+  const sets = agentCredentialSets({
+    claudeCredential: {
+      prefer: "PreferOAuth",
+      oauth: {
+        order: "InOrder",
+        credentials: [{ name: "max-1", tokenFile: "/Users/o/.claude/max-1" }],
+      },
+      apiKey: {
+        order: "InOrder",
+        credentials: [{ name: "key-1", apiKeyFile: "/Users/o/.claude/key" }],
+      },
+    },
+  });
+  const credentials = agentCredentialSelector(sets);
+  credentials.chosen("Claude", "earlier");
+  credentials.outcomesTaken([
+    { assignment: "earlier", outcome: "CreditsExhausted" },
+  ]);
+  const { backend, seen } = await harness(t, "sleep", {
+    tokenFile: undefined,
+    credentials,
+  });
+  await backend.place(assignment(), "Job");
+  const { env } = await seen();
+
+  assert.equal(
+    JSON.parse(env.CHUG_WORKER_TASK).providerCredentialFile,
+    "/Users/o/.claude/key",
+  );
+  assert.equal(env[claudeCredentialVariable], '{"kind":"ApiKey"}');
+  assert.equal(env.CHUG_WORKER_CREDENTIAL_NAME, "key-1");
+  assert.deepEqual(JSON.parse(env.CHUG_WORKER_CREDENTIALS_SCRUBBED), [
+    { agent: "Claude", type: "OAuth", file: "/Users/o/.claude/max-1" },
+    { agent: "Claude", type: "ApiKey", file: "/Users/o/.claude/key" },
+  ]);
+});
+
+/** Catches a credential outcome a host backend is handed reaching no selector, or benching another than the one its job read. */
+test("a credential outcome handed a host backend benches the credential its job read", async (t) => {
+  const credentials = agentCredentialSelector(
+    agentCredentialSets({
+      claudeCredential: {
+        prefer: "OAuthOnly",
+        oauth: {
+          order: "InOrder",
+          credentials: [
+            { name: "max-1", tokenFile: "/Users/o/.claude/max-1" },
+            { name: "max-2", tokenFile: "/Users/o/.claude/max-2" },
+          ],
+        },
+      },
+    }),
+  );
+  const { backend, seen } = await harness(t, "sleep", {
+    tokenFile: undefined,
+    credentials,
+  });
+  await backend.place(assignment(), "Job");
+  const { env } = await seen();
+  backend.credentialOutcomesTaken([
+    { assignment: assignment().assignment, outcome: "CreditsExhausted" },
+  ]);
+  assert.equal(env.CHUG_WORKER_CREDENTIAL_NAME, "max-1");
+  assert.deepEqual(credentials.benchOf("max-1"), {
+    state: "BenchedUntilRestart",
+  });
+  assert.deepEqual(credentials.benchOf("max-2"), { state: "Available" });
+  assert.deepEqual(backend.capabilitiesWithheld(), []);
+  await backend.place(assignment({ assignment: "asg-2" }), "Job");
+  backend.credentialOutcomesTaken([
+    { assignment: "asg-2", outcome: "CreditsExhausted" },
+  ]);
+  assert.deepEqual(backend.capabilitiesWithheld(), ["Agent:Claude"]);
+});
+
+/** Catches a host backend without a selector withholding a capability its runner was built with. */
+test("a host backend without a selector withholds nothing", async (t) => {
+  const { backend } = await harness(t, "sleep");
+  assert.deepEqual(backend.capabilitiesWithheld(), []);
+});
+
+/**
  * Catches a job requiring several agents run with one agent's credential
  * rather than refused, or a runner's reason a Codex file cannot be read
  * passed by.
@@ -540,6 +666,138 @@ test("a job requiring several agents is refused, as is one the runner says canno
         agentCredentialFiles: { Claude: codexFile },
       }),
     /^RangeError: agentCredentialFiles names Claude, whose credential file is tokenFile/u,
+  );
+});
+
+/** What a job's core writes of its workspace, its work safe where `safe` says. */
+function safeRecord(safe) {
+  return JSON.stringify({ ticket: 480, attempt: "attempt-7", stage: 2, safe });
+}
+
+test("a job that exited 0 with its workspace record saying its work is safe has its directory removed", async (t) => {
+  const { backend, settings, log } = await harness(
+    t,
+    "exit:0",
+    {},
+    {},
+    safeRecord(true),
+  );
+  await backend.place(assignment(), "Job");
+  await backend.settled();
+  assert.deepEqual(await readdir(settings.directory), []);
+  assert.ok(!log.some((line) => line.includes(" is kept, since ")));
+});
+
+/** @type {[string, string, Partial<import("@chuggy/worker-contract/workerPool").WorkerPoolAssignment>, string | undefined, string, boolean][]} */
+const hostKeptEndings = [
+  [
+    "exits non-zero",
+    "exit:3",
+    {},
+    safeRecord(true),
+    "its process exited 3",
+    true,
+  ],
+  [
+    "exits 0 without its work recorded safe",
+    "exit:0",
+    {},
+    safeRecord(false),
+    "its workspace record does not say its work is safe",
+    true,
+  ],
+  [
+    "exits 0 with no record",
+    "exit:0",
+    {},
+    undefined,
+    "its workspace record could not be read: there is none",
+    false,
+  ],
+  [
+    "is killed at its deadline",
+    "sleep",
+    { deadlineSecs: 1 },
+    safeRecord(true),
+    "it ran past its deadline and was killed",
+    true,
+  ],
+];
+
+for (const [ending, mode, overrides, record, reason, read] of hostKeptEndings)
+  test(`a job that ${ending} keeps its directory apart from the start's sweep, and logs and records why and whose work it holds`, async (t) => {
+    const context = await harness(t, mode, {}, {}, record);
+    const { backend, settings, log } = context;
+    await backend.place(assignment(overrides), "Job");
+    await backend.settled();
+    const [name, ...others] = await readdir(settings.directory);
+    assert.deepEqual(others, []);
+    assert.match(name ?? "", /^kept-/u);
+    const kept = join(settings.directory, name);
+    const holds = read
+      ? ": ticket 480, attempt attempt-7, stage 2"
+      : ": its workspace record could not be read";
+    assert.ok(
+      log.includes(
+        `${hostJobName("asg-1")}: ${kept} is kept, since ${reason}${holds}`,
+      ),
+      log.join("\n"),
+    );
+    const recorded = JSON.parse(
+      await readFile(
+        join(settings.logDir, "kept-workspaces", `${name}.json`),
+        "utf8",
+      ),
+    );
+    assert.equal(recorded.workspace, kept);
+    assert.equal(recorded.reason, reason);
+    assert.equal(recorded.attempt, read ? "attempt-7" : undefined);
+    await hostBackend(settings, context.backendSeams).held();
+    assert.deepEqual(await readdir(settings.directory), [name]);
+    assert.deepEqual(
+      (await hostKeptWorkspaces(settings.logDir)).map((line) =>
+        line
+          .replace(/ {2}[0-9.]+ MiB {2}/u, "  SIZE  ")
+          .replace(/; kept .*$/u, ""),
+      ),
+      [`${kept}  SIZE  ${holds.slice(2)}`],
+    );
+  });
+
+test("a kept job directory that cannot be moved to its kept name is recorded where it is and survives the next start's sweep", async (t) => {
+  const context = await harness(
+    t,
+    "exit:3",
+    {},
+    {
+      rename: async () => {
+        throw Object.assign(new Error("EBUSY: resource busy or locked"), {
+          code: "EBUSY",
+        });
+      },
+    },
+    safeRecord(true),
+  );
+  const { backend, settings, log } = context;
+  await backend.place(assignment(), "Job");
+  await backend.settled();
+  const [name, ...others] = await readdir(settings.directory);
+  assert.deepEqual(others, []);
+  assert.match(name ?? "", /^job-/u);
+  const kept = join(settings.directory, name);
+  assert.ok(
+    log.includes(
+      `${hostJobName("asg-1")}: ${kept} is kept, since its process exited 3: ticket 480, attempt attempt-7, stage 2`,
+    ),
+    log.join("\n"),
+  );
+  await hostBackend(settings, context.backendSeams).held();
+  assert.deepEqual(await readdir(settings.directory), [name]);
+  assert.deepEqual(
+    (await hostKeptWorkspaces(settings.logDir)).map((line) =>
+      line.replace(/ {2}[0-9.]+ MiB {2}.*$/u, ""),
+    ),
+    [kept],
   );
 });
 
@@ -857,6 +1115,25 @@ test("a host beside a container backend takes its own jobs, and everything else 
   calls.splice(0);
   await routed.settled();
   assert.deepEqual(calls, ["container.settled", "host.settled"]);
+});
+
+/** Catches a host beside a container backend dropping either one's withheld capabilities, or naming one twice. */
+test("a host beside a container backend withholds what either withholds, each once", () => {
+  const routed = hostRoutedBackend(
+    /** @type {never} */ ({
+      ...recording([], "container"),
+      capabilitiesWithheld: () => ["Agent:Claude"],
+    }),
+    /** @type {never} */ ({
+      ...recording([], "host"),
+      capabilitiesWithheld: () => ["Agent:Codex", "Agent:Claude"],
+    }),
+    ["Platform:MacOS:Arm64"],
+  );
+  assert.deepEqual(routed.capabilitiesWithheld?.(), [
+    "Agent:Claude",
+    "Agent:Codex",
+  ]);
 });
 
 test("a job whose process exited 0 is named as one that succeeded", async (t) => {

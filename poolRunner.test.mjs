@@ -8,7 +8,7 @@ import {
   workerRunnerOf,
 } from "@chuggy/worker-contract/workerPool";
 
-import { workerPoolClaimWaitMs } from "./poolLoop.mjs";
+import { workerPoolClaimWaitMs, workerPoolClientPass } from "./poolLoop.mjs";
 import { poolRunnerClient, poolRunnerLoop } from "./poolRunner.mjs";
 
 /**
@@ -245,11 +245,12 @@ test("a run whose runner has installed the release it updates to ends with the v
 });
 
 /**
- * Catches a runner's identity or capabilities left off its polls, or a
- * capabilities header sent by a runner that gives none, which would replace
- * the set its registration recorded.
+ * The headers of each request the global fetch is asked for until `t` ends,
+ * each answered as a poll offering nothing.
+ *
+ * @param {import("node:test").TestContext} t
  */
-test("a runner's client names the runner and the capabilities it is given on each poll, and one given neither names neither", async (t) => {
+function headersSent(t) {
   /** @type {Array<Record<string, string>>} */
   const sent = [];
   mock.method(globalThis, "fetch", async (_input, init) => {
@@ -260,6 +261,16 @@ test("a runner's client names the runner and the capabilities it is given on eac
     );
   });
   t.after(() => mock.restoreAll());
+  return sent;
+}
+
+/**
+ * Catches a runner's identity or capabilities left off its polls, or a
+ * capabilities header sent by a runner that gives none, which would replace
+ * the set its registration recorded.
+ */
+test("a runner's client names the runner and the capabilities it is given on each poll, and one given neither names neither", async (t) => {
+  const sent = headersSent(t);
   const backend = /** @type {any} */ ({});
   const limits = { concurrencyMax: 1, sessionsMax: 0 };
   const runner = { package: "chuggy-linux", version: "0.14.0" };
@@ -278,4 +289,44 @@ test("a runner's client names the runner and the capabilities it is given on eac
   );
   for (const header of [workerRunnerHeader, workerRunnerCapabilitiesHeader])
     assert.equal(header in sent[1], false, header);
+});
+
+/** Catches the capabilities a runner passes as an array no longer reaching its polls less what its backend withholds. */
+test("a runner's client given its capabilities as an array names them on each pass less what its backend withholds then", async (t) => {
+  const sent = headersSent(t);
+  const withheld = [["Agent:Claude"], []];
+  const backend = {
+    held: async () => [],
+    ended: async () => [],
+    place: async () => ({ placed: "Placed" }),
+    stop: async () => ({ stopped: "Stopped" }),
+    capabilitiesWithheld: () => withheld.shift() ?? [],
+  };
+  const capabilities = ["Platform:Linux:Amd64", "Agent:Claude", "Agent:Codex"];
+  const client = poolRunnerClient(
+    credentials,
+    /** @type {any} */ (backend),
+    { concurrencyMax: 1, sessionsMax: 0 },
+    {
+      tokens: {
+        acquire: async () => ({ acquired: "Token", token: "pool-token" }),
+        invalidate: () => undefined,
+      },
+      capabilities,
+    },
+  );
+  await workerPoolClientPass(client);
+  await workerPoolClientPass(client);
+  assert.deepEqual(
+    sent.map((headers) =>
+      workerRunnerCapabilitiesOf(headers[workerRunnerCapabilitiesHeader]),
+    ),
+    [
+      {
+        named: "Set",
+        capabilities: ["Platform:Linux:Amd64", "Agent:Codex"],
+      },
+      { named: "Set", capabilities },
+    ],
+  );
 });

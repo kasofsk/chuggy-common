@@ -21,7 +21,9 @@
  * A BOUND REFUSED IS AN ERROR THE MODEL SEES. A lead that believes it refused
  * two tickets and refused one is a lead whose record is wrong, so nothing here
  * drops a call silently: past a bound, outside the observed view, or naming one
- * ticket twice, the call raises and the model reads the reason.
+ * ticket twice, the call raises and the model reads the reason. Dispatch is
+ * bounded by the turn's budget where the observation states one, since the
+ * selector refuses a whole decision past it, and by `leadDispatchesMax` always.
  *
  * THE BUFFER IS KEYED ON THE TURN. `reset` is called as a turn is claimed, so
  * one turn's staging cannot leak into the next; a suite drives two turns and
@@ -32,16 +34,14 @@
  * successor's only context and a decision that silently cleared it would be a
  * lead erasing its own memory.
  *
- * ATTENTION IS THE SAME, AND HARDER, BECAUSE THE OBSERVATION DOES NOT CARRY IT.
- * The runtime writes a decision's attention onto the project, so a turn that
- * refuses one ticket and says nothing would move a project from `Attention` to
- * `Monitoring` — a lead quietly clearing the flag a human is watching. So the
- * standing value outlives the turn: it is seeded from the most recent seeded
- * decision where the observation carries one, moved only by `set_attention`,
- * and carried across every turn this pod takes. `Monitoring` is used only where
- * this pod has never been told an attention at all, which is a resumed session
- * whose observation carried no seeding — the residual, and the reason to put
- * the standing attention in the observation document itself.
+ * ATTENTION IS THE SAME. The runtime writes a decision's attention onto the
+ * project, so a turn that refuses one ticket and says nothing would move a
+ * project from `Attention` to `Monitoring` — a lead quietly clearing the flag a
+ * human is watching. So a turn starts from the attention its observation
+ * states, and `set_attention` moves it within the turn. An observation that
+ * states none leaves the attention this pod last held, seeded from the most
+ * recent seeded decision where the pod held none, and `Monitoring` where it was
+ * never told one at all.
  */
 
 import { Buffer } from "node:buffer";
@@ -73,13 +73,15 @@ function seededState(observation) {
     planningIntent: undefined,
     candidates: observation.candidates,
     standing: observation.standing,
+    dispatchesMax: observation.dispatchesMax,
     touched: false,
   };
 }
 
 /**
  * What one turn's input offers a decision: the candidates it may name, the
- * refusals it may lift, and the note it keeps by saying nothing. A turn whose
+ * refusals it may lift, the note it keeps by saying nothing, and the attention
+ * and dispatch budget it states where it states them. A turn whose
  * input is not an observation offers none of it, and dispatch and refusal are
  * then refused for naming a ticket outside the view — which is the honest answer
  * to a decision tool called on a user's message.
@@ -90,6 +92,8 @@ export function leadObservationOffered(input) {
     standing: [],
     handoffNote: null,
     seededAttention: undefined,
+    attention: undefined,
+    dispatchesMax: undefined,
   };
   if (typeof input !== "string") return empty;
   let parsed;
@@ -118,6 +122,13 @@ export function leadObservationOffered(input) {
       .map((decision) => decision?.attention)
       .filter((attention) => selectorAttentions.includes(attention))
       .at(-1),
+    attention: selectorAttentions.includes(parsed.attention)
+      ? parsed.attention
+      : undefined,
+    dispatchesMax:
+      Number.isSafeInteger(parsed.dispatchesMax) && parsed.dispatchesMax >= 1
+        ? parsed.dispatchesMax
+        : undefined,
   };
 }
 
@@ -219,6 +230,13 @@ const decisionTools = [
       if (state.dispatches.some((dispatch) => dispatch.ticket === ticket))
         throw new RangeError(
           `ticket ${String(ticket)} is already dispatched by this decision`,
+        );
+      if (
+        state.dispatchesMax !== undefined &&
+        state.dispatches.length >= state.dispatchesMax
+      )
+        throw new RangeError(
+          `this turn's dispatch budget of ${String(state.dispatchesMax)} is reached, and the rest wait for a later turn`,
         );
       if (state.dispatches.length >= leadDispatchesMax)
         throw new RangeError(
@@ -375,12 +393,14 @@ export function leadDecisionStaging() {
     /**
      * Called as a turn is claimed, seeding what that turn's input offers. The
      * standing attention is not reset with the rest: it is the project's, not
-     * the turn's, and a turn that names none must not clear it.
+     * the turn's, so the observation's own attention replaces it and a turn
+     * that names none must not clear it.
      */
     reset(input) {
       const observation = leadObservationOffered(input);
       held.state = seededState(observation);
-      held.attention ??= observation.seededAttention;
+      held.attention =
+        observation.attention ?? held.attention ?? observation.seededAttention;
     },
 
     /** Whether this turn called a decision tool at all. */

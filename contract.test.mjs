@@ -56,6 +56,7 @@ import { z } from "zod";
 
 import {
   chuggyMemberTools,
+  chuggyOfferTools,
   chuggyProjectTools,
   chuggyToolContext,
   chuggyToolDefinitions,
@@ -198,7 +199,7 @@ function sessionSuccess(route, nth) {
   }
 }
 
-/** A run whose one assistant turn reaches every run route the recorder writes. */
+/** A run whose one assistant turn and one compaction reach every run route the recorder writes. */
 async function recorded(request) {
   const recorder = runEvidenceRecorder(jobTask, bearer, (text) => text, {
     request,
@@ -211,6 +212,11 @@ async function recorded(request) {
     message: { model: "claude-test", usage: { input_tokens: 1 } },
   };
   await recorder.record(JSON.stringify(event), event);
+  recorder.context({
+    cause: "Compaction",
+    afterTurn: recorder.turnsFolded(),
+    compaction: { trigger: "Auto", tokensBefore: 1 },
+  });
   await recorder.finish();
   return recorder;
 }
@@ -268,6 +274,7 @@ const jobCallers = {
   },
   runTranscript: recorded,
   runTurns: recorded,
+  runContext: recorded,
   runTotals: recorded,
   runEnded: async (request) => {
     const recorder = await recorded(request);
@@ -504,6 +511,7 @@ const jobReactions = {
     503: "retries",
   },
   runTurns: { 200: "reads", 400: "reads", 401: "reads", 409: "reads" },
+  runContext: { 204: "reads", 400: "reads", 401: "reads", 409: "reads" },
   runTotals: {
     204: "reads",
     400: "reads",
@@ -1184,9 +1192,18 @@ const everyToolArgument = {
   configurationRevision: "r-1",
   configurationDigest: "d-1",
   expectedProjectSequence: 1,
-  authoring: { dependencies: [7] },
-  brief: {},
+  authoring: { dependencies: [7], program: [] },
+  brief: { intent: "i", links: [] },
+  epic: 3,
+  title: "t",
+  description: "d",
+  visibility: "Active",
+  tickets: [7],
+  clear: ["northStar"],
 };
+
+/** What a tool whose parameter shares a name with another tool's takes in place of `everyToolArgument`'s. */
+const toolArgumentInPlace = { update_placement: { thread: "Pool" } };
 
 /** The routes of the tools' table one path matches. */
 function toolRoutesMatching(pathname) {
@@ -1223,7 +1240,7 @@ test("the pod's tools reach exactly the routes the contract gives them", async (
     await chuggyToolHandler(
       { ...definition, call: (args) => definition.call(context, args) },
       z,
-    )(everyToolArgument);
+    )({ ...everyToolArgument, ...toolArgumentInPlace[definition.name] });
 
     if (definition.name === "read_docs") {
       assert.deepEqual(paths, [], "read_docs asked chuggy's API");
@@ -1260,6 +1277,7 @@ test("the pod defines every tool the contract rosters, and no other", () => {
   const defined = [
     ...chuggyProjectTools.map(({ name }) => name),
     ...chuggyMemberTools.map(({ name }) => name),
+    ...chuggyOfferTools.map(({ name }) => name),
     ...leadDecisionStaging().definitions.map(({ name }) => name),
   ];
 
@@ -1267,6 +1285,10 @@ test("the pod defines every tool the contract rosters, and no other", () => {
   assert.deepEqual(
     leadDecisionStaging().definitions.map(({ name }) => name),
     [...chuggyToolCapabilities.LeadDecision],
+  );
+  assert.deepEqual(
+    chuggyOfferTools.map(({ name }) => name),
+    [...chuggyToolCapabilities.ThreadOffer],
   );
 });
 

@@ -17,6 +17,11 @@ import {
 import { workerContractRelease } from "@chuggy/worker-contract/workerContract";
 
 import {
+  agentCredentialSelector,
+  agentCredentialSets,
+} from "./agentCredentialSet.mjs";
+import { chatHostCredentialChosen } from "./chatHost.mjs";
+import {
   chatHostBackend,
   chatHostLogLineBytesMax,
   chatHostLogRouted,
@@ -71,7 +76,7 @@ async function elapsed() {
  * wrote it, `say` writes its frames, `logged` every line either log took,
  * each naming its log, and `exit` ends its process.
  */
-function hostOf(given = settings) {
+function hostOf(given = settings, seams = {}) {
   const input = new PassThrough();
   const output = new PassThrough();
   const errors = new PassThrough();
@@ -95,6 +100,7 @@ function hostOf(given = settings) {
   const backend = chatHostBackend(given, {
     log: (line) => logged.push(["host", line]),
     logFor: (assignment) => (line) => logged.push([assignment, line]),
+    ...seams,
   });
   return {
     backend,
@@ -113,8 +119,8 @@ function hostOf(given = settings) {
 }
 
 /** A host whose supervisor said it was ready. */
-async function readyHost(given = settings) {
-  const host = hostOf(given);
+async function readyHost(given = settings, seams = {}) {
+  const host = hostOf(given, seams);
   const attached = host.backend.attached(host.handle);
   host.say(ready);
   assert.deepEqual(await attached, { ready });
@@ -542,8 +548,8 @@ test("a line is routed only by a label as the session's own is written", () => {
 });
 
 /** A supervisor of this core's on the other end of the streams, over sessions a suite prepares and ends by hand. */
-function supervisedHost() {
-  const host = hostOf();
+function supervisedHost(seams = {}) {
+  const host = hostOf(settings, seams);
   const toSupervisor = host.handle.input;
   const preparations = [];
   const input = new PassThrough();
@@ -553,9 +559,9 @@ function supervisedHost() {
     output: { write: (line) => host.handle.output.write(line) },
     log: (text) => host.handle.errors.write(text),
     sessions: {
-      prepared: (assignment, envelope, signal) =>
+      prepared: (assignment, envelope, signal, credential) =>
         new Promise((resolve, reject) => {
-          preparations.push({ assignment, envelope, resolve });
+          preparations.push({ assignment, envelope, credential, resolve });
           signal.addEventListener("abort", () => reject(signal.reason), {
             once: true,
           });
@@ -624,4 +630,92 @@ test("against this core's supervisor, a session is started, stopped and drained 
   await host.backend.closed();
   assert.equal(host.backend.phase(), "Ended");
   bearerUnlogged(host);
+});
+
+/** A selector over two subscription tokens in `order`, and the secret each file would hold, which no frame or log may carry. */
+function rotatingSelector(order = "RoundRobin") {
+  return agentCredentialSelector(
+    agentCredentialSets({
+      claudeCredential: {
+        prefer: "PreferOAuth",
+        oauth: {
+          order,
+          credentials: [
+            { name: "team-a", tokenFile: "/secrets/sk-ant-oat01-a/token" },
+            { name: "team-c", tokenFile: "/secrets/sk-ant-oat01-c/token" },
+          ],
+        },
+      },
+    }),
+  );
+}
+
+/** Catches a host that hands its supervisor one credential for every session, or a choice it did not make. */
+test("under RoundRobin, two sessions' Starts name the two credentials, each by name and never its file", async () => {
+  const selector = rotatingSelector();
+  const host = await readyHost(settings, {
+    credentialChosen: () => chatHostCredentialChosen(selector),
+  });
+
+  for (const assignment of ["a", "b"])
+    assert.deepEqual(
+      await host.backend.place(sessionOf(assignment), "Session"),
+      {
+        placed: "Placed",
+      },
+    );
+
+  assert.deepEqual(
+    host.frames().map(({ assignment, credential }) => [assignment, credential]),
+    [
+      ["a", { agent: "Claude", type: "OAuth", name: "team-a" }],
+      ["b", { agent: "Claude", type: "OAuth", name: "team-c" }],
+    ],
+  );
+  const printed = JSON.stringify([host.frames(), host.logged]);
+  assert.ok(!printed.includes("/secrets/"), printed);
+  bearerUnlogged(host);
+});
+
+/** Catches a host that starts a session on no credential where its selector chose none. */
+test("a session the selector chooses no credential for is refused, and no Start is written", async () => {
+  const host = await readyHost(settings, {
+    credentialChosen: () =>
+      chatHostCredentialChosen({
+        agents: [],
+        sets: {},
+        chosen: () => undefined,
+      }),
+  });
+
+  assert.deepEqual(await host.backend.place(sessionOf("a"), "Session"), {
+    placed: "Refused",
+    evidence:
+      "this runner holds no Claude credential its policy allows that is available",
+  });
+  assert.deepEqual(host.frames(), []);
+});
+
+/** Catches a host with no selector whose `Start` names a credential its supervisor was never handed. */
+test("a host with no selector names no credential in its Start", async () => {
+  const host = await readyHost();
+  await host.backend.place(sessionOf("a"), "Session");
+  assert.equal(host.frames()[0].credential, undefined);
+});
+
+test("against this core's supervisor, the credential a Start names is the one the session is prepared on", async () => {
+  const selector = rotatingSelector("InOrder");
+  const host = supervisedHost({
+    credentialChosen: () => chatHostCredentialChosen(selector),
+  });
+  assert.ok("ready" in (await host.backend.attached(host.handle)));
+  await host.backend.place(sessionOf("a"), "Session");
+  await settled();
+  assert.deepEqual(host.preparations[0].credential, {
+    agent: "Claude",
+    type: "OAuth",
+    name: "team-a",
+  });
+  host.handle.input.end();
+  assert.equal(await host.exited, 0);
 });

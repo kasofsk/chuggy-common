@@ -762,7 +762,7 @@ test("a chat supervisor is run attached, capped with no swap past it, its enviro
     chatRunOf([], ["uid=0,gid=0", "uid=1000,gid=1000"]),
   );
   assert.deepEqual(docker.environment, {
-    CHUG_CHAT_PROTOCOL: "1",
+    CHUG_CHAT_PROTOCOL: "2",
     CHUG_CHAT_CREDENTIAL: "/var/run/chuggy/credentials/provider/claude.json",
     CHUG_CHAT_CREDENTIAL_UID: "1000",
     CHUG_CHAT_CREDENTIAL_GID: "1000",

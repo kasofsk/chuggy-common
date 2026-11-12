@@ -8,7 +8,7 @@ const task = {
   bounds: { mailboxPollMs: 10, idleMs: 100 },
 };
 
-function mailboxOf(answers) {
+function mailboxOf(answers, bounds = task.bounds) {
   const calls = [];
   let clock = 0;
   const services = {
@@ -27,7 +27,7 @@ function mailboxOf(answers) {
     advance: (milliseconds) => {
       clock += milliseconds;
     },
-    mailbox: sessionMailbox(task, "chgs_b", services),
+    mailbox: sessionMailbox({ ...task, bounds }, "chgs_b", services),
   };
 }
 
@@ -70,6 +70,30 @@ test("a second turn is not claimed until the first one settled", async () => {
   assert.equal(calls.length, 2);
 });
 
+test("an ask is yielded into the turn in flight, claiming nothing and settling nothing", async () => {
+  const { calls, mailbox } = mailboxOf([claimed("turn-1"), claimed("turn-2")]);
+
+  const turns = mailbox.turns();
+  await turns.next();
+  const asked = turns.next();
+  mailbox.ask("decide");
+
+  assert.equal((await asked).value.message.content, "decide");
+  assert.equal(mailbox.claimed().turn, "turn-1");
+  const second = turns.next();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(calls.length, 1, "the ask claimed a turn");
+  mailbox.settled();
+  assert.equal((await second).value.message.content, "ask turn-2");
+});
+
+test("an ask with no turn in flight is refused", () => {
+  const { mailbox } = mailboxOf([{ status: 204 }]);
+
+  assert.throws(() => mailbox.ask("decide"), /no turn to ask in/u);
+});
+
 test("an empty mailbox is polled until the idle bound and then ends the iterable", async () => {
   const { calls, mailbox } = mailboxOf([{ status: 204 }]);
 
@@ -81,6 +105,24 @@ test("an empty mailbox is polled until the idle bound and then ends the iterable
     calls.length,
     task.bounds.idleMs / task.bounds.mailboxPollMs + 1,
   );
+});
+
+test("a mailbox launched with no idle bound is not ended by sitting idle", async () => {
+  const polledEmpty = (task.bounds.idleMs / task.bounds.mailboxPollMs) * 10;
+  const { calls, mailbox } = mailboxOf(
+    [
+      ...Array.from({ length: polledEmpty }, () => ({ status: 204 })),
+      claimed("turn-1"),
+    ],
+    { mailboxPollMs: task.bounds.mailboxPollMs },
+  );
+
+  const turns = mailbox.turns();
+  const first = await turns.next();
+
+  assert.equal(first.done, false, "an idle session with no idle bound ended");
+  assert.equal(mailbox.claimed().turn, "turn-1");
+  assert.equal(calls.length, polledEmpty + 1);
 });
 
 test("a fenced claim ends the iterable rather than asking again", async () => {

@@ -24,12 +24,17 @@ import {
   workerWorkspaceDirectory,
 } from "@chuggy/worker-contract/workerEnvironment";
 
+import {
+  agentCredentialSelector,
+  agentCredentialSets,
+} from "./agentCredentialSet.mjs";
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import {
   checkedContainerBackendSettings,
   containerBackend,
   containerImageOf,
   containerImageFaultTexts,
+  containerKeptWorkspaces,
   containerName,
   logSaveFailureDwellMs,
   ownerVolumesSchema,
@@ -120,7 +125,7 @@ async function harness(t, overrides = {}, seams = {}) {
     pullRetryMs: 5000,
     ...overrides,
   };
-  const backend = containerBackend(settings, {
+  const backendSeams = {
     engine,
     tokens: {
       acquire: async () => ({
@@ -139,9 +144,11 @@ async function harness(t, overrides = {}, seams = {}) {
       return tokenFileRefused;
     },
     ...seams,
-  });
+  };
+  const backend = containerBackend(settings, backendSeams);
   return {
     backend,
+    backendSeams,
     engine,
     state,
     clock,
@@ -860,7 +867,7 @@ test("a name another assignment holds is a placement that failed", async (t) => 
   );
 });
 
-test("a running container past its deadline is killed, its logs saved, removed, and its end named timed out", async (t) => {
+test("a running container past its deadline is killed, its logs saved, removed keeping its workspace, and its end named timed out", async (t) => {
   const { backend, state, clock, settings } = await harness(t);
   const name = seeded(state, "asg-late", "running", startMs / 1000 + 10);
   clock.nowMs += 10_000;
@@ -870,10 +877,11 @@ test("a running container past its deadline is killed, its logs saved, removed, 
     "container",
     "volume",
     "kill",
+    "cp",
     "logs",
     "rm",
   ]);
-  assert.deepEqual(state.calls.at(-1)?.argv, ["rm", "-v", "id-asg-late"]);
+  assert.deepEqual(state.calls.at(-1)?.argv, ["rm", "id-asg-late"]);
   const saved = join(settings.logDir, `${name}.log`);
   assert.equal(await readFile(saved, "utf8"), `the log of ${name}\n`);
   assert.equal((await stat(saved)).mode & 0o777, 0o600);
@@ -1205,7 +1213,7 @@ test("a stop of an in-flight placement cancels its pull, and nothing is run", as
   assert.deepEqual(await backend.ended(), []);
 });
 
-test("a stop of a running container kills it, saves its logs, and removes it with its volumes", async (t) => {
+test("a stop of a running container kills it, saves its logs, and removes it, keeping its workspace", async (t) => {
   const { backend, state, settings, log } = await harness(t);
   const name = seeded(state, "asg-2", "running", startMs / 1000 + 60);
   assert.deepEqual(await backend.stop("asg-2"), {
@@ -1213,30 +1221,30 @@ test("a stop of a running container kills it, saves its logs, and removes it wit
     found: { found: "Running" },
   });
   assert.deepEqual(
-    state.calls.map((call) => call.argv),
+    state.calls.map((call) => call.argv.slice(0, 2)),
     [
-      [
-        "ps",
-        "--all",
-        "--quiet",
-        "--no-trunc",
-        "--filter",
-        "label=io.chuggy.pool=vteng/chuggy/shame",
-        "--filter",
-        "label=io.chuggy.assignment=asg-2",
-      ],
+      ["ps", "--all"],
       ["kill", "id-asg-2"],
-      ["container", "inspect", "id-asg-2"],
-      ["logs", "--tail", String(savedLogLinesMax + 1), "id-asg-2"],
-      ["rm", "-v", "id-asg-2"],
+      ["container", "inspect"],
+      ["cp", "id-asg-2:/workspace/chuggy-workspace.json"],
+      ["logs", "--tail"],
+      ["rm", "id-asg-2"],
     ],
   );
+  assert.deepEqual(state.calls[0]?.argv.slice(-2), [
+    "--filter",
+    "label=io.chuggy.assignment=asg-2",
+  ]);
+  assert.deepEqual(state.calls[4]?.argv.slice(2), [
+    String(savedLogLinesMax + 1),
+    "id-asg-2",
+  ]);
   const saved = join(settings.logDir, `${name}.log`);
   assert.equal(await readFile(saved, "utf8"), `the log of ${name}\n`);
   assert.equal((await stat(saved)).mode & 0o777, 0o600);
   assert.equal(state.containers.size, 0);
   assert.match(
-    log.at(-1) ?? "",
+    log.at(-2) ?? "",
     /was stopped; logs saved to .*, container removed$/u,
   );
   assert.deepEqual(await backend.stop("asg-2"), { stopped: "Stopped" });
@@ -1259,7 +1267,14 @@ test("a stop of a job that ended on its own just before saves its logs and remov
       },
     },
   });
-  assert.deepEqual(verbs(state), ["ps", "kill", "container", "logs", "rm"]);
+  assert.deepEqual(verbs(state), [
+    "ps",
+    "kill",
+    "container",
+    "cp",
+    "logs",
+    "rm",
+  ]);
   assert.equal(state.containers.size, 0);
   assert.equal(
     await readFile(join(settings.logDir, `${name}.log`), "utf8"),
@@ -1407,6 +1422,157 @@ test("a job requiring an agent mounts that agent's credential file and is told t
     [settings.tokenFile, "Claude"],
     [settings.tokenFile, "Claude"],
   ]);
+});
+
+/** Catches a credential outcome a backend is handed reaching no selector, or benching another than the one its assignment mounted. */
+test("a credential outcome handed the backend benches the credential its assignment mounted", async (t) => {
+  const selector = rotatingSelector();
+  const { backend, state } = await harness(t, {
+    tokenFile: undefined,
+    credentials: selector,
+    images: [{ image, capabilities: ["Agent:Claude"] }],
+  });
+  state.images.add(image);
+  const claude = (assignmentId) =>
+    assignment({
+      assignment: assignmentId,
+      image: undefined,
+      capabilities: ["Platform:Linux:Amd64", "Agent:Claude"],
+    });
+  await backend.place(claude("asg-1"), "Job");
+  backend.credentialOutcomesTaken([
+    { assignment: "asg-1", outcome: "CreditsExhausted" },
+  ]);
+  assert.deepEqual(selector.benchOf("max-1"), {
+    state: "BenchedUntilRestart",
+  });
+  assert.deepEqual(selector.benchOf("max-2"), { state: "Available" });
+  assert.deepEqual(backend.capabilitiesWithheld(), []);
+  await backend.place(claude("asg-2"), "Job");
+  backend.credentialOutcomesTaken([
+    { assignment: "asg-2", outcome: "CreditsExhausted" },
+  ]);
+  assert.deepEqual(backend.capabilitiesWithheld(), ["Agent:Claude"]);
+  await backend.settled();
+});
+
+/** Catches a container backend without a selector withholding a capability its runner was built with. */
+test("a container backend without a selector withholds nothing", async (t) => {
+  const { backend } = await harness(t);
+  assert.deepEqual(backend.capabilitiesWithheld(), []);
+  await backend.settled();
+});
+
+/** A runner's selector over two Claude subscriptions in turn and one Codex API key. */
+function rotatingSelector() {
+  return agentCredentialSelector(
+    agentCredentialSets({
+      claudeCredential: {
+        prefer: "PreferOAuth",
+        oauth: {
+          order: "RoundRobin",
+          credentials: [
+            { name: "max-1", tokenFile: "/home/op/.claude/max-1" },
+            { name: "max-2", tokenFile: "/home/op/.claude/max-2" },
+          ],
+        },
+      },
+      codexCredential: {
+        prefer: "ApiKeyOnly",
+        apiKey: {
+          order: "InOrder",
+          credentials: [{ name: "openai-1", apiKeyFile: "/home/op/openai" }],
+        },
+      },
+    }),
+  );
+}
+
+/**
+ * Catches a workload mounting a credential its runner's selector did not
+ * choose, told another's type or name, or a rotation that does not
+ * advance from one workload to the next, jobs and sessions alike.
+ */
+test("each workload mounts the credential the runner's selector chooses for its agent, told its type and name", async (t) => {
+  const selector = rotatingSelector();
+  const { backend, state, tokenFilesAsked } = await harness(t, {
+    tokenFile: undefined,
+    credentials: selector,
+    images: [{ image, capabilities: ["Agent:Claude", "Agent:Codex"] }],
+  });
+  state.images.add(image);
+  const required = (assignmentId, agent) =>
+    assignment({
+      assignment: assignmentId,
+      image: undefined,
+      capabilities: ["Platform:Linux:Amd64", agent],
+    });
+  await backend.place(required("asg-1", "Agent:Claude"), "Job");
+  await backend.place(required("asg-codex", "Agent:Codex"), "Job");
+  await backend.place(
+    assignment({ assignment: "ses-1", capabilities: [] }),
+    "Session",
+  );
+  await backend.place(required("asg-2", "Agent:Claude"), "Job");
+  await backend.settled();
+  const handed = (assignmentId) => {
+    const { argv, envFile } = ranWith(state, assignmentId);
+    return [
+      argv
+        .find((argument) =>
+          argument.endsWith(`,target=${jobProviderCredentialFile},readonly`),
+        )
+        ?.split(",")[1],
+      envFile
+        .split("\n")
+        .filter((line) =>
+          /^CHUG_WORKER_(CLAUDE_CREDENTIAL|CODEX_CREDENTIAL|CREDENTIAL_NAME)=/u.test(
+            line,
+          ),
+        )
+        .toSorted(),
+    ];
+  };
+  assert.deepEqual(handed("asg-1"), [
+    "source=/home/op/.claude/max-1",
+    [
+      `${claudeCredentialVariable}={"kind":"Subscription"}`,
+      "CHUG_WORKER_CREDENTIAL_NAME=max-1",
+    ],
+  ]);
+  assert.deepEqual(handed("asg-codex"), [
+    "source=/home/op/openai",
+    [
+      'CHUG_WORKER_CODEX_CREDENTIAL={"kind":"ApiKey"}',
+      "CHUG_WORKER_CREDENTIAL_NAME=openai-1",
+    ],
+  ]);
+  assert.equal(handed("ses-1")[0], "source=/home/op/.claude/max-2");
+  assert.equal(handed("asg-2")[0], "source=/home/op/.claude/max-1");
+  assert.deepEqual(
+    tokenFilesAsked.map(([file]) => file),
+    [
+      "/home/op/.claude/max-1",
+      "/home/op/openai",
+      "/home/op/.claude/max-2",
+      "/home/op/.claude/max-1",
+    ],
+  );
+});
+
+/** Catches a runner handing both a fixed credential file and a selector, of which a workload would mount one unsaid. */
+test("a selector beside a credential file is refused", () => {
+  assert.throws(
+    () =>
+      checkedContainerBackendSettings(
+        /** @type {any} */ ({
+          pool,
+          tokenFile: "/home/op/token",
+          credentials: rotatingSelector(),
+        }),
+      ),
+    /^RangeError: tokenFile names a credential, and so does the runner's selector; keep the selector$/u,
+  );
 });
 
 /**
@@ -1953,6 +2119,35 @@ async function endsNamed(backend) {
   return backend.ended();
 }
 
+/** Where a job's core writes its workspace record, in its container. */
+const recordPath = "/workspace/chuggy-workspace.json";
+
+/** What a job's core writes of its workspace, its work safe where `safe` says. */
+const workspaceRecord = (safe = true) =>
+  `${JSON.stringify({ ticket: 480, attempt: "attempt-7", stage: 2, repository: "repository-1", safe })}\n`;
+
+/**
+ * A container that ended of itself with `exitCode`, its core having written
+ * `record` where it does.
+ *
+ * @param {import("./engine.fixture.mjs").FakeContainer} container
+ * @param {number} exitCode
+ * @param {string} [record]
+ */
+function endedWith(container, exitCode, record = workspaceRecord()) {
+  container.status = "exited";
+  container.exitCode = exitCode;
+  container.files = { [recordPath]: record };
+}
+
+/**
+ * The names of the volumes the engine holds, each by what follows its stem.
+ *
+ * @param {Awaited<ReturnType<typeof harness>>["state"]} state
+ */
+const volumeKinds = (state) =>
+  [...state.volumes.keys()].map((volume) => volume.replace(/^.*-/u, ""));
+
 test("a job given a runtime starts through its own copy of it, mounted read-only, with the runtime's check as its command", async (t) => {
   const context = await harness(t);
   const { state } = context;
@@ -1982,7 +2177,9 @@ test("a job given a runtime starts through its own copy of it, mounted read-only
     "io.chuggy.fill": fill,
   };
   assert.deepEqual(state.volumes.get(volume), { labels, filledFrom: runtime });
-  assert.deepEqual(state.volumes.get(workspace), { labels });
+  assert.deepEqual(state.volumes.get(workspace), {
+    labels: { ...labels, "io.chuggy.workspace-volume": "" },
+  });
   const container = state.containers.get(containerName(pool, "asg-1"));
   assert.equal(container?.labels["io.chuggy.runtime"], volume);
   assert.equal(container?.labels["io.chuggy.workspace"], workspace);
@@ -2067,7 +2264,7 @@ test("a job given no runtime, and a session whatever it is given, runs its image
     assert.doesNotMatch(call.envFile ?? "", /CHUG_WORKER_WORKSPACE/u);
 });
 
-test("every fault of the contract has its text, and each the runtime's check exits with refuses the job with it, its volume removed with its container", async (t) => {
+test("every fault of the contract has its text, and each the runtime's check exits with refuses the job with it, its runtime volume removed with its container and its workspace kept", async (t) => {
   assert.deepEqual(
     Object.keys(containerImageFaultTexts).sort(),
     [...workerImageFaults].sort(),
@@ -2089,7 +2286,7 @@ test("every fault of the contract has its text, and each the runtime's check exi
       },
     ]);
     assert.equal(context.state.containers.size, 0);
-    assert.equal(context.state.volumes.size, 0, fault);
+    assert.deepEqual(volumeKinds(context.state), ["workspace"], fault);
   }
 });
 
@@ -2107,7 +2304,7 @@ test("a job started through a runtime that exited otherwise, or one started with
       ran: "Failed",
     },
   ]);
-  assert.equal(through.state.volumes.size, 0);
+  assert.deepEqual(volumeKinds(through.state), ["workspace"]);
 
   const without = await harness(t);
   without.state.images.add(image);
@@ -2172,7 +2369,12 @@ test("a job whose unstarted container could not be removed is left to the contai
   assert.deepEqual(await endsNamed(context.backend), [
     { kind: "Job", job: heldAttempt, why: "its container was left created" },
   ]);
-  assert.equal(context.state.volumes.size, 0);
+  assert.deepEqual(
+    [...context.state.volumes.keys()].map((volume) =>
+      volume.replace(/^.*-/u, ""),
+    ),
+    ["workspace"],
+  );
 });
 
 test("a runner that cannot get the runtime, or cannot copy it, fails the placement as any that did not start, runs nothing and keeps no volume", async (t) => {
@@ -3064,8 +3266,7 @@ test("each runtime volume the engine would not remove is logged by name, and the
   const context = await harness(t);
   const container = await placedThroughRuntime(context);
   assert.ok(container !== undefined);
-  container.status = "exited";
-  container.exitCode = 0;
+  endedWith(container, 0);
   const volume = container.labels["io.chuggy.runtime"];
   const workspace = container.labels["io.chuggy.workspace"];
   context.state.intercept = (call) =>
@@ -3288,6 +3489,222 @@ test("a fill already gone is no failure in podman's words as in docker's, and on
 });
 
 /** What a job's owner mounts into it in the suites below, a volume of each kind. */
+/**
+ * What a runner logged and recorded of the workspace a placed job kept: the
+ * line naming it, and its record beside the saved logs.
+ *
+ * @param {Awaited<ReturnType<typeof harness>>} context
+ * @param {string} workspace
+ */
+async function keptSaid({ log, settings }, workspace) {
+  const line = log.find((each) => each.includes(`${workspace} is kept`));
+  const record = JSON.parse(
+    await readFile(
+      join(settings.logDir, "kept-workspaces", `${workspace}.json`),
+      "utf8",
+    ),
+  );
+  return { line, record };
+}
+
+/** What a kept workspace's record holds of a job whose record was read. */
+const keptHolds = {
+  ticket: 480,
+  attempt: "attempt-7",
+  stage: 2,
+  repository: "repository-1",
+};
+
+test("a job that exited 0 with its workspace record saying its work is safe has both its volumes removed", async (t) => {
+  const context = await harness(t);
+  const container = await placedThroughRuntime(context);
+  assert.ok(container !== undefined);
+  endedWith(container, 0);
+  assert.equal((await endsNamed(context.backend)).length, 1);
+  assert.equal(context.state.containers.size, 0);
+  assert.equal(context.state.volumes.size, 0);
+  assert.ok(!context.log.some((line) => line.includes(" is kept, since ")));
+  const verbsRetiring = verbs(context.state).slice(-6);
+  assert.ok(
+    verbsRetiring.indexOf("cp") !== -1 &&
+      verbsRetiring.indexOf("cp") < verbsRetiring.indexOf("rm"),
+    verbsRetiring.join(" "),
+  );
+});
+
+/** @type {[string, (container: import("./engine.fixture.mjs").FakeContainer, context: Awaited<ReturnType<typeof harness>>) => void, string, boolean][]} */
+const keptEndings = [
+  [
+    "killed at its deadline",
+    (container, { clock }) => {
+      container.files = { [recordPath]: workspaceRecord() };
+      clock.nowMs += 3_600_000;
+    },
+    "it passed its deadline",
+    true,
+  ],
+  [
+    "that exits non-zero",
+    (container) => endedWith(container, 1),
+    "its container exited with status 1",
+    true,
+  ],
+  [
+    "that exits 0 without its work recorded safe",
+    (container) => endedWith(container, 0, workspaceRecord(false)),
+    "its workspace record does not say its work is safe",
+    true,
+  ],
+  [
+    "that exits 0 with a record this runner cannot read",
+    (container) => endedWith(container, 0, "not a record\n"),
+    "its workspace record could not be read: it is not a record this runner reads",
+    false,
+  ],
+  [
+    "that exits 0 with no record",
+    (container) => {
+      endedWith(container, 0);
+      container.files = {};
+    },
+    "its workspace record could not be read: Error response from daemon: Could not find the file /workspace/chuggy-workspace.json in container",
+    false,
+  ],
+  [
+    "gone from the engine",
+    (container, { state }) => {
+      endedWith(container, 0);
+      state.intercept = (call) => {
+        if (call.argv[0] === "cp") state.containers.delete(container.name);
+        return undefined;
+      };
+    },
+    "its container was gone",
+    false,
+  ],
+];
+
+for (const [ending, ended, reason, read] of keptEndings)
+  test(`a job ${ending} keeps its workspace volume, removes its runtime volume, and logs and records why and whose work it holds`, async (t) => {
+    const context = await harness(t);
+    const container = await placedThroughRuntime(context);
+    assert.ok(container !== undefined);
+    const workspace = container.labels["io.chuggy.workspace"];
+    ended(container, context);
+    await endsNamed(context.backend);
+    assert.deepEqual([...context.state.volumes.keys()], [workspace]);
+    const { line, record } = await keptSaid(context, workspace);
+    assert.ok(
+      line?.startsWith(
+        `${container.name}: ${workspace} is kept, since ${reason}`,
+      ),
+      line,
+    );
+    assert.ok(
+      line.endsWith(
+        read
+          ? ": ticket 480, attempt attempt-7, stage 2, repository repository-1"
+          : ": its workspace record could not be read",
+      ),
+      line,
+    );
+    assert.equal(record.workspace, workspace);
+    assert.ok(record.reason.startsWith(reason), record.reason);
+    assert.equal(record.keptAt, new Date(context.clock.nowMs).toISOString());
+    assert.deepEqual(
+      Object.keys(record).filter((key) => key in keptHolds),
+      read ? Object.keys(keptHolds) : [],
+    );
+    if (read) assert.deepEqual({ ...record, ...keptHolds }, record);
+  });
+
+test("a kept job started through chuggy's runtime is still removed with its anonymous volumes", async (t) => {
+  const context = await harness(t);
+  const container = await placedThroughRuntime(context);
+  assert.ok(container !== undefined);
+  endedWith(container, 1);
+  await endsNamed(context.backend);
+  const removal = context.state.calls.find((call) => call.argv[0] === "rm");
+  assert.deepEqual(removal?.argv, ["rm", "-v", container.id]);
+  assert.deepEqual(
+    [...context.state.volumes.keys()],
+    [container.labels["io.chuggy.workspace"]],
+  );
+});
+
+test(
+  "a workspace record whose copy hangs is given up at its cut, and its workspace kept",
+  { timeout: 30_000 },
+  async (t) => {
+    const cut = new globalThis.AbortController();
+    const context = await harness(
+      t,
+      {},
+      { workspaceRecordCut: () => cut.signal },
+    );
+    const container = await placedThroughRuntime(context);
+    assert.ok(container !== undefined);
+    endedWith(container, 0);
+    const copying = deferred();
+    context.state.intercept = (call) => {
+      if (call.argv[0] !== "cp") return undefined;
+      copying.resolve(undefined);
+      return new Promise(() => undefined);
+    };
+    const held = context.backend.held();
+    await copying.promise;
+    cut.abort();
+    assert.deepEqual(await held, []);
+    const workspace = container.labels["io.chuggy.workspace"];
+    assert.deepEqual([...context.state.volumes.keys()], [workspace]);
+    const { line } = await keptSaid(context, workspace);
+    assert.match(
+      line ?? "",
+      /is kept, since its workspace record could not be read: it was not copied out in time: its workspace record could not be read$/u,
+    );
+  },
+);
+
+test("a sweep leaves a workspace volume nothing answers for, and the operator's listing names it with whose work it holds", async (t) => {
+  const context = await harness(t, { engine: "docker" });
+  const container = await placedThroughRuntime(context);
+  assert.ok(container !== undefined);
+  const workspace = container.labels["io.chuggy.workspace"];
+  endedWith(container, 1);
+  await endsNamed(context.backend);
+  const { state, settings, engine } = context;
+  state.volumes.set("left-workspace", {
+    labels: {
+      ...runtimeVolume("asg-gone", "left-fill").labels,
+      "io.chuggy.workspace-volume": "",
+    },
+  });
+  state.volumes.set("left-runtime", runtimeVolume("asg-gone", "left-fill"));
+  await containerBackend(settings, context.backendSeams).held();
+  assert.deepEqual(
+    [...state.volumes.keys()].sort(),
+    [workspace, "left-workspace"].sort(),
+  );
+  state.intercept = (call) =>
+    call.argv[0] === "system"
+      ? {
+          code: 0,
+          stdout: `${JSON.stringify({
+            Containers: [],
+            Volumes: [{ Name: workspace, Size: "2.1MB" }],
+          })}\n`,
+          stderr: "",
+        }
+      : undefined;
+  assert.deepEqual(
+    await containerKeptWorkspaces("docker", engine, settings.logDir),
+    [
+      `${workspace}  2.0 MiB  ticket 480, attempt attempt-7, stage 2, repository repository-1; kept ${new Date(context.clock.nowMs).toISOString()}, since its container exited with status 1`,
+      "left-workspace  size unknown  no record of why it is kept",
+    ],
+  );
+});
+
 const ownerMounts = [
   { source: "/srv/cache", target: "/cache/shared", readonly: true },
   { source: "cargo", target: "/cache/cargo", readonly: false },
@@ -3550,8 +3967,7 @@ test("no sweep removes an owner's volume: not a restarted runner's first held, n
 
   const container = await placedThroughRuntime(context);
   assert.ok(container !== undefined);
-  container.status = "exited";
-  container.exitCode = 0;
+  endedWith(container, 0);
   assert.equal((await endsNamed(backend)).length, 1);
   assert.equal(state.containers.size, 0);
   assert.deepEqual([...state.volumes.keys()].sort(), [
@@ -4373,6 +4789,26 @@ test("a disk under its floor has a reclaim remove what it may, oldest first, unt
   ]);
 });
 
+test("a disk under its floor says the workspaces its runner keeps are part of what it holds", async (t) => {
+  const context = await floorHarness(t);
+  const { backend, log, disk, settings } = context;
+  await mkdir(join(settings.logDir, "kept-workspaces"), { recursive: true });
+  for (const workspace of ["kept-1", "kept-2"])
+    await writeFile(
+      join(settings.logDir, "kept-workspaces", `${workspace}.json`),
+      JSON.stringify({
+        workspace,
+        reason: "its container exited with status 1",
+        keptAt: new Date(startMs).toISOString(),
+      }),
+    );
+  disk.set(15 * gib);
+  await backend.held();
+  assert.deepEqual(floorLines(log), [
+    "this runner's disk has 15 GiB free at /var/lib/docker, under its floor of 20 GiB: it takes no job until it is over; 2 kept workspaces are part of what it holds",
+  ]);
+});
+
 test("a disk a reclaim leaves under its floor takes no job, whether the plane claims by room or not, with no line more, until a pass finds it over", async (t) => {
   const context = await floorHarness(t);
   const { backend, state, log, disk, clock } = context;
@@ -4414,7 +4850,7 @@ test("under half its floor, a reclaim that brings the disk back over half stops 
   assert.deepEqual(await backend.ended(), []);
 });
 
-test("under half its floor after the reclaim, the job holding most is killed, its logs saved and its volumes removed, and its end named disk low; never a session", async (t) => {
+test("under half its floor after the reclaim, the job holding most is killed, its logs saved and its workspace kept, and its end named disk low; never a session", async (t) => {
   const context = await floorHarness(t, { engine: "docker" });
   const { backend, state, log, disk, settings } = context;
   const most = runningJob(state, "asg-most", 0);
@@ -4460,7 +4896,7 @@ test("under half its floor after the reclaim, the job holding most is killed, it
     [["kill", "id-asg-most"]],
   );
   assert.ok(!state.containers.has(most));
-  assert.ok(!state.volumes.has("workspace-asg-most"));
+  assert.ok(state.volumes.has("workspace-asg-most"));
   assert.ok(state.volumes.has("workspace-asg-newer"));
   assert.equal(
     await readFile(join(settings.logDir, `${most}.log`), "utf8"),
@@ -4743,7 +5179,7 @@ test("an ended container whose logs could not be saved is removed without them o
   clock.nowMs += 1;
   assert.deepEqual(await backend.held(), []);
   assert.equal(state.containers.size, 0);
-  assert.deepEqual(log.slice(-2), [
+  assert.deepEqual(log.slice(-3, -1), [
     `${name} ended; its logs could not be saved since ${new Date(startMs).toISOString()}, and are lost with it: podman logs exited 1`,
     `${name} ended; logs lost, container removed`,
   ]);

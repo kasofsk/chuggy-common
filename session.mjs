@@ -58,6 +58,20 @@
  * result too, and with no drain it is charged to the turn after, which runs to
  * its result, fails `StoreRefused` and ends the session, as a refusal later
  * than the drain is charged after any turn.
+ *
+ * AN ANSWERED TURN CARRIES ITS READINGS OF THE CONTEXT WINDOW, to a plane whose
+ * answers name the version that takes them: one per compaction its stream
+ * marked, and one of the window as it ended, which the runtime is asked for
+ * at `summary` detail, since `full` spends a token-count call per category. A
+ * reading the contract would refuse, or a window the runtime does not answer
+ * within `sessionContextUsageWaitMs`, is left out, never the answer.
+ *
+ * A LEAD'S OBSERVATION THAT ENDS WITH NO DECISION IS ASKED FOR ONE, ONCE, IN
+ * THE SAME TURN, because the selector refuses its prose. A result that staged
+ * nothing, failed nothing, and is not a decision written as text is answered
+ * with `sessionDecisionAsk` through the mailbox, and the turn settles on its
+ * next result: one store turn and one measurement, whose duration adds both
+ * results' own.
  */
 
 import { execFile } from "node:child_process";
@@ -69,13 +83,18 @@ import { promisify } from "node:util";
 import {
   agentReportedTurnFailures,
   sessionCapabilities,
+  sessionContextCauses,
   sessionPlaneRoutes,
+  sessionTurnAnswerSchema,
+  sessionTurnContextReadingsMax,
   sessionTurnModelCharsMax,
   sessionTurnResultCharsMax,
   sessionTurnToolNameCharsMax,
   sessionTurnToolsMax,
 } from "@chuggy/worker-contract/sessionPlane";
 import { chuggyToolServerName } from "@chuggy/worker-contract/sessionTools";
+import { workerContractSessionContext } from "@chuggy/worker-contract/workerContract";
+import { leadDecisionDocumentSchema } from "@chuggy/worker-contract/workerDocuments";
 import {
   mintedCredentialDirectory,
   sessionConfigDirectoryVariable,
@@ -96,8 +115,14 @@ import {
   chuggyToolContext,
   chuggyToolServer,
   sessionAllowedTools,
+  sessionBuiltInTools,
 } from "./chuggyTools.mjs";
 import { claudeCredentialPrepared } from "./claude.mjs";
+import {
+  contextCompacted,
+  contextCompaction,
+  contextWindow,
+} from "./contextReading.mjs";
 import { leadDecisionStaging } from "./leadDecision.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import {
@@ -127,7 +152,7 @@ import {
   sessionStopped,
 } from "./sessionTransport.mjs";
 import { WorkerPlaneRefusal } from "./transport.mjs";
-import { rosterLabel } from "./wire.mjs";
+import { answeredVersion, rosterLabel, versionReaches } from "./wire.mjs";
 
 /** The failures this pod names for a turn, each one the plane's roster carries. */
 const [
@@ -144,6 +169,13 @@ const [
   "StoreRefused",
 ].map((label) => rosterLabel(agentReportedTurnFailures, label));
 
+const [contextCompactionCause, contextEndCause] = ["Compaction", "End"].map(
+  (label) => rosterLabel(sessionContextCauses, label),
+);
+
+/** How long the runtime is given to answer what its window holds as a turn ends. */
+export const sessionContextUsageWaitMs = 5_000;
+
 /** What a micro is of a dollar, which is the unit the measured cost is carried in. */
 const microsPerDollar = 1_000_000;
 
@@ -159,10 +191,19 @@ const agentSdkModule = "@anthropic-ai/claude-agent-sdk";
 const zodModule = "zod";
 const readStatus = 200;
 const acceptedStatus = 204;
+/** Claude Code's effort variable, which it ranks above the query's `effort`. */
+const sessionEffortVariable = "CLAUDE_CODE_EFFORT_LEVEL";
 const executeFile = promisify(execFile);
 
 /** The capability that admits the runtime's shell. */
 const runCommands = rosterLabel(sessionCapabilities, "RunCommands");
+
+/** The capability that admits the lead's decision tools. */
+const leadDecision = rosterLabel(sessionCapabilities, "LeadDecision");
+
+/** What a lead's observation turn that decided nothing is asked in that turn. */
+export const sessionDecisionAsk =
+  "This turn ended without a decision, and the decision tools are how it is answered.";
 
 /** What each secret this session holds is. */
 const sessionSecretKinds = {
@@ -197,7 +238,6 @@ export async function sessionSdk() {
  */
 export const sessionBounds = {
   mailboxPollMs: Number.isSafeInteger,
-  idleMs: Number.isSafeInteger,
   resultDrainMs: Number.isSafeInteger,
   loadTimeoutMs: Number.isSafeInteger,
   turnsMax: Number.isSafeInteger,
@@ -206,14 +246,26 @@ export const sessionBounds = {
 export const sessionBoundNames = Object.keys(sessionBounds);
 
 /**
+ * The bounds a launcher may leave out, each one's loop then ending on its other
+ * bounds alone: a session with no `idleMs` is never ended for sitting idle.
+ */
+export const sessionBoundsOptional = { idleMs: Number.isSafeInteger };
+
+/**
  * Every bound the launcher owes this pod, refused by name where one is missing
- * or not positive. There is no default to fall back to: a bound this image
+ * or not positive, and each optional one it names refused where not positive.
+ * There is no default to fall back to: a bound this image
  * invented would be a loop nobody chose the cap of, and an absent one silently
  * makes its loop unbounded rather than short. `carrier` names what carried
  * them.
  */
 export function checkedSessionBounds(bounds, carrier = sessionTaskVariable) {
-  for (const [name, valid] of Object.entries(sessionBounds)) {
+  for (const [name, valid] of [
+    ...Object.entries(sessionBounds),
+    ...Object.entries(sessionBoundsOptional).filter(
+      ([name]) => bounds?.[name] !== undefined,
+    ),
+  ]) {
     const value = bounds?.[name];
     if (!valid(value) || value <= 0)
       throw new Error(
@@ -382,7 +434,8 @@ function runningTotal() {
  * What the runtime spent, gathered as it says it. The model, the tokens and the
  * cost outlive one turn because the runtime reports each per query rather than
  * per turn, so what one turn spent is what its total moved by; the duration is
- * already the turn's and the tools are this turn's alone.
+ * the sum of the turn's results' own durations and the tools are this turn's
+ * alone.
  *
  * A FAILED TURN IS NEVER MEASURED, AND ITS SPEND IS NOT LOST. Only an answered
  * turn asks for an envelope, so a failed one leaves both marks where they stood
@@ -404,10 +457,16 @@ export function sessionMeasure() {
   const tokensSince = runningTotal();
   let calls = new Map();
   let awaiting = new Map();
+  let askedMs = 0;
   return {
     startTurn() {
       calls = new Map();
       awaiting = new Map();
+      askedMs = 0;
+    },
+    /** A result the turn was asked past, whose duration is the turn's too. */
+    asked(result) {
+      askedMs += measuredCount(result?.duration_ms);
     },
     saw(message) {
       if (message.type === "system" && message.subtype === "init") {
@@ -446,7 +505,7 @@ export function sessionMeasure() {
         costMicros: measuredCount(
           dollarsSince(result.total_cost_usd) * microsPerDollar,
         ),
-        durationMs: measuredCount(result.duration_ms),
+        durationMs: askedMs + measuredCount(result.duration_ms),
         tools: [...calls]
           .filter(([, call]) => call.refused < call.made)
           .map(([name]) => name),
@@ -496,7 +555,8 @@ function sessionForkFrom(facts) {
 }
 
 /**
- * The objectives the session carries, appended to the runtime's own preset.
+ * The objectives the session carries, appended to the runtime's own preset,
+ * or, for a session on its own prompt, the whole prompt.
  *
  * THE PRESET RATHER THAN A CUSTOM PROMPT, because the preset is what loads the
  * checkout's `CLAUDE.md`, and `settingSources` must name `'project'` for it to.
@@ -514,11 +574,16 @@ function sessionForkFrom(facts) {
  * cannot reach means the runtime reports none loaded, with no warning and no
  * start it delayed.
  *
+ * A SESSION ITS FACTS MARK `systemPromptOwn` IS GRANTED NONE OF THAT. It runs
+ * on chuggy's credential for a tenant whose tree it reads, so its prompt is the
+ * environment lines this pod writes and then the objectives, its
+ * `settingSources` is empty, and `sessionQueryOptions` confines its tools.
+ *
  * `snapshot: false` RENDERS THE PROMPT FROM EACH QUERY'S OWN OPTIONS, which
- * every pod start passes in full. It is said rather than omitted because
- * omitting it is the runtime's default, and the default records the rendered
- * prompt in the transcript and sends that record on every later request and
- * every resume, whatever `append` the resume passes. A record carrying the
+ * every pod start passes in full, on either prompt. It is said rather than
+ * omitted because omitting it is the runtime's default, and the default records
+ * the rendered prompt in the transcript and sends that record on every later
+ * request and every resume, whatever the resume passes. A record carrying the
  * session's tools can outweigh a store batch, and a pod resuming from the store
  * would run under what the store kept of it. A record buys nothing here: chuggy
  * replaces a lead whose prompt changed rather than resuming it.
@@ -528,14 +593,60 @@ function sessionForkFrom(facts) {
  * with the preset's own objectives is worse than one with the project's and is
  * not a reason to refuse the turn.
  */
-function sessionSystemPrompt(facts) {
+function sessionSystemPrompt(facts, checkout, tools) {
   const append = facts.systemPrompt;
+  const objectives =
+    typeof append === "string" && append.length > 0 ? append : undefined;
+  if (sessionPromptOwn(facts))
+    return {
+      type: "custom",
+      prompt: [
+        sessionPromptOwnLines(facts, checkout, tools).join(" "),
+        ...(objectives === undefined ? [] : [objectives]),
+      ].join("\n\n"),
+      snapshot: false,
+    };
   return {
     type: "preset",
     preset: "claude_code",
     snapshot: false,
-    ...(typeof append === "string" && append.length > 0 ? { append } : {}),
+    ...(objectives === undefined ? {} : { append: objectives }),
   };
+}
+
+const sessionToolList = new Intl.ListFormat("en", { type: "conjunction" });
+
+/** Whether the session runs on its own prompt and loads nothing of its project's settings. */
+function sessionPromptOwn(facts) {
+  return facts.systemPromptOwn === true;
+}
+
+/**
+ * The environment a session on its own prompt is told it runs in: what a
+ * lead's turn hands it and how the turn ends, an inquiry's reader, and where
+ * the checkout `tools` read is.
+ */
+function sessionPromptOwnLines(facts, checkout, tools) {
+  const reads =
+    tools.length === 0 ? "" : `; ${sessionToolList.format(tools)} read it`;
+  return [
+    ...(facts.kind === "Lead"
+      ? [
+          "Each turn's user message is the selector's observation document (JSON).",
+        ]
+      : []),
+    checkout?.directory === undefined
+      ? "This session holds no checkout of the project's repository."
+      : `A read-only checkout of the project's repository is at ${checkout.directory}${reads}.`,
+    ...((facts.capabilities ?? []).includes(leadDecision)
+      ? [
+          "End the turn by calling the decision tools; your final text is not read by anyone.",
+        ]
+      : []),
+    ...(facts.kind === "Inquiry"
+      ? ["Your final text is your answer, and the member who asked reads it."]
+      : []),
+  ];
 }
 
 /**
@@ -566,6 +677,17 @@ function sessionTakesStops(facts) {
  * it is the runtime's local mirror, and a mirror written inside a git working
  * tree is pod state the lead would read back as the project's.
  *
+ * A SESSION ON ITS OWN PROMPT IS CONFINED TO ITS `cwd`, which is never the
+ * workspace that holds `CLAUDE_CONFIG_DIR`: the checkout, or
+ * `sessionTreeEmpty` where there is none. Under `"dontAsk"` with no settings
+ * loaded, the runtime's file tools read inside `cwd` and are refused outside
+ * it, the credential mount and `/proc/self/root/` included, where
+ * `"bypassPermissions"` reads any path the process can. So `tools` is exactly
+ * the built-ins its capabilities grant, which leaves no built-in the roster
+ * does not name, and `allowedTools` names only the chuggy tools, since a bare
+ * built-in there is a rule allowing it on every path. `confinementProbe.mjs`
+ * holds this against the installed runtime.
+ *
  * MOVING `cwd` DOES NOT MOVE A STORE STREAM. The runtime derives `projectKey`
  * from the sanitised `cwd` and `./sessionStore.mjs` discards it, so a session
  * resumed into a pod with a checkout finds the transcript a pod without one
@@ -574,6 +696,10 @@ function sessionTakesStops(facts) {
  * `settings` CARRIES THE COMPACTION WINDOW A LEAD'S FACTS NAME, as flag-level
  * settings that outrank the tree's own. `CLAUDE_CODE_AUTO_COMPACT_WINDOW` would
  * override it, so this module never sets that variable.
+ *
+ * `model` AND `effort` ARE THE FACTS' WHERE THEY NAME THEM, the model otherwise
+ * the site's. `CLAUDE_CODE_EFFORT_LEVEL` outranks `effort`, so the runtime's
+ * environment leaves it out wherever the facts name an effort.
  *
  * `git` is the configuration every git the runtime starts is handed, which is
  * nothing where the session serves no reads, and `credential` is the runtime's
@@ -592,14 +718,21 @@ export function sessionQueryOptions(
   const { allowedTools, disallowedTools } = sessionAllowedTools(
     facts.capabilities,
   );
-  const model = environment[sessionModelVariable];
+  const model = facts.model ?? environment[sessionModelVariable];
   const fork = sessionForkFrom(facts);
+  const own = sessionPromptOwn(facts);
+  const builtIns = allowedTools.filter((tool) =>
+    sessionBuiltInTools.includes(tool),
+  );
   return {
     sessionStore: store,
     sessionStoreFlush: "eager",
-    cwd: checkout?.directory ?? workspace,
+    cwd: checkout?.directory ?? (own ? sessionTreeEmpty(workspace) : workspace),
     env: {
-      ...workerEnvironmentWithout(environment, credential.withheld),
+      ...workerEnvironmentWithout(environment, [
+        ...credential.withheld,
+        ...(facts.effort === undefined ? [] : [sessionEffortVariable]),
+      ]),
       ...credential.environment,
       [sessionConfigDirectoryVariable]: sessionConfigDirectory(
         environment,
@@ -608,11 +741,21 @@ export function sessionQueryOptions(
       ...workerGitEnvironment(environment, git),
     },
     mcpServers: servers,
-    systemPrompt: sessionSystemPrompt(facts),
-    settingSources: ["project"],
-    allowedTools,
-    disallowedTools,
-    permissionMode: "bypassPermissions",
+    systemPrompt: sessionSystemPrompt(facts, checkout, builtIns),
+    ...(own
+      ? {
+          settingSources: [],
+          tools: builtIns,
+          allowedTools: allowedTools.filter((tool) => !builtIns.includes(tool)),
+          disallowedTools,
+          permissionMode: "dontAsk",
+        }
+      : {
+          settingSources: ["project"],
+          allowedTools,
+          disallowedTools,
+          permissionMode: "bypassPermissions",
+        }),
     maxTurns: task.bounds.turnsMax,
     maxBudgetUsd: task.bounds.budgetUsd,
     loadTimeoutMs: task.bounds.loadTimeoutMs,
@@ -622,11 +765,17 @@ export function sessionQueryOptions(
         ? { resume: facts.agentReference }
         : {}),
     ...(typeof model === "string" && model.length > 0 ? { model } : {}),
+    ...(facts.effort === undefined ? {} : { effort: facts.effort }),
     ...(facts.autoCompactWindow !== undefined
       ? { settings: { autoCompactWindow: facts.autoCompactWindow } }
       : {}),
     ...(sessionReportsLive(facts) ? { includePartialMessages: true } : {}),
   };
+}
+
+/** The empty directory a session on its own prompt runs in where it holds no checkout. */
+export function sessionTreeEmpty(workspace) {
+  return join(workspace, "empty");
 }
 
 function sessionConfigDirectory(environment, workspace) {
@@ -699,6 +848,11 @@ async function observe(context, message) {
     );
   observeRateLimit(context.sightings, message);
   context.measure.saw(message);
+  if (
+    contextCompacted(message) &&
+    context.compactions.length < sessionTurnContextReadingsMax - 1
+  )
+    context.compactions.push(contextCompaction(message));
   if (message.type === "result") {
     context.stops?.released();
     context.live?.ended(context.mailbox.claimed()?.turn);
@@ -708,11 +862,49 @@ async function observe(context, message) {
   if (message.subtype === "mirror_error") context.mirrored = true;
 }
 
-/** One turn's messages, read to its result and then drained past it, unless its member stopped the turn. */
+/**
+ * One turn's messages, read to its result and then drained past it, unless its
+ * member stopped the turn, and read once more where the turn is asked for the
+ * decision it did not make.
+ */
 export async function runSessionTurn(context) {
   context.store.startTurn();
   context.sightings = rateLimitSightings();
+  context.compactions = [];
   context.measure.startTurn();
+  const read = await runSessionTurnRead(context);
+  if (!runSessionTurnAsks(context, read)) return read;
+  context.measure.asked(read.result);
+  context.mailbox.ask(sessionDecisionAsk);
+  return await runSessionTurnRead(context);
+}
+
+/** Whether a turn's text is itself a decision, which the prose arm answers with. */
+function runSessionTurnTextDecides(text) {
+  try {
+    return leadDecisionDocumentSchema.safeParse(JSON.parse(text)).success;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether a lead's observation turn ended in a result that decided nothing and failed nothing. */
+function runSessionTurnAsks(context, { result, ended }) {
+  const turn = context.mailbox.claimed();
+  return (
+    !ended &&
+    context.leadDecides === true &&
+    turn?.inputKind === "Observation" &&
+    !context.staging.staged() &&
+    !context.mirrored &&
+    !context.stops?.stopped(turn.turn) &&
+    sessionTurnFailure(result, context.sightings) === undefined &&
+    !runSessionTurnTextDecides(sessionResultText(result, context.scrub))
+  );
+}
+
+/** The turn's messages to its next result and through the drain after it. */
+async function runSessionTurnRead(context) {
   let result;
   for (;;) {
     const { message } = await context.reader.next();
@@ -781,13 +973,60 @@ async function settleTurn(context, turn, result) {
     return failure === agentBudgetExhausted ? "Spent" : "Continue";
   }
   const measured = context.measure.of(result);
+  const readings = await sessionTurnReadings(context);
   await post(context, sessionPlaneRoutes.turnAnswer.path, {
     turn: turn.turn,
     result: sessionAnswerText(context, turn, result),
     ...context.store.turnBatches(),
     ...(measured === undefined ? {} : { measured }),
+    ...(readings.length === 0 ? {} : { readings }),
   });
   return "Continue";
+}
+
+/**
+ * The readings an answered turn carries, in the order it took them, each one
+ * the contract takes: none to a plane that does not take them, which refuses
+ * the whole answer over the field.
+ */
+async function sessionTurnReadings(context) {
+  if (!versionReaches(context.version, workerContractSessionContext)) return [];
+  const window = await sessionTurnWindow(context);
+  return [
+    ...context.compactions.map((compaction) => ({
+      cause: contextCompactionCause,
+      ...(compaction === undefined ? {} : { compaction }),
+    })),
+    ...(window === undefined ? [] : [{ cause: contextEndCause, window }]),
+  ].filter(
+    (reading) =>
+      sessionTurnAnswerSchema.safeParse({
+        turn: "turn",
+        result: "",
+        readings: [reading],
+      }).success,
+  );
+}
+
+/**
+ * The window as the runtime answers for it at a turn's end, or nothing where
+ * it cannot be asked, fails, or takes longer than `sessionContextUsageWaitMs`.
+ */
+async function sessionTurnWindow(context) {
+  if (typeof context.runtime?.getContextUsage !== "function") return undefined;
+  let asked;
+  try {
+    asked = Promise.resolve(
+      context.runtime.getContextUsage({ detail: "summary" }),
+    );
+  } catch {
+    return undefined;
+  }
+  const usage = await Promise.race([
+    asked.catch(() => undefined),
+    context.pause(sessionContextUsageWaitMs).then(() => undefined),
+  ]);
+  return usage === undefined ? undefined : contextWindow(usage, context.scrub);
 }
 
 /**
@@ -1080,7 +1319,8 @@ function sessionStagedMailbox(context, { request, wait: pause, now }) {
 /**
  * The runtime this session speaks through, opened once over the mailbox's own
  * stream of turns. The checkout reaches it only as `cwd`, so a session with no
- * tree opens exactly the same runtime with the bare workspace under it.
+ * tree opens the same runtime over the bare workspace, or over
+ * `sessionTreeEmpty` where it runs on its own prompt.
  */
 async function sessionRuntime(
   context,
@@ -1224,6 +1464,7 @@ function sessionStopHeard(context, stopped) {
 async function sessionRun(context, facts, opened) {
   const { pause, warn } = opened;
   context.inquiry = facts.kind === "Inquiry";
+  context.leadDecides = (facts.capabilities ?? []).includes(leadDecision);
   context.store = sessionStoreAdapter(context.task, context.bearer, {
     request: context.request,
     retain: !context.inquiry,
@@ -1313,6 +1554,29 @@ export function sessionEnvelopeServices(
   };
 }
 
+/**
+ * What a session runs on before it learns its facts. Its `request` keeps the
+ * latest release a plane's answer named, which is what a turn's readings are
+ * offered to.
+ */
+function sessionMainContext(task, bearer, { request, ...held }) {
+  const context = {
+    task,
+    bearer,
+    ...held,
+    version: undefined,
+    mirrored: false,
+    sightings: rateLimitSightings(),
+    measure: sessionMeasure(),
+  };
+  context.request = async (...asked) => {
+    const answer = await request(...asked);
+    context.version = answeredVersion(answer) ?? context.version;
+    return answer;
+  };
+  return context;
+}
+
 export async function sessionMain(services = {}) {
   const {
     environment = process.env,
@@ -1331,17 +1595,13 @@ export async function sessionMain(services = {}) {
   let stopLease = async () => undefined;
   try {
     const { task, bearer } = await launch();
-    const context = {
-      task,
-      bearer,
+    const context = sessionMainContext(task, bearer, {
       request,
       now,
+      pause,
       minted: services.minted ?? mintedCredentialDirectory,
       scrub,
-      mirrored: false,
-      sightings: rateLimitSightings(),
-      measure: sessionMeasure(),
-    };
+    });
     const facts = await sessionFacts(context);
     const held = await sessionHeld(context, environment, read, write, facts);
     const { credentialFiles, credential, scrubHead, keepSecret } = held;
@@ -1362,6 +1622,8 @@ export async function sessionMain(services = {}) {
         ...held.checkout,
       },
     );
+    if (sessionPromptOwn(facts) && checkout === undefined)
+      await ensureDirectory(sessionTreeEmpty(workspace));
     return await sessionRun(context, facts, {
       environment,
       credential,

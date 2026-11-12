@@ -6,12 +6,14 @@
  * yielding a turn it blocks until the pod says that turn settled, so the runtime
  * cannot be handed a second turn while the first is still being answered — and
  * so nothing belonging to a later turn can arrive while the pod is draining the
- * current one's messages.
+ * current one's messages. The one thing it yields in that wait is the pod's ask
+ * of the turn in flight, which claims nothing: it is that turn's own message.
  *
  * BOTH LOOPS ARE BOUNDED. One request is bounded by the plane's own long poll,
- * and the loop as a whole by the idle bound the pod was launched with: a
- * mailbox that stays empty that long ends the iterable, the query ends with it,
- * and the process exits for the scheduler's idle reaper to collect.
+ * and the loop as a whole by the plane's `Stop` and, where the pod was launched
+ * with one, its idle bound: a mailbox that stays empty that long ends the
+ * iterable, the query ends with it, and the process exits for the scheduler's
+ * idle reaper to collect.
  *
  * A CLAIM IS ANNOUNCED BEFORE THE TURN IS YIELDED, which is what lets the pod
  * reset anything a turn owns — its decision staging — with no way for one turn's
@@ -66,6 +68,11 @@ export function sessionUserMessage(input) {
   };
 }
 
+/** Whether a mailbox empty for `idleForMs` has outlasted its idle bound, which it has not where it has none. */
+function sessionMailboxIdled(bounds, idleForMs) {
+  return bounds.idleMs !== undefined && idleForMs >= bounds.idleMs;
+}
+
 export function sessionMailbox(task, bearer, services = {}) {
   const {
     request = sessionRequest,
@@ -75,13 +82,14 @@ export function sessionMailbox(task, bearer, services = {}) {
   } = services;
   let held;
   let stopped = false;
-  let settle = () => undefined;
-  let awaitSettled = Promise.resolve();
+  let release = () => undefined;
+  let released = Promise.resolve();
   let idleSince;
 
+  /** Blocks the generator until the turn settles, or until the pod asks in it. */
   function hold() {
-    awaitSettled = new Promise((resolve) => {
-      settle = resolve;
+    released = new Promise((resolve) => {
+      release = resolve;
     });
   }
 
@@ -104,24 +112,36 @@ export function sessionMailbox(task, bearer, services = {}) {
     /** What the pod calls once a turn is answered or failed, releasing the next. */
     settled() {
       held = undefined;
-      settle();
+      release();
+    },
+
+    /** One more message into the turn in flight, yielded before it settles. */
+    ask(input) {
+      if (held === undefined)
+        throw new Error("the session mailbox holds no turn to ask in");
+      release(sessionUserMessage(input));
     },
 
     /** What ends the iterable, and with it the query, without another claim. */
     stop() {
       stopped = true;
-      settle();
+      release();
     },
 
     async *turns() {
       for (;;) {
-        await awaitSettled;
+        const asked = await released;
         if (stopped) return;
+        if (asked !== undefined) {
+          hold();
+          yield asked;
+          continue;
+        }
         const turn = await claim();
         if (turn === "Stop") return;
         if (turn === undefined) {
           idleSince ??= now();
-          if (now() - idleSince >= task.bounds.idleMs) return;
+          if (sessionMailboxIdled(task.bounds, now() - idleSince)) return;
           await pause(task.bounds.mailboxPollMs);
           continue;
         }

@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   runTranscriptPage,
   transcriptEntryPreviewCharsMax,
+  transcriptEntryTypesOmitted,
   transcriptPageAnswer,
 } from "./transcriptPage.mjs";
 
@@ -289,4 +290,189 @@ test("a run page names the route's next batch, and a run still writing reads on 
   );
   assert.deepEqual(caughtUp.entries, []);
   assert.equal(caughtUp.next, undefined);
+});
+
+/** A run's init event as the runtime writes it: what it says of the run, and the runtime's own lists beside it. */
+const runInit = {
+  type: "system",
+  subtype: "init",
+  uuid: "i-1",
+  session_id: "s-1",
+  cwd: "/work",
+  model: "claude-opus-5-5",
+  tools: ["Bash", "Edit", "Read"],
+  mcp_servers: [{ name: "chuggy", status: "connected" }],
+  slash_commands: Array.from(
+    { length: 40 },
+    (_, at) => `command-${String(at)}`,
+  ),
+  skills: Array.from({ length: 20 }, (_, at) => `skill-${String(at)}`),
+  plugins: [{ name: "plugin", path: "/plugins/plugin" }],
+  agents: ["general-purpose"],
+  apiKeySource: "none",
+  claude_code_version: "2.1.0",
+  permissionMode: "bypassPermissions",
+};
+
+const runRateLimit = (uuid) => ({
+  type: "rate_limit_event",
+  uuid,
+  rate_limit_info: { status: "allowed", resetsAt: 1_761_739_200 },
+  session_id: "s-1",
+});
+
+const runThinking = (uuid, bytes) => ({
+  type: "assistant",
+  uuid,
+  message: {
+    role: "assistant",
+    content: [
+      {
+        type: "thinking",
+        thinking: "x".repeat(bytes),
+        signature: "E".repeat(600),
+      },
+      { type: "text", text: "editing" },
+    ],
+  },
+});
+
+/** A run's first batch: its init, thinking under signatures, and rate-limit events between them. */
+const runEntries = [
+  runInit,
+  runRateLimit("l-1"),
+  runThinking("t-1", 300),
+  runRateLimit("l-2"),
+  runThinking("t-2", 300),
+  runRateLimit("l-3"),
+  runThinking("t-3", 300),
+];
+
+test("a thinking block goes out without its signature and with the rest of its message", () => {
+  const answer = JSON.parse(
+    transcriptPageAnswer(
+      pageOf(runEntries),
+      { after: 0, entry: 0 },
+      () => true,
+    ),
+  );
+
+  const thought = answer.entries.find(({ uuid }) => uuid === "t-1");
+  assert.deepEqual(thought.message.content, [
+    { type: "thinking", thinking: "x".repeat(300) },
+    { type: "text", text: "editing" },
+  ]);
+  assert.ok(
+    !JSON.stringify(answer).includes('"signature"'),
+    "a signature went out",
+  );
+});
+
+test("the init entry goes out as its model, working directory and tools' names alone", () => {
+  const answer = JSON.parse(
+    transcriptPageAnswer(
+      pageOf(runEntries),
+      { after: 0, entry: 0 },
+      () => true,
+    ),
+  );
+
+  assert.deepEqual(answer.entries[0], {
+    type: "system",
+    subtype: "init",
+    uuid: "i-1",
+    cwd: "/work",
+    model: "claude-opus-5-5",
+    tools: ["Bash", "Edit", "Read"],
+  });
+});
+
+test("a rate-limit event is left out and counted, and the cursor still counts the page as the route answered it", () => {
+  assert.ok(transcriptEntryTypesOmitted.includes("rate_limit_event"));
+  const whole = JSON.parse(
+    transcriptPageAnswer(
+      pageOf(runEntries),
+      { after: 0, entry: 0 },
+      () => true,
+    ),
+  );
+  assert.deepEqual(
+    whole.entries.map(({ uuid }) => uuid),
+    ["i-1", "t-1", "t-2", "t-3"],
+  );
+  assert.deepEqual(whole.omitted, { rate_limit_event: 3 });
+
+  const oneThought = Buffer.byteLength(
+    JSON.stringify(pageOf([], undefined)) +
+      JSON.stringify(runThinking("t-1", 300)),
+  );
+  const narrow = (text) => Buffer.byteLength(text) <= oneThought + 128;
+  const read = [];
+  let pages = 0;
+  let cursor = { after: 0, entry: 0 };
+  while (pages < runEntries.length) {
+    pages += 1;
+    const text = transcriptPageAnswer(pageOf(runEntries), cursor, narrow);
+    assert.ok(narrow(text), `page ${String(pages)} is over the bound`);
+    const answer = JSON.parse(text);
+    const span = runEntries.slice(
+      cursor.entry,
+      answer.next?.entry ?? runEntries.length,
+    );
+    assert.deepEqual(
+      answer.entries.map(({ uuid }) => uuid),
+      span
+        .filter(({ type }) => type !== "rate_limit_event")
+        .map(({ uuid }) => uuid),
+      `page ${String(pages)} did not answer the entries its cursors span`,
+    );
+    const left = span.length - answer.entries.length;
+    assert.deepEqual(
+      answer.omitted,
+      left === 0 ? undefined : { rate_limit_event: left },
+      `page ${String(pages)} did not count what it left out`,
+    );
+    read.push(...answer.entries.map(({ uuid }) => uuid));
+    if (answer.next === undefined) break;
+    cursor = answer.next;
+  }
+
+  assert.deepEqual(read, ["i-1", "t-1", "t-2", "t-3"]);
+  assert.ok(pages > 1, "the page was not read across answers");
+});
+
+test("an entry after a left-out one that fits only without `omitted` beside it is answered whole by the next answer", () => {
+  const edit = {
+    type: "assistant",
+    uuid: "e-1",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "e".repeat(400) }],
+    },
+  };
+  const entries = [runRateLimit("l-1"), edit];
+  const alone = Buffer.byteLength(
+    transcriptPageAnswer(pageOf([edit]), { after: 0, entry: 0 }, () => true) +
+      ',"next":{"after":0,"entry":2}',
+  );
+  const tight = (text) => Buffer.byteLength(text) <= alone;
+  const answers = [];
+  let cursor = { after: 0, entry: 0 };
+  while (answers.length < entries.length) {
+    const text = transcriptPageAnswer(pageOf(entries), cursor, tight);
+    assert.ok(
+      tight(text),
+      `answer ${String(answers.length + 1)} is over the bound`,
+    );
+    const answer = JSON.parse(text);
+    answers.push(answer);
+    if (answer.next === undefined) break;
+    cursor = answer.next;
+  }
+
+  assert.deepEqual(answers[0].entries, []);
+  assert.deepEqual(answers[0].omitted, { rate_limit_event: 1 });
+  assert.deepEqual(answers[0].next, { after: 0, entry: 1 });
+  assert.deepEqual(answers.at(-1).entries, [edit]);
+  assert.equal(answers.at(-1).next, undefined);
 });

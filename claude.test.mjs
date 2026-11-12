@@ -18,8 +18,8 @@ import {
 } from "./checks.mjs";
 import {
   claudeAgent,
+  claudeBrief,
   claudeCredentialPrepared,
-  claudeEnvironment,
   claudeInvocation,
   claudeResult,
   claudeResumeInvocation,
@@ -77,25 +77,26 @@ test("a configured Claude worker composes a valid default Claude invocation", as
     briefing: { text: "briefing" },
   };
 
-  assert.deepEqual(claudeInvocation(task).slice(-4), [
+  assert.deepEqual(claudeInvocation(task).slice(-2), [
     '--mcp-config={"mcpServers":{}}',
     "--allowedTools=Bash,Edit,Read,Write,Glob,Grep",
-    "--",
-    "briefing",
   ]);
-  assert.deepEqual(claudeInvocation(task).slice(0, 5), [
+  assert.deepEqual(claudeInvocation(task).slice(0, 7), [
     "-p",
+    "--input-format",
+    "stream-json",
     "--output-format",
     "stream-json",
     "--verbose",
     "--json-schema",
   ]);
+  assert.equal(claudeBrief(task), "briefing");
 });
 
 /**
- * Catches a resumed run that drops an option of the run it continues, its
- * prompt no longer after `--`, or a session that lands where an option taking
- * every word after it would swallow it.
+ * Catches a resumed run that drops an option of the run it continues, is told
+ * its briefing again, or a session that lands where an option taking every
+ * word after it would swallow it.
  */
 test("a resumed run is the same run in the conversation it left, told the limit reset", () => {
   const task = {
@@ -106,32 +107,19 @@ test("a resumed run is the same run in the conversation it left, told the limit 
 
   const resumed = claudeResumeInvocation(task, "the-session");
 
-  const flags = first.slice(0, first.indexOf("--"));
-  assert.deepEqual(resumed.slice(0, flags.length), flags);
-  assert.deepEqual(resumed.slice(flags.length, flags.length + 3), [
-    "--resume",
-    "the-session",
-    "--",
-  ]);
-  assert.equal(resumed.length, flags.length + 4);
-  assert.match(resumed.at(-1), /limit .*has reset/u);
-  assert.ok(!resumed.includes("briefing"));
+  assert.deepEqual(resumed, [...first, "--resume", "the-session"]);
+  assert.match(claudeBrief(task, "the-session"), /limit .*has reset/u);
+  assert.ok(!claudeBrief(task, "the-session").includes("briefing"));
   assert.equal(claudeAgent.resumeInvocation, claudeResumeInvocation);
+  assert.equal(claudeAgent.brief, claudeBrief);
 });
 
-/** Catches a resumed run told the limit's prompt in place of the one it was given, or told it before `--`. */
-test("a resumed run given a prompt is told that prompt alone, after its options", () => {
+/** Catches a resumed run told the limit's prompt in place of the one it was given, or a first run told a prompt in place of its briefing. */
+test("a resumed run given a prompt is told that prompt alone, as its first message", () => {
   const task = { briefing: { text: "briefing" } };
 
-  const resumed = claudeResumeInvocation(task, "the-session", "-resolve it");
-
-  assert.deepEqual(resumed.slice(-4), [
-    "--resume",
-    "the-session",
-    "--",
-    "-resolve it",
-  ]);
-  assert.ok(!resumed.some((argument) => /limit/u.test(argument)));
+  assert.equal(claudeBrief(task, "the-session", "-resolve it"), "-resolve it");
+  assert.equal(claudeBrief(task, undefined, "-resolve it"), "briefing");
 });
 
 /** Which runtime may resume is what decides whether a limit can be waited out. */
@@ -162,11 +150,11 @@ test("the final structured event is retained after streamed progress", () => {
 });
 
 /**
- * Catches the briefing taken as a value of the option before it, which
- * `--mcp-config` and a worker's own variadic option both take every word
- * after them for, and which leaves a run with no prompt.
+ * Catches the briefing back on the command line, where no message after it
+ * could be sent, or the MCP configuration given as a word `--mcp-config` would
+ * take the next option's words with.
  */
-test("a Claude briefing is the prompt whatever options precede it", () => {
+test("a Claude run reads its briefing from stdin, whatever options precede it", () => {
   for (const configured of [[], ["--allowedTools", "Bash", "Read"]]) {
     const argv = claudeInvocation({
       worker: {
@@ -175,14 +163,16 @@ test("a Claude briefing is the prompt whatever options precede it", () => {
       briefing: { text: "briefing" },
     });
 
-    assert.deepEqual(argv.slice(-2), ["--", "briefing"]);
-    assert.equal(argv.indexOf("--"), argv.length - 2);
+    assert.ok(!argv.includes("briefing"));
+    assert.ok(!argv.includes("--"));
+    assert.equal(argv[argv.indexOf("--input-format") + 1], "stream-json");
+    assert.deepEqual(argv.slice(argv.length - configured.length), configured);
     assert.ok(argv.includes('--mcp-config={"mcpServers":{}}'));
     assert.ok(!argv.includes("--mcp-config"));
   }
 });
 
-/** Catches a worker's `--` making the run's own `--` and briefing two prompts. */
+/** Catches a worker's `--` making the words after it a prompt beside the briefing stdin carries. */
 test("ticket configuration cannot end the run's options itself", () => {
   assert.throws(
     () =>
@@ -359,22 +349,52 @@ function composed(inherited, prepared) {
 }
 
 /**
- * Catches a site pool's Claude Code, whose runner names no kind, given any
- * environment but the one every run had before a kind could be named: a token
- * and the two switches over everything inherited, a stray key included.
+ * Catches an inherited API key outranking the token a run was handed: a site
+ * pool's runner names no kind, and a runner's selector names a subscription's,
+ * and either way the token is the only credential Claude Code finds.
  */
-test("where no kind is named, a Claude run's credential is a subscription's token over an untouched environment", () => {
-  const prepared = claudeCredentialPrepared(token, {
-    path: "/var/run/chuggy/credentials/claude-code",
-    environment: strayEnvironment,
-  });
+test("a Claude OAuth run, named or not, runs on its token alone whatever key it inherits", () => {
+  const inherited = { ...strayEnvironment, ANTHROPIC_API_KEY: key };
+  for (const environment of [
+    inherited,
+    { ...inherited, [claudeCredentialVariable]: '{"kind":"Subscription"}' },
+  ]) {
+    const prepared = claudeCredentialPrepared(token, {
+      path: "/var/run/chuggy/credentials/claude-code",
+      environment,
+    });
+    const ran = composed(inherited, prepared);
 
-  assert.deepEqual(prepared, {
-    environment: { ...claudeEnvironment, CLAUDE_CODE_OAUTH_TOKEN: token },
-    withheld: [],
-    secrets: [token],
-  });
-  assert.deepEqual(claudeAgent.prepareCredential(token), prepared);
+    assert.deepEqual(
+      decidingVariables.filter((name) => Object.hasOwn(ran, name)),
+      ["CLAUDE_CODE_OAUTH_TOKEN"],
+    );
+    assert.equal(ran.CLAUDE_CODE_OAUTH_TOKEN, token);
+    assert.deepEqual(prepared.secrets, [token]);
+  }
+  assert.deepEqual(
+    claudeAgent.prepareCredential(token).withheld,
+    claudeCredentialPrepared(token, {
+      environment: { [claudeCredentialVariable]: '{"kind":"Subscription"}' },
+    }).withheld,
+  );
+});
+
+/** Catches an inherited token outranked by, or outranking, the API key a run was handed. */
+test("a Claude API-key run runs on its key alone whatever token it inherits", () => {
+  const inherited = { ...strayEnvironment, CLAUDE_CODE_OAUTH_TOKEN: token };
+  const ran = composed(
+    inherited,
+    claudeCredentialPrepared(key, {
+      environment: { [claudeCredentialVariable]: '{"kind":"ApiKey"}' },
+    }),
+  );
+
+  assert.deepEqual(
+    decidingVariables.filter((name) => Object.hasOwn(ran, name)),
+    ["ANTHROPIC_API_KEY"],
+  );
+  assert.equal(ran.ANTHROPIC_API_KEY, key);
 });
 
 /** Each kind as its setting, its file, and what it sets that decides the credential Claude Code runs on. */

@@ -90,7 +90,7 @@ export function poolRunnerTokens(credentials) {
 /**
  * @param {PoolCredentials} credentials
  * @param {RunnerIdentity} [runner] the runner's package and version, which each poll names
- * @param {readonly string[]} [capabilities] the runner's capabilities, which each poll names; none, and the set its registration recorded stands
+ * @param {readonly string[]} [capabilities] the runner's capabilities, which each poll names less what its backend withholds then; none, and the set its registration recorded stands
  * @param {number} [idleSecs] how long a session a chat host claims may sit idle, which each poll names; a chat host's alone
  * @param {typeof globalThis.fetch} [fetcher] the fetch the plane is reached by, when not the global one
  * @returns {WorkerPoolClient["plane"]}

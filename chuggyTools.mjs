@@ -64,7 +64,9 @@
  * ticket's work stands, so `read_ticket_landings` leaves out the oldest whole
  * landings until the rest fit, and says so in `truncated`. The contract bounds
  * what one landing weighs, and the suite holds the heaviest one inside an
- * answer.
+ * answer. `read_landing_queues` answers the route's first whole queues that
+ * fit, in the route's order, by repository and then target, since its route's
+ * bound is likewise its tickets' rather than one answer's.
  *
  * ANOTHER IS A CONFIGURATION, ANSWERED BY `path` where it is larger than one
  * answer. Its route answers the canonical whole, bounded by what a
@@ -73,14 +75,26 @@
  * and otherwise an object or an array as the outline of its entries and a
  * string cut to fit, each read on by `offset`. `initialize_draft` draws its
  * route's body under the same bound, since that body carries the canonical
- * too.
+ * too. `read_lead_settings` answers a project's lead settings the same way,
+ * its body the document, since its texts and allowlists can far outweigh
+ * one answer.
  *
- * THREE ARE ANSWERED RESHAPED. `list_repositories` adds to each row whether a
+ * ANOTHER IS AN EPIC, ANSWERED WITH ITS DESCRIPTION CUT where it is larger than
+ * one answer. Its route answers the description whole, bounded by what an epic
+ * may hold rather than by what one answer holds, so `read_epic` answers the
+ * rest of the view whole and the piece of the description from `offset` that
+ * fits, and `revise_epic` sent no `description` keeps the one the epic holds,
+ * so a long one never has to pass through the model to survive a revision.
+ *
+ * SOME ARE ANSWERED RESHAPED. `list_repositories` adds to each row whether a
  * ticket may be filed in it, read from that row alone, and `initialize_draft`
  * leaves out the configuration's `canonical`, which `read_configuration`
  * answers, and its dependency candidates, which are chosen from `list_tickets`;
  * every other field of theirs is as the route answered it. `list_configurations`
- * answers only what a draft is filed against.
+ * answers only what a draft is filed against. `update_lead_settings` answers a
+ * 200 and a `SettingsRevisionConflict` as their status, code and the revision
+ * the settings are now at, since both carry the whole settings, and every
+ * other answer as the API gave it.
  *
  * THE LAST IS AN IMAGE, ANSWERED AS THE FILE IT WAS WRITTEN TO, never as its
  * bytes. Its route answers them as base64, bounded by the largest upload rather
@@ -111,6 +125,24 @@
  * text. No retry, no repair, no hiding a 409. A tool that decided what a refusal
  * meant would be deciding something the API decided.
  *
+ * AN EPIC WRITE MAY READ THE EPIC FIRST. `add_epic_tickets` and
+ * `remove_epic_tickets` always read it and revise it against the revision read,
+ * write nothing where its members would not change, and write once more from a
+ * fresh read where the API answers `StaleRevision`: the revision that went stale
+ * is the one the tool read, never one the model sent, so the retry decides
+ * nothing the API decided. A second stale answer, and every other refusal, is
+ * relayed unaltered. `revise_epic` reads it only when sent no `description`, and
+ * writes the one the epic holds against the revision the model gave, so an epic
+ * that has moved is still refused as stale and never retried.
+ *
+ * BOTH SETTINGS WRITES READ FIRST, and neither retries. `update_lead_settings`
+ * writes the whole override set read, with what the call sets and clears, under
+ * the revision the model gave, so a field the call does not name survives a
+ * write without passing through the model, and settings that moved since the
+ * model read them are refused as stale. `update_placement` writes the routes
+ * read with the ones the call names, and always names the lead's offering,
+ * since the API keeps the stored one for an offering left out, not the one read.
+ *
  * WHAT A PROJECT TOOL SENDS IS SCRUBBED. Its arguments are the model's, and the
  * model has read whatever its shell could, so every string of them, a key's
  * included, has the session's secrets replaced before a path, a query or a
@@ -127,10 +159,19 @@
  * that capability too, which is what keeps them from a roster that does not
  * hold it, and `dispatch_ticket` is under `TicketDispatch` alone.
  *
+ * AN OFFER TOOL REACHES NO ROUTE AND WRITES NOTHING. `navigate`, `offer_release`
+ * and `offer_revoke` are under `ThreadOffer` alone, and each checks its input
+ * against the contract's own schema and answers. The call standing in the
+ * transcript is the whole of what it does: the console reads it there, and
+ * draws nothing of a call answered as an error. So each is `exact`: its input
+ * schema refuses a key it does not declare, where every other tool's drops it,
+ * because a dropped key still stands in the stored call the console parses.
+ *
  * `zod` IS A PEER DEPENDENCY OF THE AGENT SDK, NOT ONE OF ITS DEPENDENCIES, so
  * the shapes are functions of a `z` the caller resolves rather than of an import
  * here, and the image's build probes are what prove the peer is installed and is
- * the one the contract parses with.
+ * the one the contract parses with. That one instance is also why a draft
+ * write's `brief`, `authoring` and `selection` are the contract's own schemas.
  */
 
 import { Buffer } from "node:buffer";
@@ -144,13 +185,18 @@ import { sessionStoreBatchBytesMax } from "@chuggy/worker-contract/sessionPlane"
 import {
   agenticRefusalsAnsweredMax,
   allChuggyTools,
+  authoringSchema,
   briefLineCharsMax,
+  briefSchema,
   builtInToolCapabilities,
   chuggyDocsIndex,
   chuggyToolCapabilities,
   chuggyToolDocsResponseBytesMax,
   chuggyToolDispatchViewResponseBytesMax,
+  chuggyToolEpicViewResponseBytesMax,
   chuggyToolImageResponseBytesMax,
+  chuggyToolLandingQueuesResponseBytesMax,
+  chuggyToolLeadSettingsResponseBytesMax,
   chuggyToolNames,
   chuggyToolPrefix,
   chuggyToolResponseBytesMax,
@@ -160,12 +206,25 @@ import {
   chuggyToolServerName,
   chuggyToolTicketLandingsResponseBytesMax,
   chuggyToolTimeoutMs,
+  configurationSelectionSchema,
+  consolePageSchema,
   dependentRelationsAdmitted,
+  epicContentBytesMax,
+  epicPageLimitMax,
+  epicSummaryCharsMax,
+  epicTicketsMax,
+  epicTitleCharsMax,
   imageMediaTypes,
+  landingQueueTicketsAnsweredMax,
+  leadOfferings,
   nativeHttpMediaType,
   nativeHttpPageItemsMax,
+  placementRoutes,
   projectArtifactEncoding,
   selectorHistoryLimitMax,
+  selectorProjectOverridesSchema,
+  threadOfferReleaseSchema,
+  threadOfferRevokeSchema,
   threadTurnsAnsweredMax,
   ticketLandingsAnsweredMax,
 } from "@chuggy/worker-contract/sessionTools";
@@ -188,22 +247,111 @@ const executionStatuses = [
   "Cancelled",
 ];
 
-const chuggySelectionDescription = `\`selection\` is for a configuration that is a catalog, one whose read_configuration \`canonical\` has \`version\` 2: {work?, evaluation?, finalization?, configuration?}, the first three each the name of one of its \`workloads\`, \`plans\` or \`finalizers\` the ticket runs on in place of the catalog's \`defaults\`, and a field left out is that default; \`configuration\` is "Pinned" or "Latest": under Latest a waiting ticket moves to its configuration's newest revision wherever that changes what it runs, and left out it is the catalog's \`defaults.configuration\`, or Pinned where that names none, and a ticket whose program leaves out part of its plan does not move. A draft on any other configuration carries none, and a selection naming anything is refused there.`;
+/** Which revision of its configuration a ticket follows, said once: in the open selection's sentence and on the published selection's field. */
+const selectionConfigurationSays = `"Pinned" or "Latest": under Latest a waiting ticket moves to its configuration's newest revision wherever that changes what it runs, and left out it is the catalog's \`defaults.configuration\`, or Pinned where that names none, and a ticket whose program leaves out part of its plan does not move`;
+
+const chuggySelectionDescription = `\`selection\` is for a configuration that is a catalog, one whose read_configuration \`canonical\` has \`version\` 2: {work?, evaluation?, finalization?, configuration?}, the first three each the name of one of its \`workloads\`, \`plans\` or \`finalizers\` the ticket runs on in place of the catalog's \`defaults\`, and a field left out is that default; \`configuration\` is ${selectionConfigurationSays}. A draft on any other configuration carries none, and a selection naming anything is refused there.`;
 
 const chuggyOverridesDescription = `\`overrides\` is what this ticket replaces of its configuration. On a catalog it is {workloads}, each key the name the catalog holds a workload under and each value the fields of that workload it replaces; on any other configuration it is {worker?, practices?, brief?, work?} with \`work\` holding only \`instructions\`. A field named replaces that field's whole and nothing is merged, so changing a workload's model means sending its whole \`worker\`, such as {"workloads": {"build": {"worker": {"mode": {"type": "SingleAgent", "agent": "Codex", "arguments": [], "model": "<model>"}, "setup": [], "files": []}}}}. read_configuration with a \`path\`, such as ["workloads", "build", "worker"], reads the field to start from. Left out, the ticket overrides nothing.`;
 
 /**
- * What a session is told a brief carries, `brief` being an open object on the
- * wire. An intent is bounded as a whole and by nothing a line at a time, so a
- * session is told what bounds one and nothing about where its lines break. It
- * describes the `brief` parameter rather than each tool, since it is longer
- * than the part of a tool's description Claude Code passes an agent.
+ * What each field of a brief is, said once: as a sentence on the field where
+ * a draft write publishes the brief's shape, and in the field-by-field
+ * sentence where `brief` is an open object.
  */
-const chuggyBriefDescription = `\`brief\` is {title?, intent, links, images?, checks?, repository?, branch?, finalization?}: \`title\` is optional in the contract, so always give one — one short line naming the work, which the console lists tickets by; \`intent\` is what the ticket is for, in your own words — one text bounded only as a whole, with no bound on a line of it or on how many lines it has; \`repository\` is the repository the work happens in, by the clone URL list_repositories answers, which list_configurations answers as an imported configuration's \`repository\`, and a draft carrying none is refused when it is released; \`images\` are this project's images the work is handed, each by the identity fetch_image takes; \`checks\` are command lines added to the first Check stage the configuration runs as commands, each one line of 1 to ${String(briefLineCharsMax)} characters with no tab, line break or other control character in it, and initialize_draft answers that stage as \`commandedCheckStage\`, its program stage key, counted from one, and in words as \`commandedCheckStageNote\` (the same stage and, for a catalog, its plan, or that none does and which plans would), and a draft carrying them whose program leaves out that stage, or for a catalog the evaluator in it that runs commands, is refused when it is released whoever releases it (ProgramSkipsBriefChecks), and where it answers none a draft carrying checks is refused when it is released (BriefChecksUncommanded), and each runs under sh -eu with the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown, so a check that runs only what changed reads it as \${CHUG_CHANGE_BASE-} and runs everything where that is empty; \`branch\` is the refs/heads/ branch the work happens on, which the repository need not hold yet; \`finalization\` is how the work lands, and a brief naming none takes, on a version 2 catalog, the landing of the finalizer its selection lands with where that finalizer names one, and otherwise its repository's landing default, which for a newly bound repository is a pull request; the write's answer carries \`landing\`, the mode and target it stored, and its \`source\`: Brief, Finalizer, Repository, or Default for a brief naming no repository; a landing by PullRequest or PullRequestMerge opens its pull request from \`branch\` into the finalization's \`target\`, or into the repository's default branch where none is named, so whenever the landing is a pull request \`branch\` is a branch of its own, never the \`target\`, and where no target is named never the default branch; a \`branch\` that is the default branch with no target named is accepted when filed and then held by the finalizer (ProposalBaseIsHead). A 400 names the rule the brief broke, and for a check its position in \`checks\`, counted from zero.`;
+const briefFieldSays = {
+  title:
+    "one short line naming the work, which the console lists tickets by, optional in the contract, so always give one",
+  intent:
+    "what the ticket is for, in your own words: one text bounded only as a whole, with no bound on a line of it or on how many lines it has",
+  links: "what to read first, each an https:// URL, [] where there is nothing",
+  images:
+    "this project's images the work is handed, each by the identity fetch_image takes",
+  checks:
+    "command lines added to the first Check stage the configuration runs as commands, each one line with no tab, line break or other control character in it, which runs under sh -eu with the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown, so a check that runs only what changed reads it as ${CHUG_CHANGE_BASE-} and runs everything where that is empty",
+  repository:
+    "the repository the work happens in, by the clone URL list_repositories answers, which list_configurations answers as an imported configuration's `repository`",
+  branch:
+    "the refs/heads/ branch the work happens on, which the repository need not hold yet",
+  finalization:
+    "how the work lands: its `mode`, and for any mode but None the `target` branch, left out for the branch the work happened on under Push and the repository's default branch under a pull request",
+  landing:
+    "how a Push or PullRequestMerge finalization is ordered against the others on its target, one of Direct, Serialized or Stacked, and left out it is Direct",
+};
 
-/** What a draft's brief is first told: the least a ticket can be filed with, ahead of everything a brief may carry. */
-const chuggyDraftBriefDescription = `The minimum brief is {title, intent, links: [], repository: <clone URL from list_repositories>, branch: "refs/heads/<a new branch of your own>"}.
-${chuggyBriefDescription}`;
+/**
+ * What a brief is told beside its fields, none of which one field can carry:
+ * what a release refuses for what the brief holds, the landing and branch
+ * rules, and what a refusal names.
+ */
+const briefRulesSay = `A draft carrying no \`repository\` is refused when it is released. \`checks\` join the stage initialize_draft answers as \`commandedCheckStage\`, its program stage key, counted from one, and in words as \`commandedCheckStageNote\` (the same stage and, for a catalog, its plan, or that none does and which plans would): a draft carrying them whose program leaves out that stage, or for a catalog the evaluator in it that runs commands, is refused when it is released whoever releases it (ProgramSkipsBriefChecks), and where it answers none a draft carrying checks is refused when it is released (BriefChecksUncommanded). A brief naming no \`finalization\` takes, on a version 2 catalog, the landing of the finalizer its selection lands with where that finalizer names one, and otherwise its repository's landing default, which for a newly bound repository is a pull request; the write's answer carries \`landing\`, the mode and target it stored, and its \`source\`: Brief, Finalizer, Repository, or Default for a brief naming no repository. A landing by PullRequest or PullRequestMerge opens its pull request from \`branch\` into the finalization's \`target\`, or into the repository's default branch where none is named, so whenever the landing is a pull request \`branch\` is a branch of its own, never the \`target\`, and where no target is named never the default branch; a \`branch\` that is the default branch with no target named is accepted when filed and then held by the finalizer (ProposalBaseIsHead). A 400 names the rule the brief broke, and for a check its position in \`checks\`, counted from zero.`;
+
+/**
+ * What a session is told a brief carries where `brief` is an open object on
+ * the wire. It describes the `brief` parameter rather than each tool, since it
+ * is longer than the part of a tool's description Claude Code passes an agent.
+ */
+const chuggyBriefDescription = `\`brief\` is {title?, intent, links, images?, checks?, repository?, branch?, finalization?, landing?}: \`title\` is ${briefFieldSays.title}; \`intent\` is ${briefFieldSays.intent}; \`links\` are ${briefFieldSays.links}; \`images\` are ${briefFieldSays.images}; \`checks\` are ${briefFieldSays.checks}, a check being 1 to ${String(briefLineCharsMax)} characters; \`repository\` is ${briefFieldSays.repository}; \`branch\` is ${briefFieldSays.branch}; \`finalization\` is ${briefFieldSays.finalization}; \`landing\` is ${briefFieldSays.landing}. ${briefRulesSay}`;
+
+/** What a draft's brief is told beside the fields it publishes: the least a ticket can be filed with, and the rules. */
+const chuggyDraftBriefDescription = `The minimum brief is {title, intent, links: [], repository: <clone URL from list_repositories>, branch: "refs/heads/<a new branch of your own>"}. ${briefRulesSay}`;
+
+/**
+ * A contract schema with a description on each of its fields. It is the
+ * contract's own object extended, so its bounds and refinements are the
+ * contract's and nothing here restates one.
+ */
+function described(schema, descriptions) {
+  return schema.safeExtend(
+    Object.fromEntries(
+      Object.keys(schema.shape).map((field) => [
+        field,
+        schema.shape[field].describe(descriptions[field]),
+      ]),
+    ),
+  );
+}
+
+/** The brief a draft write takes, as the contract shapes it, each field said as a sentence. */
+const draftBrief = described(
+  briefSchema,
+  Object.fromEntries(
+    Object.entries(briefFieldSays).map(([field, says]) => [
+      field,
+      `${says.charAt(0).toUpperCase()}${says.slice(1)}.`,
+    ]),
+  ),
+);
+
+/** The authoring a draft write takes, as the contract shapes it. */
+const draftAuthoring = described(authoringSchema, {
+  dependencies:
+    "The tickets this one waits on, by number, chosen from list_tickets, each once.",
+  program:
+    "The stages the ticket is evaluated by, in order: initialize_draft's `defaults.program` unless you mean otherwise.",
+});
+
+/** The selection a draft write takes, as the contract shapes it. */
+const draftSelection = described(configurationSelectionSchema, {
+  work: "The name of the catalog's `workloads` entry the ticket works under.",
+  evaluation:
+    "The name of the catalog's `plans` entry the ticket is evaluated by.",
+  finalization:
+    "The name of the catalog's `finalizers` entry the ticket lands with.",
+  configuration: `${selectionConfigurationSays}.`,
+});
+
+/** What a draft write's authoring is, beside what its fields carry. */
+const chuggyDraftAuthoringDescription = `How the machine runs the ticket: pass initialize_draft's \`defaults\` unchanged unless you mean otherwise.`;
+
+/** What a draft write's selection is, beside the names its fields carry. */
+const chuggyDraftSelectionDescription = `For a configuration that is a catalog, one whose read_configuration \`canonical\` has \`version\` 2: the entries the ticket runs on in place of the catalog's \`defaults\`, and a field left out is that default. A draft on any other configuration carries none, and a selection naming anything is refused there.`;
+
+/** How an epic write is refused, which every tool that writes one says. */
+const chuggyEpicWriteRefusals = `A write is answered as the API answers it, its status and body unaltered: 409 with the \`code\` StaleRevision and the epic's \`current\` revision where it moved since it was read, UnknownTickets and the \`tickets\` that are neither a ticket nor a draft of the project, ArchivedEpic where an Archived epic's tickets would change, EmptyTitle, LongTitle, LongSummary, ManyTickets or LargeContent for content an epic may not hold; 404 for no such epic; and 403 where your owner may read epics and not write them, which read_abilities says beforehand.`;
+
+const chuggyDraftEpicDescription =
+  "An epic the draft's ticket joins, in the same write, as list_epics answers its number; left out, it joins none. An epic that does not exist, is Archived or would hold too much is refused 409 with nothing filed, its `code` MissingEpic, ArchivedEpic, ManyTickets or LargeContent.";
 
 /** What a draft's authoring carries, which initialize_draft answers the defaults of. */
 const chuggyAuthoringDescription = `\`authoring\` is {program, dependencies}: pass initialize_draft's \`defaults\` unchanged unless you mean otherwise, and \`dependencies\` are ticket numbers chosen from list_tickets.`;
@@ -627,6 +775,65 @@ async function readTicketLandings(context, path) {
     : answered(answer);
 }
 
+/** A landing queues route's body, or nothing where it is not one as the route answers one. */
+function readLandingQueuesBody(text) {
+  let answer;
+  try {
+    answer = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  const queues = answer?.queues;
+  return Array.isArray(queues) &&
+    queues.length <= landingQueueTicketsAnsweredMax &&
+    typeof answer.truncated === "boolean"
+    ? answer
+    : undefined;
+}
+
+/**
+ * A project's landing queues as one answer: the route's first whole queues
+ * that fit, in its order, and `truncated` where the route left tickets out or
+ * this answer left queues out. Nothing is answered where the route's first
+ * queue alone does not fit, because a queue is never cut.
+ */
+function readLandingQueuesAnswer(body) {
+  const { queues } = body;
+  if (queues.length === 0) return JSON.stringify(body);
+  for (let kept = queues.length; kept > 0; kept -= 1) {
+    const answer = JSON.stringify({
+      ...body,
+      queues: queues.slice(0, kept),
+      truncated: body.truncated || kept < queues.length,
+    });
+    if (chuggyToolAnswerFits(answer)) return answer;
+  }
+  return undefined;
+}
+
+/** A project's landing queues, the route's first whole queues kept where they are more than one answer holds. */
+async function readLandingQueues(context, path) {
+  const body = await drawn(
+    context,
+    path,
+    chuggyToolLandingQueuesResponseBytesMax,
+    "this project's landing queues",
+  );
+  if (body.refused !== undefined) return body.refused;
+  const queues = readLandingQueuesBody(body.text);
+  if (queues === undefined)
+    return answered(
+      `the landing queues route answered HTTP ${String(body.status)} with a body that is not a project's landing queues as the contract answers them.`,
+      true,
+    );
+  const answer = readLandingQueuesAnswer(queues);
+  return answer === undefined
+    ? answerTooLarge(
+        "the route's first queue is larger alone, so it cannot be answered",
+      )
+    : answered(answer);
+}
+
 /**
  * A read whose route's body is answered as `reshape` makes it, in place of
  * verbatim: `undefined` from `reshape` is a body that is not `what` as the
@@ -659,29 +866,29 @@ async function readReshaped(
 }
 
 /** The longest a child's JSON may be and still be written whole in an outline. */
-export const readConfigurationChildCharsMax = 255;
+export const readAtPathChildCharsMax = 255;
 
 /** The most keys a `path` may walk. */
-const readConfigurationPathKeysMax = 64;
+const readAtPathPathKeysMax = 64;
 
 /** The longest key a `path` may name. */
-const readConfigurationKeyCharsMax = 1_024;
+const readAtPathKeyCharsMax = 1_024;
 
 /** What `value` is, as an outline or a refusal names it. */
-function readConfigurationKind(value) {
+function readAtPathKind(value) {
   if (value === null) return "null";
   return Array.isArray(value) ? "array" : typeof value;
 }
 
 /** An object's or an array's entries as key and child, an array's keyed by index. */
-function readConfigurationEntries(value) {
+function readAtPathEntries(value) {
   return Array.isArray(value)
     ? value.map((child, index) => [index, child])
     : Object.entries(value);
 }
 
 /** The index `key` names in an array of `length`, or nothing where it names none. */
-function readConfigurationIndex(key, length) {
+function readAtPathIndex(key, length) {
   const index =
     typeof key === "string" && /^(0|[1-9][0-9]*)$/.test(key)
       ? Number(key)
@@ -690,9 +897,9 @@ function readConfigurationIndex(key, length) {
 }
 
 /** The child `key` names in `value`, or nothing where `value` holds none by it. */
-function readConfigurationChild(value, key) {
+function readAtPathChild(value, key) {
   if (Array.isArray(value)) {
-    const index = readConfigurationIndex(key, value.length);
+    const index = readAtPathIndex(key, value.length);
     return index === undefined ? undefined : { child: value[index] };
   }
   return value !== null &&
@@ -708,7 +915,7 @@ function readConfigurationChild(value, key) {
  * not, or `total` where that fits: the largest that fits wherever a larger
  * count never composes a lighter answer. `compose(0)` fits.
  */
-function readConfigurationFitting(total, compose) {
+function chuggyToolAnswerFitting(total, compose) {
   let low = 0;
   let high = total;
   while (low < high) {
@@ -719,10 +926,10 @@ function readConfigurationFitting(total, compose) {
   return low;
 }
 
-/** Why `path` walks out of the document at its `depth`th key, naming what is there instead. */
-function readConfigurationMissing(path, depth, value) {
-  const opening = `the configuration holds no ${JSON.stringify(path[depth])} at ${JSON.stringify(path.slice(0, depth))}`;
-  const kind = readConfigurationKind(value);
+/** Why `path` walks out of the document at its `depth`th key, naming what is there instead, `holds` saying whose document it is. */
+function readAtPathMissing(holds, path, depth, value) {
+  const opening = `${holds} no ${JSON.stringify(path[depth])} at ${JSON.stringify(path.slice(0, depth))}`;
+  const kind = readAtPathKind(value);
   if (Array.isArray(value))
     return value.length === 0
       ? `${opening}, which is an empty array.`
@@ -734,30 +941,29 @@ function readConfigurationMissing(path, depth, value) {
     const left = keys.length - named;
     return `${opening}, which is an object whose keys are ${JSON.stringify(keys.slice(0, named))}${left > 0 ? ` and ${String(left)} more` : ""}.`;
   };
-  return compose(readConfigurationFitting(keys.length, compose));
+  return compose(chuggyToolAnswerFitting(keys.length, compose));
 }
 
 /** One outline entry: its key, and its child whole where that is short, or what the child is. */
-function readConfigurationOutlineEntry([key, child]) {
+function readAtPathOutlineEntry([key, child]) {
   const text = JSON.stringify(child);
-  if (text.length <= readConfigurationChildCharsMax)
-    return { key, value: child };
-  const kind = readConfigurationKind(child);
+  if (text.length <= readAtPathChildCharsMax) return { key, value: child };
+  const kind = readAtPathKind(child);
   return kind === "string"
     ? { key, kind, chars: child.length }
     : {
         key,
         kind,
-        entries: readConfigurationEntries(child).length,
+        entries: readAtPathEntries(child).length,
         chars: text.length,
       };
 }
 
 /** An object or an array too large for one answer, as the outline of its entries from `offset` that fits. */
-function readConfigurationOutline(head, path, value, offset) {
-  const kind = readConfigurationKind(value);
-  const entries = readConfigurationEntries(value);
-  const outline = entries.slice(offset).map(readConfigurationOutlineEntry);
+function readAtPathOutline(head, path, value, offset) {
+  const kind = readAtPathKind(value);
+  const entries = readAtPathEntries(value);
+  const outline = entries.slice(offset).map(readAtPathOutlineEntry);
   const compose = (listed) => {
     const left = outline.length - listed;
     const next = offset + listed;
@@ -772,7 +978,7 @@ function readConfigurationOutline(head, path, value, offset) {
       note: `This ${kind} is larger than one answer holds, so this is its outline: each entry's child whole where it is short, and otherwise its kind, its entries and its length in characters. ${left > 0 ? `${String(left)} entries are left, which offset ${String(next)} reads on from. ` : ""}Append an entry's key to path to read that child.`,
     })}`;
   };
-  return compose(readConfigurationFitting(outline.length, compose));
+  return compose(chuggyToolAnswerFitting(outline.length, compose));
 }
 
 /**
@@ -781,7 +987,7 @@ function readConfigurationOutline(head, path, value, offset) {
  * more than the one a unit longer, because JSON escapes the lone half, so the
  * piece found never ends inside one.
  */
-function readConfigurationCut(head, path, value, offset) {
+function readAtPathCut(head, path, value, offset) {
   const compose = (taken) => {
     const next = offset + taken;
     const left = value.length - next;
@@ -798,41 +1004,42 @@ function readConfigurationCut(head, path, value, offset) {
           : "This is the string's end.",
     })}`;
   };
-  return compose(readConfigurationFitting(value.length - offset, compose));
+  return compose(chuggyToolAnswerFitting(value.length - offset, compose));
 }
 
 /**
- * The answer at `path` in a configuration's parsed canonical `document`: the
- * value whole where it fits, an object or an array too large as its outline,
- * and a string too long as a piece of it, both read on from by `offset`. A
- * `path` the document does not hold, or an `offset` past the end, is refused.
+ * The answer at `path` in a parsed `document`, a configuration's canonical or
+ * a body read like one, whose refusal `holds` names: the value whole where it
+ * fits, an object or an array too large as its outline, and a string too long
+ * as a piece of it, both read on from by `offset`. A `path` the document does
+ * not hold, or an `offset` past the end, is refused.
  */
-function readConfigurationAnswer(status, document, path, offset = 0) {
+function readAtPathAnswer(holds, status, document, path, offset = 0) {
   let value = document;
   for (const [depth, key] of path.entries()) {
-    const held = readConfigurationChild(value, key);
+    const held = readAtPathChild(value, key);
     if (held === undefined)
-      return answered(readConfigurationMissing(path, depth, value), true);
+      return answered(readAtPathMissing(holds, path, depth, value), true);
     value = held.child;
   }
   const head = `HTTP ${String(status)}\n`;
   const whole = `${head}${JSON.stringify(value)}`;
   if (chuggyToolAnswerFits(whole)) return answered(whole);
-  const kind = readConfigurationKind(value);
+  const kind = readAtPathKind(value);
   const length =
-    kind === "string" ? value.length : readConfigurationEntries(value).length;
+    kind === "string" ? value.length : readAtPathEntries(value).length;
   if (offset > length)
     return answered(
       `offset ${String(offset)} is past the end of this ${kind}, which has ${String(length)} ${kind === "string" ? "characters" : "entries"}.`,
       true,
     );
   return kind === "string"
-    ? answered(readConfigurationCut(head, path, value, offset))
-    : answered(readConfigurationOutline(head, path, value, offset));
+    ? answered(readAtPathCut(head, path, value, offset))
+    : answered(readAtPathOutline(head, path, value, offset));
 }
 
 /** A configuration route's body's canonical document, parsed, or nothing where the body is not one. */
-function readConfigurationDocument(text) {
+function readAtPathConfigurationDocument(text) {
   try {
     const { canonical } = JSON.parse(text) ?? {};
     return typeof canonical === "string"
@@ -843,30 +1050,57 @@ function readConfigurationDocument(text) {
   }
 }
 
+/** A body that is itself the document a `path` walks, parsed, or nothing where it is not a JSON object. */
+function readAtPathLeadSettingsDocument(text) {
+  try {
+    const document = JSON.parse(text);
+    return document !== null && typeof document === "object"
+      ? { document }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** What each read by `path` draws its body under, parses it as, and calls it whole, as a kind, and as what holds a `path`. */
+const readAtPathRoutes = {
+  configuration: {
+    bytesMax: chuggyToolDispatchViewResponseBytesMax,
+    documentOf: readAtPathConfigurationDocument,
+    whole: "this configuration",
+    what: "a configuration",
+    holds: "the configuration holds",
+  },
+  selectorSettings: {
+    bytesMax: chuggyToolLeadSettingsResponseBytesMax,
+    documentOf: readAtPathLeadSettingsDocument,
+    whole: "these lead settings",
+    what: "lead settings",
+    holds: "the lead settings hold",
+  },
+};
+
 /**
- * One configuration revision. With no `path`, a body that fits one answer is
- * answered verbatim; otherwise its canonical is parsed and
- * answered at `path` by `readConfigurationAnswer`. It is drawn under a bound
- * its whole canonical fits, which the route's own body bound is not.
+ * One body read by `path`, as `readAtPathRoutes` names its `read`. With no
+ * `path`, a body that fits one answer is answered verbatim; otherwise its
+ * document is parsed and answered at `path` by `readAtPathAnswer`. It
+ * is drawn under a bound its whole document fits, which the route's own body
+ * bound is not.
  */
-async function readConfiguration(context, route, path, offset) {
-  const body = await drawn(
-    context,
-    route,
-    chuggyToolDispatchViewResponseBytesMax,
-    "this configuration",
-  );
+async function readAtPath(context, path, read, at, offset) {
+  const { bytesMax, documentOf, whole, what, holds } = readAtPathRoutes[read];
+  const body = await drawn(context, path, bytesMax, whole);
   if (body.refused !== undefined) return body.refused;
   const verbatim = `HTTP ${String(body.status)}\n${body.text}`;
-  if (path === undefined && chuggyToolAnswerFits(verbatim))
+  if (at === undefined && chuggyToolAnswerFits(verbatim))
     return answered(verbatim);
-  const parsed = readConfigurationDocument(body.text);
+  const parsed = documentOf(body.text);
   return parsed === undefined
     ? answered(
-        `the configuration route answered HTTP ${String(body.status)} with a body that is not a configuration as the contract answers it.`,
+        `the ${read} route answered HTTP ${String(body.status)} with a body that is not ${what} as the contract answers it.`,
         true,
       )
-    : readConfigurationAnswer(body.status, parsed.document, path ?? [], offset);
+    : readAtPathAnswer(holds, body.status, parsed.document, at ?? [], offset);
 }
 
 /** Why a ticket filed in a listed binding would not run, or nothing where it would. */
@@ -1207,6 +1441,338 @@ function submit(context, mutation) {
   );
 }
 
+/** Whether a refused epic write's body says the revision it was written against is no longer the epic's. */
+function epicWriteStale(status, text) {
+  if (status !== 409) return false;
+  try {
+    return JSON.parse(text)?.error?.code === "StaleRevision";
+  } catch {
+    return false;
+  }
+}
+
+/** The fields of an epic read that a revision of it carries over, or nothing where the body is not an epic as the route answers one. */
+function epicRevisable(text) {
+  let view;
+  try {
+    view = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  const { revision, title, summary, description, visibility, tickets } =
+    view ?? {};
+  return Number.isSafeInteger(revision) &&
+    typeof title === "string" &&
+    typeof description === "string" &&
+    (summary === undefined || typeof summary === "string") &&
+    (visibility === "Active" || visibility === "Archived") &&
+    Array.isArray(tickets) &&
+    tickets.every(Number.isSafeInteger)
+    ? { revision, title, summary, description, visibility, tickets }
+    : undefined;
+}
+
+/**
+ * One epic. A view that fits one answer is answered verbatim; one that does
+ * not, or any read with an `offset`, is answered with its description cut to
+ * the piece from `offset` that fits and how much of it is left. It is drawn
+ * under the epic view's own bound, which an ordinary read's is not.
+ */
+async function readEpic(context, epic, offset) {
+  const body = await drawn(
+    context,
+    projectPath(context, "epic", { epic }),
+    chuggyToolEpicViewResponseBytesMax,
+    "this epic",
+  );
+  if (body.refused !== undefined) return body.refused;
+  const head = `HTTP ${String(body.status)}\n`;
+  if (offset === undefined && chuggyToolAnswerFits(`${head}${body.text}`))
+    return answered(`${head}${body.text}`);
+  const view = readEpicView(body.text);
+  if (view === undefined)
+    return answered(
+      `the epic route answered HTTP ${String(body.status)} with a body that is not an epic as the contract answers one.`,
+      true,
+    );
+  const { description } = view;
+  const start = offset ?? 0;
+  if (start > description.length)
+    return answered(
+      `offset ${String(start)} is past the end of this epic's description, which has ${String(description.length)} characters.`,
+      true,
+    );
+  const compose = (taken) => {
+    const next = start + taken;
+    const left = description.length - next;
+    return `${head}${JSON.stringify({
+      ...view,
+      description: description.slice(start, next),
+      descriptionChars: description.length,
+      descriptionOffset: start,
+      descriptionCharsLeft: left,
+      note:
+        left > 0
+          ? `This description is longer than one answer holds; ${String(left)} characters are left, which offset ${String(next)} reads on from.`
+          : "This is the description's end.",
+    })}`;
+  };
+  return answered(
+    compose(chuggyToolAnswerFitting(description.length - start, compose)),
+  );
+}
+
+/** An epic read's view, parsed, or nothing where its body is not an object carrying a description. */
+function readEpicView(text) {
+  try {
+    const view = JSON.parse(text);
+    return typeof view?.description === "string" ? view : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * An epic revised whole from the arguments, its description the one the epic
+ * holds where they leave it out. That one is read and written against
+ * `expectedRevision`, so a description that moved since is refused as stale
+ * rather than carried over.
+ */
+async function reviseEpic(context, args) {
+  let { description } = args;
+  if (description === undefined) {
+    const body = await drawn(
+      context,
+      projectPath(context, "epic", { epic: args.epic }),
+      chuggyToolEpicViewResponseBytesMax,
+      "this epic",
+    );
+    if (body.refused !== undefined) return body.refused;
+    const held = epicRevisable(body.text);
+    if (held === undefined)
+      return answered(
+        `the epic route answered HTTP ${String(body.status)} with a body that is not an epic as the contract answers one.`,
+        true,
+      );
+    description = held.description;
+  }
+  return write(context, projectPath(context, "epics"), "POST", {
+    kind: "Revise",
+    epic: args.epic,
+    expected: args.expectedRevision,
+    content: epicContentOf({ ...args, description }),
+  });
+}
+
+/**
+ * An epic's members changed and nothing else: the epic is read, `change` names
+ * the members it is to have (nothing where it already has them, so nothing is
+ * written), and the revision is written against the one read. A write the API
+ * refuses as stale is read and written once more, since only this call's own
+ * read went stale; any other refusal is relayed as a write's is, and so is a
+ * second stale one.
+ */
+async function epicMembersChanged(context, epic, change, unchanged) {
+  for (let attempt = 0; ; attempt += 1) {
+    const body = await drawn(
+      context,
+      projectPath(context, "epic", { epic }),
+      chuggyToolEpicViewResponseBytesMax,
+      "this epic",
+    );
+    if (body.refused !== undefined) return body.refused;
+    const held = epicRevisable(body.text);
+    if (held === undefined)
+      return answered(
+        `the epic route answered HTTP ${String(body.status)} with a body that is not an epic as the contract answers one.`,
+        true,
+      );
+    const tickets = change(held.tickets);
+    if (tickets === undefined)
+      return answered(
+        `${unchanged(held.tickets)}, so nothing was written; it stays at revision ${String(held.revision)}.`,
+      );
+    const { revision, ...content } = held;
+    const response = await context.request(
+      context.task,
+      context.bearer,
+      projectPath(context, "epics"),
+      {
+        method: "POST",
+        headers: { "content-type": nativeHttpMediaType },
+        body: JSON.stringify({
+          kind: "Revise",
+          epic,
+          expected: revision,
+          content: { ...content, tickets },
+        }),
+      },
+    );
+    const { text } = await chuggyBoundedBody(
+      response,
+      chuggyToolResponseBytesMax,
+    );
+    if (attempt === 0 && epicWriteStale(response.status, text)) continue;
+    return answered(
+      `HTTP ${String(response.status)}\n${text}`,
+      response.status >= 400,
+    );
+  }
+}
+
+/** Every field a project's lead settings may override, each of which update_lead_settings sets or clears. */
+const updateLeadSettingsFields = Object.keys(
+  selectorProjectOverridesSchema.shape,
+);
+
+/** Why a settings write is refused before it reads anything, or nothing where it may go on: `set` is the contract's overrides, and every field is named once. */
+function updateLeadSettingsRefusal(set, clear) {
+  if (Object.keys(set).length === 0 && clear.length === 0)
+    return "update_lead_settings names no field to set or clear, so nothing was read or written.";
+  const checked = selectorProjectOverridesSchema.safeParse(set);
+  if (!checked.success)
+    return `\`set\` is not overrides the contract admits, so nothing was read or written: ${checked.error.message}`;
+  const both = clear.filter((field) => Object.hasOwn(set, field));
+  return both.length === 0
+    ? undefined
+    : `${JSON.stringify(both)} are named in both \`set\` and \`clear\`, so nothing was read or written.`;
+}
+
+/** The overrides a settings read holds, or nothing where its body is not settings as the route answers them. */
+function updateLeadSettingsHeld(text) {
+  try {
+    const checked = selectorProjectOverridesSchema.safeParse(
+      JSON.parse(text)?.overrides,
+    );
+    return checked.success ? checked.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A settings write's answer: a 200 and a 409 `SettingsRevisionConflict`, which
+ * carry the whole settings, as their status, their code and the revision the
+ * settings are now at; every other as the API answered it.
+ */
+function updateLeadSettingsAnswer(status, text) {
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = undefined;
+  }
+  const head = `HTTP ${String(status)}\n`;
+  if (status === 200 && Number.isSafeInteger(body?.revision))
+    return answered(`${head}${JSON.stringify({ revision: body.revision })}`);
+  const code = body?.error?.code;
+  if (
+    status === 409 &&
+    code === "SettingsRevisionConflict" &&
+    Number.isSafeInteger(body?.settings?.revision)
+  )
+    return answered(
+      `${head}${JSON.stringify({ code, revision: body.settings.revision })}`,
+      true,
+    );
+  return answered(`${head}${text}`, status >= 400);
+}
+
+/**
+ * The lead settings written whole: the override set read, with `set` applied
+ * and `clear` dropped, under the `expectedRevision` the model gave. A set that
+ * moved since the model read it is refused as stale, a field neither names
+ * keeps what the settings hold without passing through the model, and nothing
+ * is asked again.
+ */
+async function updateLeadSettings(context, args) {
+  const { expectedRevision, set = {}, clear = [] } = args;
+  const refused = updateLeadSettingsRefusal(set, clear);
+  if (refused !== undefined) return answered(refused, true);
+  const path = projectPath(context, "selectorSettings");
+  const body = await drawn(
+    context,
+    path,
+    chuggyToolLeadSettingsResponseBytesMax,
+    "these lead settings",
+  );
+  if (body.refused !== undefined) return body.refused;
+  const held = updateLeadSettingsHeld(body.text);
+  if (held === undefined)
+    return answered(
+      `the selectorSettings route answered HTTP ${String(body.status)} with a body that is not lead settings as the contract answers them.`,
+      true,
+    );
+  const overrides = { ...held, ...set };
+  for (const field of clear) delete overrides[field];
+  const response = await context.request(context.task, context.bearer, path, {
+    method: "PUT",
+    headers: { "content-type": nativeHttpMediaType },
+    body: JSON.stringify({ expectedRevision, overrides }),
+  });
+  const { text } = await chuggyBoundedBody(
+    response,
+    chuggyToolLeadSettingsResponseBytesMax,
+  );
+  return updateLeadSettingsAnswer(response.status, text);
+}
+
+/** The routes and the offering a placement read holds, or nothing where its body is not a placement as the route answers one. */
+function updatePlacementHeld(text) {
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  const thread = body?.thread?.route;
+  const lead = body?.lead?.route;
+  const leadOffering = body?.leadOffering;
+  return placementRoutes.includes(thread) &&
+    placementRoutes.includes(lead) &&
+    leadOfferings.includes(leadOffering)
+    ? { thread, lead, leadOffering }
+    : undefined;
+}
+
+/**
+ * Where the project's threads and lead run, written whole from the placement
+ * read with what the call names in place. The offering is always named,
+ * because one left out is the row's stored one rather than the one read, and
+ * a lead moved to `Pool` with none named runs on its own.
+ */
+async function updatePlacement(context, args) {
+  if (
+    args.thread === undefined &&
+    args.lead === undefined &&
+    args.leadOffering === undefined
+  )
+    return answered(
+      "update_placement names no field to change, so nothing was read or written.",
+      true,
+    );
+  const path = projectPath(context, "sessionPlacement");
+  const body = await drawn(
+    context,
+    path,
+    chuggyToolResponseBytesMax,
+    "this placement",
+  );
+  if (body.refused !== undefined) return body.refused;
+  const held = updatePlacementHeld(body.text);
+  if (held === undefined)
+    return answered(
+      `the sessionPlacement route answered HTTP ${String(body.status)} with a body that is not a placement as the contract answers one.`,
+      true,
+    );
+  const ownOffering = args.lead === "Pool" ? "Own" : held.leadOffering;
+  return write(context, path, "PUT", {
+    thread: args.thread ?? held.thread,
+    lead: args.lead ?? held.lead,
+    leadOffering: args.leadOffering ?? ownOffering,
+  });
+}
+
 /**
  * The parameters several tools share, each describing itself, so every tool
  * that takes one publishes the sentence; a tool where one means something
@@ -1228,6 +1794,60 @@ const limit = (z, max) =>
       `The most items this page answers, at most ${String(max)}; left out, the route's own default.`,
     )
     .optional();
+const epic = (z) =>
+  z
+    .number()
+    .int()
+    .min(1)
+    .describe("An epic's number, as list_epics answers it.");
+/** What an epic's revision carries, which create_epic and revise_epic write whole. */
+const epicContent = (z) => ({
+  title: z
+    .string()
+    .max(epicTitleCharsMax)
+    .describe("The epic's title: one short line naming the body of work."),
+  summary: z
+    .string()
+    .max(epicSummaryCharsMax)
+    .describe("A short summary the epic is listed with; left out, it has none.")
+    .optional(),
+  description: z
+    .string()
+    .max(epicContentBytesMax)
+    .describe("What the epic is for and what finishes it, as Markdown."),
+  visibility: z
+    .enum(["Active", "Archived"])
+    .describe(
+      "Active epics take new tickets; an Archived one is kept and takes none.",
+    ),
+  tickets: z
+    .array(ticket(z))
+    .max(epicTicketsMax)
+    .describe(
+      "The tickets in the epic, replacing its members whole; each is a ticket of this project, as list_tickets answers it. A draft of the project is a member as a released ticket is, and stays one when it is released; deleting a draft takes it out of its epics.",
+    ),
+});
+/** The epic revision a write's arguments carry, and nothing else of them. */
+const epicContentOf = ({
+  title,
+  summary,
+  description,
+  visibility,
+  tickets,
+}) => ({
+  title,
+  summary,
+  description,
+  visibility,
+  tickets,
+});
+/** The tickets add_epic_tickets and remove_epic_tickets name. */
+const epicTickets = (z) =>
+  z
+    .array(ticket(z))
+    .min(1)
+    .max(epicTicketsMax)
+    .describe("The tickets to change, each once.");
 const count = (z) => z.number().int().min(0);
 /** A draft's authoring version, which a new draft starts at. */
 const authoringVersion = (z) => z.number().int().min(1);
@@ -1252,16 +1872,19 @@ const attempt = (z) =>
   );
 const thread = (z) =>
   identity(z).describe("A thread's session, as list_threads answers it.");
+/** How a transcript read's answer is shaped and what its cursor counts, as each transcript tool says it. */
+const transcriptAnswerDescription =
+  "Each entry goes out as what it says of the session: a thinking block without its `signature`, the init entry reduced to what identifies it and its `model`, `cwd` and `tools` names, and an entry that says nothing of it, such as a rate-limit event, left out and counted by its `type` under `omitted`. `after` counts the stream's store batches, not its entries, and a read answers the page of batches after it; `entry` counts the entries of that page already answered, those left out included. A stream starts with neither: a read at any other `after` starts past what earlier batches hold.";
 /** A transcript read's place, which its answer's `next` carries back. */
 const transcriptPlace = (z) => ({
   after: count(z)
     .describe(
-      "The `after` of the previous answer's `next`; left out, the first page.",
+      "The `after` of the previous answer's `next`, a count of the stream's store batches and not of its entries; left out, the stream's start.",
     )
     .optional(),
   entry: count(z)
     .describe(
-      "The `entry` of the previous answer's `next`, how many entries of that page were answered; left out, 0.",
+      "The `entry` of the previous answer's `next`, how many entries of the page read at `after` were answered, those left out included; left out, 0.",
     )
     .optional(),
 });
@@ -1271,6 +1894,22 @@ const transcriptStream = (z, read) =>
       `One of the \`streams\` ${read} answers, by its \`stream\`; left out, the session's own agent's stream.`,
     )
     .optional();
+/** What a read by `path` answers there, which read_configuration and read_lead_settings both say. */
+const chuggyPathReadDescription =
+  "the value there is answered whole where it fits; an object or an array that does not is answered as its outline, each entry's key with its child whole where that is short and otherwise the child's kind, entries and length in characters; a string that does not is answered cut to fit; and either says how much is left, which `offset` reads on from.";
+/** The `path` and `offset` a read by `path` takes, `path` described as walking into what `into` names. */
+const pathArguments = (z, into) => ({
+  path: z
+    .array(z.union([z.string().max(readAtPathKeyCharsMax), count(z)]))
+    .max(readAtPathPathKeysMax)
+    .describe(into)
+    .optional(),
+  offset: count(z)
+    .describe(
+      "Where an outline's entries or a cut string's characters read on from, as the previous answer at the same `path` said; left out, the start.",
+    )
+    .optional(),
+});
 /** A position in a mailbox, which is counted from one and never from zero. */
 const ordinal = (z) => z.number().int().min(1);
 /**
@@ -1294,7 +1933,7 @@ export const chuggyProjectTools = [
   {
     name: "list_tickets",
     description:
-      "One page of this project's tickets, ascending by number or by recent activity. Call it to find a ticket and its phase. A page may hold fewer than `limit`, and only `nextAfter`, or `nextCursor`, present says there are more.",
+      "One page of this project's tickets, ascending by number or by recent activity. Call it to find a ticket and its phase. Each carries `epics`, the epics it is in, when it is in any. A page may hold fewer than `limit`, and only `nextAfter`, or `nextCursor`, present says there are more.",
     shape: (z) => ({
       after: ticket(z)
         .describe(
@@ -1320,19 +1959,24 @@ export const chuggyProjectTools = [
           'The `nextCursor` the previous page answered under `order: "RecentActivity"`, for the page after it; left out, the first page.',
         )
         .optional(),
+      epic: epic(z)
+        .describe(
+          "Lists only the tickets in this epic, as list_epics answers its number; left out, every ticket.",
+        )
+        .optional(),
     }),
     // An activity cursor is the server's own, so none names a ticket to move past.
     cursorOf: ({ order }) => (order === undefined ? "after" : undefined),
-    call: (context, { after, limit: pageLimit, phase, order, cursor }) =>
+    call: (context, { after, limit: pageLimit, phase, order, cursor, epic }) =>
       read(
         context,
-        `${projectPath(context, "project")}${search({ after, limit: pageLimit, phase, order, cursor })}`,
+        `${projectPath(context, "project")}${search({ after, limit: pageLimit, phase, order, cursor, epic })}`,
       ),
   },
   {
     name: "read_ticket",
     description:
-      "One ticket: its phase, its version, its authoring, its brief and what its runs cost. Call it for where a ticket stands. It carries `runTotals`, what every run of its executions reported, summed: turns, durations, tokens by kind, permission denials and `costUsdMicros`, millionths of a dollar at the runtime's list price, with tokens and cost per model in `models`. A ticket no run has reported for carries none. A ticket waiting because its run stopped at its clone, setup, commit, push or deadline, or because its runner's disk ran low, names that step's label, the execution and the attempt in `escalation.failed`, which read_run_error takes to read the attempt's error text. Where its work is landing, waits to land or escalated at landing, read_ticket_landings says how: its hold, its approval, or its pull request and what its merge waits on. A Pending ticket following its configuration's newest revision carries `following`: its `verdict`, one of Current, Moves, Held or Trimmed, and for Held the `code` its release would be refused with.",
+      "One ticket: its phase, its version, its authoring, its brief and what its runs cost. Call it for where a ticket stands. It carries `runTotals`, what every run of its executions reported, summed: turns, durations, tokens by kind, permission denials and `costUsdMicros`, millionths of a dollar at the runtime's list price, with tokens and cost per model in `models`. A ticket no run has reported for carries none. A ticket waiting because its run stopped at its clone, setup, commit, push or deadline, or because its runner's disk ran low, names that step's label, the execution and the attempt in `escalation.failed`, which read_run_error takes to read the attempt's error text. Where its work is landing, waits to land or escalated at landing, read_ticket_landings says how: its hold, its approval, or its pull request and what its merge waits on. A ticket in an epic carries `epics`, each epic's number and title, read_epic reads one. A Pending ticket following its configuration's newest revision carries `following`: its `verdict`, one of Current, Moves, Held or Trimmed, and for Held the `code` its release would be refused with.",
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
       read(context, projectPath(context, "ticket", { ticket: args.ticket })),
@@ -1388,28 +2032,21 @@ export const chuggyProjectTools = [
   {
     name: "read_configuration",
     description:
-      "One configuration revision's canonical document, as a draft is authored against it. Call it for who does a ticket's work and what evaluates it. `canonical` is the stored document as JSON text, and its `worker.mode` is who does the work of a ticket released against it: the agent, and what that agent is started with, a model where the configuration names one. Its evaluation stages run in the order listed and a failed stage ends evaluation, while the evaluators of one stage run in parallel; in a catalog each evaluator of a plan stage names its own workload, so review lenses that should run side by side belong in one stage. A configuration larger than one answer is read by `path`, keys walking into the parsed `canonical`: the value there is answered whole where it fits; an object or an array that does not is answered as its outline, each entry's key with its child whole where that is short and otherwise the child's kind, entries and length in characters; a string that does not is answered cut to fit; and either says how much is left, which `offset` reads on from. With no `path`, the route's body is answered as it is where it fits; where it does not, the parsed `canonical` is answered whole where that fits and otherwise as its outline. A `path` the document does not hold is refused, naming the keys where it stopped.",
+      "One configuration revision's canonical document, as a draft is authored against it. Call it for who does a ticket's work and what evaluates it. `canonical` is the stored document as JSON text, and its `worker.mode` is who does the work of a ticket released against it: the agent, and what that agent is started with, a model where the configuration names one. Its evaluation stages run in the order listed and a failed stage ends evaluation, while the evaluators of one stage run in parallel; in a catalog each evaluator of a plan stage names its own workload, so review lenses that should run side by side belong in one stage. A configuration larger than one answer is read by `path`, keys walking into the parsed `canonical`: " +
+      chuggyPathReadDescription +
+      " With no `path`, the route's body is answered as it is where it fits; where it does not, the parsed `canonical` is answered whole where that fits and otherwise as its outline. A `path` the document does not hold is refused, naming the keys where it stopped.",
     shape: (z) => ({
       revision: revision(z),
-      path: z
-        .array(
-          z.union([z.string().max(readConfigurationKeyCharsMax), count(z)]),
-        )
-        .max(readConfigurationPathKeysMax)
-        .describe(
-          'The keys walking into the parsed `canonical`, an array\'s entries by index, such as ["workloads", "review", "prompt"]; left out, the whole configuration.',
-        )
-        .optional(),
-      offset: count(z)
-        .describe(
-          "Where an outline's entries or a cut string's characters read on from, as the previous answer at the same `path` said; left out, the start.",
-        )
-        .optional(),
+      ...pathArguments(
+        z,
+        'The keys walking into the parsed `canonical`, an array\'s entries by index, such as ["workloads", "review", "prompt"]; left out, the whole configuration.',
+      ),
     }),
     call: (context, { revision: given, path, offset }) =>
-      readConfiguration(
+      readAtPath(
         context,
         projectPath(context, "configuration", { revision: given }),
+        "configuration",
         path,
         offset,
       ),
@@ -1455,13 +2092,21 @@ export const chuggyProjectTools = [
   {
     name: "read_ticket_landings",
     description:
-      "One ticket's landings, each a finalization of its work into its repository. Call it for how a ticket's work lands or why it has not. It answers the newest one answer holds, oldest first, `truncated` where it leaves older ones out. A ticket not yet at landing has none. Answers JSON. Each landing carries its `state`, such as Running, Held, AwaitingApproval, AwaitingMerge, Proposed (its pull request opened for a person to merge), Failed, Unavailable (it could not go through and escalated: as the newest, its ticket waits on a person; an older one stays after a resume) or Landed, its `cycle`, `attempts` and newest `attempt` where it made one: its `outcome`, its `failureKind` where it failed, such as MergeConflict or QueueChecksFailed (the merge queue removed its pull request twice for failed checks; its work went back to Work), and the `targetRef` it lands on. A Held landing carries `hold`, and an Unavailable one the `hold` it escalated from where one is recorded: its `kind`, what holds it, and `since`, when a hold of that kind began. `hold.removal`, recorded where its pull request left its base's merge queue, is `reason`, the forge's own word such as `manual`, `failed_checks` or `checks_timed_out`, and `actor`, the login removing it, where named. An AwaitingMerge landing carries `wait`: its `reason`, what the merge waits on (Blocked by the forge's rules, as where the queue will not take it yet; HeadMoved; or Queued, waiting its turn in the queue), and `checkedAt`, when the forge was last heard about its merge. A Landed one carries `landedCommit`. `proposal` is the pull request it opened, where it opened one: its `url`, its `headRef` and `baseRef`, its `status` as chuggy last read it, at opening and, where it merges it, at each merge reading, so a Proposed landing's is the one it opened with, its `mergeability`, and `mergeState`, the forge's own word for that, GitHub's `mergeable_state` such as `blocked`, `behind` or `dirty`. `conflict` is the paths its newest attempt conflicted on, `truncated` where they were cut.",
+      "One ticket's landings, each finalizing its work into its repository. Call it for how a ticket's work lands or why it has not. It answers the newest one answer holds, oldest first, `truncated` where it leaves older ones out; a ticket not yet at landing has none. Answers JSON. Each landing carries its `state`, such as Proposed (its pull request opened for a person to merge) or Unavailable (it could not go through and escalated: as the newest, its ticket waits on a person; an older one stays after a resume), its `cycle`, `attempts` and newest `attempt` where it made one: its `outcome`, `targetRef` and `failureKind` where it failed, such as MergeConflict, QueueChecksFailed (the merge queue removed its pull request twice for failed checks; its work went back to Work) or RecheckRequired, with `recheck` unless recorded before re-checks kept one: its `reason`, TargetMoved (the target moved past the accepted commit), StackTreeDiffers (the merge's tree is not its stack's) or MergedTreeDiffers (its merged pull request left a tree its work was not checked on), and `baseRef`, the base checked against, where present. A Held landing carries `hold`, and an Unavailable one the `hold` it escalated from where one is recorded: its `kind`, what holds it, and `since`, when a hold of that kind began. `hold.removal`, where its pull request left the merge queue, is the forge's `reason`, such as `manual`, and the `actor` removing it, where named. An AwaitingMerge landing carries `wait`: its `reason` (Blocked by the forge's rules, as where the queue will not take it yet; HeadMoved; or Queued, waiting its turn) and `checkedAt`, when the forge was last heard about its merge. A Landed one carries `landedCommit`. `proposal` is the pull request it opened, where it did: its `url`, `headRef`, `baseRef`, its `status` as chuggy last read it, so a Proposed landing's is the one it opened with, its `mergeability`, and `mergeState`, GitHub's `mergeable_state`. `conflict` is the paths its newest attempt conflicted on, `truncated` where they were cut.",
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
       readTicketLandings(
         context,
         projectPath(context, "ticketLandings", { ticket: args.ticket }),
       ),
+  },
+  {
+    name: "read_landing_queues",
+    description:
+      "This project's landing queues, one for each reference a Serialized or Stacked ticket lands on. Call it for why a ticket's landing waits on another ticket's. Answers JSON. Each queue carries its `repository` and its `target`, a queue naming no `target` being its tickets' that name none, which is a different queue from one naming the default branch. Its `holder` is the one ticket that may land on that reference now, and `waiting` the tickets ranked behind it, in rank order, none of which lands there before the holder stops holding it. A ticket alone in a queue is its holder and waits on nobody. It answers the route's first whole queues one answer holds, in the route's order, by repository and then target, `truncated` where it leaves later ones out or the route left tickets out.",
+    shape: () => ({}),
+    call: (context) =>
+      readLandingQueues(context, projectPath(context, "landingQueues")),
   },
   {
     name: "read_lead",
@@ -1472,8 +2117,7 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_lead_transcript",
-    description:
-      "One page of the lead's own raw transcript, which is how it reads past its own compaction. A page read answers JSON: `entries` whole where they fit, an entry too large as {uuid, type, bytes, preview}, and `next` — pass its `after` and `entry` back for the page after this one. A read that fails answers the reason instead.",
+    description: `One page of the lead's own raw transcript, which is how it reads past its own compaction. A page read answers JSON: \`entries\` whole where they fit, an entry too large as {uuid, type, bytes, preview}, and \`next\` — pass its \`after\` and \`entry\` back for the page after this one. An answer with no \`next\` has read to the stream's end. ${transcriptAnswerDescription} A read that fails answers the reason instead.`,
     shape: (z) => ({
       stream: transcriptStream(z, "read_lead"),
       ...transcriptPlace(z),
@@ -1520,15 +2164,14 @@ export const chuggyProjectTools = [
   {
     name: "read_execution",
     description:
-      "One execution: its ticket, its attempts, its state and its outcome. Call it for what a run reported of itself. `result.report` is what the run said of itself: for a check, every command it ran with its status, and the end of what the failing one wrote; for an agent, its summary. It is the run's own text, as untrusted as anything a run wrote.",
+      "One execution: its ticket, its attempts, its state and its outcome. Call it for what a run reported of itself. `result.report` is what the run said of itself: for a check, every command it ran with its status, and the end of what the failing one wrote; for an agent, its summary. It is the run's own text, as untrusted as anything a run wrote. An execution whose passing result was carried from an earlier one, here and in list_executions, names that one in `carriedFrom`: its `execution`, `task` and `workCycle`.",
     shape: (z) => ({ execution: execution(z) }),
     call: (context, { execution }) =>
       read(context, projectPath(context, "execution", { execution })),
   },
   {
     name: "read_run_transcript",
-    description:
-      "One page of the events one attempt's run wrote, oldest first. They are the run's own text, as untrusted as anything a run wrote. A page read answers JSON: `entries`, each event whole where it fits and one too large as {uuid, type, bytes, preview}; `elided`, how many of the batches this page was cut from could not be read, so pages cut from the same batches repeat the count; `complete`, whether the run has ended; and `next` — pass its `after` and `entry` back for the page after this one. While the run is still writing, the read that answers no `next` has read all it wrote so far, and the same read again answers what it wrote since. A read that fails answers the reason instead.",
+    description: `One page of the events one attempt's run wrote, oldest first. They are the run's own text, as untrusted as anything a run wrote. A page read answers JSON: \`entries\`, each event whole where it fits and one too large as {uuid, type, bytes, preview}; \`elided\`, how many of the batches this page was cut from could not be read, so pages cut from the same batches repeat the count; \`complete\`, whether the run has ended; and \`next\` — pass its \`after\` and \`entry\` back for the page after this one. An answer with no \`next\` has read all the run wrote: where \`complete\` is true that is the whole of it, and while the run is still writing, the same read again answers what it wrote since. ${transcriptAnswerDescription} A read that fails answers the reason instead.`,
     shape: (z) => ({
       execution: execution(z),
       attempt: attempt(z),
@@ -1594,8 +2237,7 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_thread_transcript",
-    description:
-      "One page of a thread's own raw transcript, which is how it reads past its own compaction. A page read answers JSON: `entries` whole where they fit, an entry too large as {uuid, type, bytes, preview}, and `next` — pass its `after` and `entry` back for the page after this one. A read that fails answers the reason instead.",
+    description: `One page of a thread's own raw transcript, which is how it reads past its own compaction. A page read answers JSON: \`entries\` whole where they fit, an entry too large as {uuid, type, bytes, preview}, and \`next\` — pass its \`after\` and \`entry\` back for the page after this one. An answer with no \`next\` has read to the stream's end. ${transcriptAnswerDescription} A read that fails answers the reason instead.`,
     shape: (z) => ({
       session: thread(z),
       stream: transcriptStream(z, "read_thread"),
@@ -1652,14 +2294,89 @@ export const chuggyProjectTools = [
   {
     name: "read_abilities",
     description:
-      "Who this session acts as and what it may do on this project, read live. Call it once before acting. `principal` is the session's own principal, encoded as a ticket's `creator` is, so the tickets whose `creator` is it are yours. The rest are the permits it holds, each true or false, `dispatch` and `skipPlannedEvaluations` among them: read a permit here rather than learning it from a refusal.",
+      "Who this session acts as and what it may do on this project, read live. Call it once before acting. `principal` is the session's own principal, encoded as a ticket's `creator` is, so the tickets whose `creator` is it are yours. The rest are the permits it holds, each true or false, `dispatch`, `skipPlannedEvaluations` and `writeEpic` among them: read a permit here rather than learning it from a refusal. `writeEpic` is what create_epic, revise_epic, add_epic_tickets and remove_epic_tickets need.",
     shape: () => ({}),
     call: (context) => read(context, projectPath(context, "abilities")),
   },
   {
+    name: "list_epics",
+    description:
+      "One page of this project's epics, each with its progress, its status and the outside tickets it waits on. Call it to find an epic. An epic is a named set of tickets worked toward one end; `nextAfter` present says there are more.",
+    shape: (z) => ({
+      search: identity(z)
+        .describe("Lists only the epics whose title or summary has this text.")
+        .optional(),
+      visibility: z
+        .enum(["Active", "Archived", "All"])
+        .describe("Which epics to list; left out, the route's own default.")
+        .optional(),
+      ticket: ticket(z)
+        .describe("Lists only the epics this ticket is in.")
+        .optional(),
+      sort: z
+        .enum(["newest", "oldest", "title"])
+        .describe("The order to list in; left out, the route's own default.")
+        .optional(),
+      after: count(z)
+        .describe(
+          "The `nextAfter` the previous page answered, for the page after it; left out, the first page.",
+        )
+        .optional(),
+      limit: limit(z, epicPageLimitMax),
+    }),
+    cursorOf: () => "after",
+    call: (context, { search: text, visibility, ticket, sort, after, limit }) =>
+      read(
+        context,
+        `${projectPath(context, "epics")}${search({ search: text, visibility, ticket, sort, after, limit })}`,
+      ),
+  },
+  {
+    name: "read_epic",
+    description:
+      "One epic: its title, summary, description, visibility, revision and member tickets. Call it before revise_epic. It carries `progress`, its members counted by phase with `done` and `total`, `status`, one of empty, done, attention, not_started and in_progress, and `waitingOnOutside`, the tickets outside the epic that a Pending member waits on. A description longer than one answer holds is answered cut to fit, with `descriptionChars`, `descriptionCharsLeft` and a `note` naming the `offset` that reads on.",
+    shape: (z) => ({
+      epic: epic(z),
+      offset: count(z)
+        .describe(
+          "Where the description's characters read on from, as the previous answer's `note` said; left out, the start, and a view that fits is answered as the route answered it.",
+        )
+        .optional(),
+    }),
+    call: (context, args) => readEpic(context, args.epic, args.offset),
+  },
+  {
+    name: "read_epic_history",
+    description:
+      "One page of an epic's revisions, newest first, each with who made it and its title then. Call it to see how an epic changed. `nextAfter` present says there are more.",
+    shape: (z) => ({
+      epic: epic(z),
+      after: count(z)
+        .describe(
+          "The `nextAfter` the previous page answered, for the page after it; left out, the first page.",
+        )
+        .optional(),
+      limit: limit(z, epicPageLimitMax),
+    }),
+    cursorOf: () => "after",
+    call: (context, { epic, after, limit }) =>
+      read(
+        context,
+        `${projectPath(context, "epicHistory", { epic })}${search({ after, limit })}`,
+      ),
+  },
+  {
+    name: "read_epic_graph",
+    description:
+      "An epic's members and the tickets outside it that they depend on, with an edge from each dependency to its dependent. Call it to see what orders the epic's work.",
+    shape: (z) => ({ epic: epic(z) }),
+    call: (context, args) =>
+      read(context, projectPath(context, "epicGraph", { epic: args.epic })),
+  },
+  {
     name: "initialize_draft",
     description:
-      "The defaults and the fence a new draft is filed against, for one configuration revision. Call it before create_draft or file_dependent. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from: each stage's `key` and each evaluator's `key` are positions counted from one in the configuration's plan, and passing it unchanged runs the whole plan. `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, stage N runs the selected plan's Nth stage, and `defaults` and `choices` are those of the selection passed. `commandedCheckStage` is the stage a brief's `checks` join, by its program stage key, counted from one as `defaults.program` keys are, and absent where none takes them, and `commandedCheckStageNote` says it in words: the same stage and, for a catalog, the plan and the stage's name, or that none does and which plans would. `configuration` is answered without its `canonical`; read_configuration answers the document, by `path` where it is larger than one answer. Dependencies are chosen from list_tickets.",
+      "The defaults and the fence a new draft is filed against, for one configuration revision. Call it before create_draft or file_dependent. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from: each stage's `key` and each evaluator's `key` are positions counted from one in the configuration's plan, and passing it unchanged runs the whole plan. `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, stage N runs the selected plan's Nth stage, and `defaults` and `choices` are those of the selection passed. `commandedCheckStage` is the stage a brief's `checks` join, by its program stage key, counted from one as `defaults.program` keys are, and absent where none takes them, and `commandedCheckStageNote` says it in words: the same stage and, for a catalog, the plan and the stage's name, or that none does and which plans would. `configuration` is answered without its `canonical`; read_configuration answers the document, by `path` where it is larger than one answer. Dependencies are chosen from list_tickets. An epic for the draft is chosen at create_draft, which is where a missing or Archived one is refused.",
     shape: (z) => ({
       revision: revision(z),
       work: identity(z)
@@ -1748,8 +2465,8 @@ export const chuggyProjectTools = [
       configurationRevision: identity(z).describe(
         "The configuration revision the revised draft is authored against, as read_draft or list_configurations answers it.",
       ),
-      authoring: anyObject(z).describe(chuggyAuthoringDescription),
-      brief: anyObject(z).describe(
+      authoring: draftAuthoring.describe(chuggyDraftAuthoringDescription),
+      brief: draftBrief.describe(
         `${chuggyDraftBriefDescription} It is replaced whole, so send back the \`repository\` and \`images\` read_draft answered or the revision clears them.`,
       ),
       overrides: anyObject(z)
@@ -1757,10 +2474,10 @@ export const chuggyProjectTools = [
         .describe(
           `${chuggyOverridesDescription} It is replaced whole, so send back the \`overrides\` read_draft answered or the revision clears them.`,
         ),
-      selection: anyObject(z)
+      selection: draftSelection
         .optional()
         .describe(
-          `${chuggySelectionDescription} It is replaced whole, so send back the \`selection\` read_draft answered or the revision clears it.`,
+          `${chuggyDraftSelectionDescription} It is replaced whole, so send back the \`selection\` read_draft answered or the revision clears it.`,
         ),
     }),
     call: (context, args) =>
@@ -1822,7 +2539,7 @@ export const chuggyProjectTools = [
   {
     name: "create_draft",
     description:
-      "Files a new draft for work your owner asked for, derived from nothing. Call it after initialize_draft, whose answer it is fenced on.",
+      "Files a new draft for work your owner asked for, derived from nothing. Call it after initialize_draft, whose answer it is fenced on. Its `epic` files the draft into an epic in the same write.",
     shape: (z) => ({
       configurationRevision: identity(z).describe(
         chuggyNewDraftConfigurationDescription.configurationRevision,
@@ -1833,10 +2550,13 @@ export const chuggyProjectTools = [
       expectedProjectSequence: count(z).describe(
         chuggyExpectedProjectSequenceDescription,
       ),
-      authoring: anyObject(z).describe(chuggyAuthoringDescription),
-      brief: anyObject(z).describe(chuggyDraftBriefDescription),
+      authoring: draftAuthoring.describe(chuggyDraftAuthoringDescription),
+      brief: draftBrief.describe(chuggyDraftBriefDescription),
       overrides: anyObject(z).optional().describe(chuggyOverridesDescription),
-      selection: anyObject(z).optional().describe(chuggySelectionDescription),
+      selection: draftSelection
+        .optional()
+        .describe(chuggyDraftSelectionDescription),
+      epic: epic(z).describe(chuggyDraftEpicDescription).optional(),
     }),
     call: (context, args) =>
       write(context, projectPath(context, "drafts"), "POST", {
@@ -1847,6 +2567,7 @@ export const chuggyProjectTools = [
         brief: args.brief,
         overrides: args.overrides,
         selection: args.selection,
+        epic: args.epic,
       }),
   },
   {
@@ -1881,10 +2602,136 @@ export const chuggyProjectTools = [
       }),
   },
   {
+    name: "create_epic",
+    description: `Creates an epic, a named set of tickets worked toward one end, on your owner's word only. Call it after read_abilities says \`writeEpic\`. The answer is the epic's number and its first \`revision\`. ${chuggyEpicWriteRefusals}`,
+    shape: (z) => epicContent(z),
+    call: (context, args) =>
+      write(context, projectPath(context, "epics"), "POST", {
+        kind: "Create",
+        content: epicContentOf(args),
+      }),
+  },
+  {
+    name: "revise_epic",
+    description: `Revises an epic whole, on your owner's word only. Call it after read_epic, whose \`revision\` it is written against and whose fields it replaces: send every field again, changed or not, except a \`description\` that is not changing, which left out is kept as the epic holds it. To change only the members, add_epic_tickets and remove_epic_tickets do it without resending the rest. The answer is the epic's number and its new \`revision\`. ${chuggyEpicWriteRefusals}`,
+    shape: (z) => ({
+      epic: epic(z),
+      expectedRevision: ticket(z).describe(
+        "`expectedRevision` is the epic's `revision` as read_epic answers it.",
+      ),
+      ...epicContent(z),
+      description: epicContent(z)
+        .description.describe(
+          "What the epic is for and what finishes it, as Markdown; left out, the description the epic holds is kept, so a long one is never sent again.",
+        )
+        .optional(),
+    }),
+    call: reviseEpic,
+  },
+  {
+    name: "add_epic_tickets",
+    description: `Adds tickets to an epic and changes nothing else about it, on your owner's word only. It reads the epic and revises it in one call, so no read_epic is needed. Tickets already in it are left, and a call that adds nothing writes nothing. A write that went stale between its read and its write is read and written once more. ${chuggyEpicWriteRefusals}`,
+    shape: (z) => ({ epic: epic(z), tickets: epicTickets(z) }),
+    call: (context, args) =>
+      epicMembersChanged(
+        context,
+        args.epic,
+        (members) =>
+          args.tickets.every((one) => members.includes(one))
+            ? undefined
+            : [...new Set([...members, ...args.tickets])],
+        () => `epic ${String(args.epic)} already holds those tickets`,
+      ),
+  },
+  {
+    name: "remove_epic_tickets",
+    description: `Removes tickets from an epic and changes nothing else about it, on your owner's word only. It reads the epic and revises it in one call, so no read_epic is needed. Tickets not in it are left, and a call that removes nothing writes nothing. A write that went stale between its read and its write is read and written once more. ${chuggyEpicWriteRefusals}`,
+    shape: (z) => ({ epic: epic(z), tickets: epicTickets(z) }),
+    call: (context, args) =>
+      epicMembersChanged(
+        context,
+        args.epic,
+        (members) =>
+          args.tickets.some((one) => members.includes(one))
+            ? members.filter((one) => !args.tickets.includes(one))
+            : undefined,
+        () => `epic ${String(args.epic)} holds none of those tickets`,
+      ),
+  },
+  {
     name: "dispatch_ticket",
     description: `Submits the dispatch of one released ticket, on your owner's word only, which starts its work now rather than when the lead chooses it. It is your owner's dispatch, so where they may not dispatch in this project the submission is answered 404, though the ticket exists. Only a Pending ticket whose dependencies are all Done can be dispatched, and any other is answered without anything being submitted. A ticket that moved between this tool reading it and submitting is refused (TicketChanged), so call again. ${chuggySubmissionDescription}`,
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) => dispatchTicket(context, args.ticket),
+  },
+  {
+    name: "read_lead_settings",
+    description: `This project's lead settings: what the project sets for its lead, and what the lead runs with. Call it before update_lead_settings, and for why the lead is paused or how it is prompted. \`overrides\` is what the project sets, a field it leaves out taking the installation default; \`effective\` is what the lead runs with; \`revision\` is what update_lead_settings is written against. \`effective.installationMode\` Paused is a pause for the whole installation, which no project setting lifts. Reading and writing both need \`manageSelector\` in read_abilities, and without it the route answers 404. Settings larger than one answer are read by \`path\`, keys walking into the settings: ${chuggyPathReadDescription} With no \`path\`, the settings are answered whole where they fit and otherwise as their outline. A \`path\` the settings do not hold is refused, naming the keys where it stopped.`,
+    shape: (z) =>
+      pathArguments(
+        z,
+        'The keys walking into the settings, an array\'s entries by index, such as ["overrides", "basePrompt"]; left out, the whole settings.',
+      ),
+    call: (context, { path, offset }) =>
+      readAtPath(
+        context,
+        projectPath(context, "selectorSettings"),
+        "selectorSettings",
+        path,
+        offset,
+      ),
+  },
+  {
+    name: "update_lead_settings",
+    description: `Changes this project's lead settings, on your owner's word only. Call it after read_lead_settings, whose \`revision\` it is written against. It reads the settings and writes the whole override set back with \`set\` applied and \`clear\` dropped, so a field named in neither keeps what the settings hold, and a long text is never sent again. An edit takes effect at the lead's next decision. \`mode\` Running resumes the lead and Paused pauses it, but neither lifts a pause set for the whole installation, which read_lead_settings answers as \`effective.installationMode\`. A write needs \`manageSelector\` in read_abilities, and without it the route answers 404. read_docs's page "Writing a project's lead prompt" is how to write \`basePrompt\` and \`northStar\`. A write is answered as its status and the \`revision\` the settings are now at; 409 with the \`code\` SettingsRevisionConflict is settings that moved since they were read, and is never asked again, so read them and decide again. Every other answer is the API's, its status and body unaltered: 409 AutomaticDispatchUnavailable, 503 SettingsWriteContended, which may be sent again, 404, and a body larger than the API takes.`,
+    shape: (z) => ({
+      expectedRevision: count(z).describe(
+        "The settings' `revision`, as read_lead_settings answers it.",
+      ),
+      set: anyObject(z)
+        .describe(
+          "The override fields to write, each replacing that field whole, `limits` included, as read_lead_settings answers `overrides`; left out, none. A set the contract does not admit is refused before anything is read.",
+        )
+        .optional(),
+      clear: z
+        .array(z.enum(updateLeadSettingsFields))
+        .max(updateLeadSettingsFields.length)
+        .describe(
+          "The override fields to return to the installation default; left out, none. A field named here and in `set` is refused.",
+        )
+        .optional(),
+    }),
+    call: updateLeadSettings,
+  },
+  {
+    name: "read_placement",
+    description:
+      "Where this project's threads and its lead run, and what decided each. Call it before update_placement. `thread` and `lead` are each a `route` and its `source`; `leadOffering` is how the lead runs on its route, and `leadOfferings` the offerings this project may choose; `choices` are the routes you may choose, none where you may not administer the project; `runners` says whether runners would take each.",
+    shape: () => ({}),
+    call: (context) => read(context, projectPath(context, "sessionPlacement")),
+  },
+  {
+    name: "update_placement",
+    description: `Changes where this project's threads and its lead run, on your owner's word only. It reads the placement and writes it whole, each field the one given or else the one read. chuggy's subsidized lead is \`lead\` "InCluster" with \`leadOffering\` "Subsidized", and the project's own runners are \`lead\` "Pool"; read_placement's \`leadOfferings\` says which offerings the project may choose. A write needs \`administer\` in read_abilities. read_docs's page "The subsidized lead" says what changes. The answer is the API's, its status and body unaltered, a refusal included: 403 HostedRunsNotGranted where a route InCluster needs the tenant's hosted grant, and 422 LeadOfferingNotAdmitted where the deployment does not admit the offering on that route.`,
+    shape: (z) => ({
+      thread: z
+        .enum(placementRoutes)
+        .describe(
+          "Where the project's threads run; left out, where they run now.",
+        )
+        .optional(),
+      lead: z
+        .enum(placementRoutes)
+        .describe("Where the project's lead runs; left out, where it runs now.")
+        .optional(),
+      leadOffering: z
+        .enum(leadOfferings)
+        .describe(
+          "How the lead runs on its route; left out, the offering it has now, or Own where `lead` is Pool.",
+        )
+        .optional(),
+    }),
+    call: updatePlacement,
   },
 ];
 
@@ -1963,11 +2810,110 @@ export const chuggyMemberTools = [
   },
 ];
 
+/** The pages `navigate` names and the settings sections one of them names, read off the contract's own union. */
+function navigateVocabulary() {
+  const variants = consolePageSchema.options.map(({ shape }) => shape);
+  return {
+    pages: [...new Set(variants.map(({ page }) => page.value))],
+    sections: variants
+      .find(({ page }) => page.value === "Settings")
+      .section.unwrap().options,
+  };
+}
+
+/** Where `navigate` read no page the console draws, with the contract's own account of why. */
+function navigatePage(args) {
+  const read = consolePageSchema.safeParse(args);
+  if (!read.success)
+    throw new Error(
+      `navigate names no page the console draws: ${read.error.message}`,
+    );
+  return read.data;
+}
+
 /**
- * Every tool this session holds, project, member and decision alike, filtered
- * by the capability roster its row carries. A tool the roster does not admit
- * is not registered at all, so the runtime's own tool list is the proof rather
- * than this source.
+ * Every tool a thread offers its owner rather than doing, exported as the
+ * project tools are. `navigate`'s page is a union, so its shape is the fields
+ * every page may carry and the contract's union is what the call checks.
+ */
+export const chuggyOfferTools = [
+  {
+    name: "navigate",
+    exact: true,
+    description:
+      "Moves your owner's console to one page. The console follows it only while your owner is still on the page they wrote from, so it is an offer of a page and never the only place your answer is.",
+    shape: (z) => {
+      const { pages, sections } = navigateVocabulary();
+      return {
+        page: z.enum(pages).describe("The page, by the console's own name."),
+        ticket: ticket(z)
+          .describe("For Ticket and TicketEdit, the ticket it shows.")
+          .optional(),
+        from: ticket(z)
+          .describe(
+            "For TicketNew, the ticket the new one duplicates; never with `draft`.",
+          )
+          .optional(),
+        draft: ticket(z)
+          .describe(
+            "For TicketNew, the draft it opens, by its ticket; never with `from`.",
+          )
+          .optional(),
+        repository: identity(z)
+          .describe(
+            "For Repository, the repository it shows, as list_repositories answers its `repository`.",
+          )
+          .optional(),
+        section: z
+          .enum(sections)
+          .describe("For Settings, the section it opens.")
+          .optional(),
+      };
+    },
+    call: (_context, args) =>
+      `Your owner's console is asked to move to ${JSON.stringify(navigatePage(args))}.`,
+  },
+  {
+    name: "offer_release",
+    exact: true,
+    description:
+      "Puts one draft's release in front of your owner as a card they confirm or decline, at exactly the authoring version you name. Their answer arrives as an OfferReply turn.",
+    shape: (z) => ({
+      ticket: ticket(z),
+      authoringVersion: count(z).describe(
+        "The draft's `authoringVersion`, as read_draft answers it; a confirmation releases that version and no other.",
+      ),
+    }),
+    call: (_context, args) => {
+      const { ticket: offered, authoringVersion: version } =
+        threadOfferReleaseSchema.parse(args);
+      return `Ticket ${String(offered)}'s release at authoring version ${String(version)} is offered to your owner.`;
+    },
+  },
+  {
+    name: "offer_revoke",
+    exact: true,
+    description:
+      "Puts one ticket's revocation in front of your owner as a card they confirm or decline, at exactly the revision you name. Their answer arrives as an OfferReply turn.",
+    shape: (z) => ({
+      ticket: ticket(z),
+      revision: ticket(z).describe(
+        "The ticket's `revision`, as read_ticket answers it; a confirmation revokes it at that revision and no other.",
+      ),
+    }),
+    call: (_context, args) => {
+      const { ticket: offered, revision: at } =
+        threadOfferRevokeSchema.parse(args);
+      return `Ticket ${String(offered)}'s revocation at revision ${String(at)} is offered to your owner.`;
+    },
+  },
+];
+
+/**
+ * Every tool this session holds, project, member, offer and decision alike,
+ * filtered by the capability roster its row carries. A tool the roster does
+ * not admit is not registered at all, so the runtime's own tool list is the
+ * proof rather than this source.
  */
 export function chuggyToolDefinitions(context) {
   const admitted = new Set(
@@ -1975,13 +2921,14 @@ export function chuggyToolDefinitions(context) {
       (held) => sessionCapabilityTools[held] ?? [],
     ),
   );
-  const served = [...chuggyProjectTools, ...chuggyMemberTools].map(
-    (definition) => ({
-      ...definition,
-      call: (args) =>
-        definition.call(context, scrubbedArguments(args, context)),
-    }),
-  );
+  const served = [
+    ...chuggyProjectTools,
+    ...chuggyMemberTools,
+    ...chuggyOfferTools,
+  ].map((definition) => ({
+    ...definition,
+    call: (args) => definition.call(context, scrubbedArguments(args, context)),
+  }));
   return [...served, ...context.staging.definitions].filter((definition) =>
     admitted.has(definition.name),
   );
@@ -2039,6 +2986,12 @@ function chuggyToolTimedOut(name) {
   );
 }
 
+/** The object one tool's input is parsed as, here and by the runtime: strict where the definition is `exact`. */
+export function chuggyToolInput(definition, z) {
+  const fields = definition.shape(z);
+  return definition.exact === true ? z.strictObject(fields) : z.object(fields);
+}
+
 /**
  * One tool's handler: its input checked against its own shape, then the call,
  * with every raise answered as text the model reads rather than thrown into the
@@ -2073,7 +3026,7 @@ export function chuggyToolHandler(definition, z) {
   // beside it would be a second answer to a question the shape answers, and
   // the two would part.
   const fields = definition.shape(z);
-  const shape = z.object(fields);
+  const shape = chuggyToolInput(definition, z);
   const pageItemsMax = fields[chuggyToolPageArgument]?.unwrap().maxValue;
   const { name } = definition;
   const asked = async (given) => {
@@ -2111,7 +3064,9 @@ export function chuggyToolHandler(definition, z) {
 /**
  * The in-process server the query is opened with. `timeout` is not optional: a
  * tool call is otherwise effectively unbounded, and an unbounded one is a turn
- * that never reaches its deadline.
+ * that never reaches its deadline. Each tool is handed its whole input object
+ * rather than its fields, which the runtime registers as MCP's `registerTool`
+ * does, so an `exact` tool is refused an undeclared key before its handler.
  */
 export function chuggyToolServer(context, sdk) {
   return sdk.createSdkMcpServer({
@@ -2122,7 +3077,7 @@ export function chuggyToolServer(context, sdk) {
       sdk.tool(
         definition.name,
         definition.description,
-        definition.shape(sdk.z),
+        chuggyToolInput(definition, sdk.z),
         chuggyToolHandler(definition, sdk.z),
       ),
     ),
