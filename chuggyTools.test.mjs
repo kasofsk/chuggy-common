@@ -1252,7 +1252,7 @@ test("a landing queues answer at its draw bound is read, and one past it is refu
   );
 });
 
-test("read_landing_queues says what a holder and a waiter are, that a lone ticket waits on nobody, and what truncated means", () => {
+test("read_landing_queues says what a holder and a waiter are, that a lone ticket waits on nobody, that no target is not the default branch, and what truncated means", () => {
   const { description } = chuggyProjectTools.find(
     ({ name }) => name === "read_landing_queues",
   );
@@ -1260,6 +1260,7 @@ test("read_landing_queues says what a holder and a waiter are, that a lone ticke
     /Its `holder` is the one ticket that may land on that reference now/,
     /`waiting` the tickets ranked behind it, in rank order, none of which lands there before the holder stops holding it/,
     /A ticket alone in a queue is its holder and waits on nobody/,
+    /a queue naming no `target` being its tickets' that name none, which is a different queue from one naming the default branch/,
     /the earliest-ranked queues one answer holds, `truncated` where it leaves later ones out or the route ranked more tickets than one read answers/,
   ])
     assert.match(description, claim);

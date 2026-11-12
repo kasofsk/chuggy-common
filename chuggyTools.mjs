@@ -2013,7 +2013,7 @@ export const chuggyProjectTools = [
   {
     name: "read_landing_queues",
     description:
-      "This project's landing queues, one for each reference a Serialized or Stacked ticket lands on. Call it for why a ticket's landing waits on another ticket's. Answers JSON. Each queue carries its `repository` and its `target`, a queue naming no `target` being its repository's default branch's. Its `holder` is the one ticket that may land on that reference now, and `waiting` the tickets ranked behind it, in rank order, none of which lands there before the holder stops holding it. A ticket alone in a queue is its holder and waits on nobody. It answers the earliest-ranked queues one answer holds, `truncated` where it leaves later ones out or the route ranked more tickets than one read answers.",
+      "This project's landing queues, one for each reference a Serialized or Stacked ticket lands on. Call it for why a ticket's landing waits on another ticket's. Answers JSON. Each queue carries its `repository` and its `target`, a queue naming no `target` being its tickets' that name none, which is a different queue from one naming the default branch. Its `holder` is the one ticket that may land on that reference now, and `waiting` the tickets ranked behind it, in rank order, none of which lands there before the holder stops holding it. A ticket alone in a queue is its holder and waits on nobody. It answers the earliest-ranked queues one answer holds, `truncated` where it leaves later ones out or the route ranked more tickets than one read answers.",
     shape: () => ({}),
     call: (context) =>
       readLandingQueues(context, projectPath(context, "landingQueues")),
