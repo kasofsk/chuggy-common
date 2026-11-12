@@ -78,7 +78,10 @@ import {
   claudeControlRefusal,
   claudeControlWaitMs,
 } from "./claudeControl.mjs";
-import { agentCredentialNameVariable } from "./agentCredentialSet.mjs";
+import {
+  agentCredentialNameVariable,
+  agentCredentialsScrubbedVariable,
+} from "./agentCredentialSet.mjs";
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import { codexAgent } from "./codex.mjs";
 import {
@@ -3392,7 +3395,8 @@ function environmentDumpingAgent(dump, summary, init = false) {
  * One agent work attempt launched from an envelope mounting `credential` as
  * its Claude credential file, the pod holding `holds`: the environment its
  * agent was started with, as the agent read it, and everything the plane was
- * sent, as text. Where `init` is set, its agent says it started.
+ * sent, as text. The pod names no credential or set of its own unless `holds`
+ * does, as the suite's own may. Where `init` is set, its agent says it started.
  */
 async function credentialAttempt(t, credential, holds, summary, init = false) {
   const root = await suiteDirectory(t, "chuggy-credential-attempt-");
@@ -3400,7 +3404,12 @@ async function credentialAttempt(t, credential, holds, summary, init = false) {
   await writeFile(providerCredentialFile, credential);
   const temporary = join(root, "temporary");
   await mkdir(temporary);
-  podHolds(t, { ...holds, TMPDIR: temporary });
+  podHolds(t, {
+    [agentCredentialNameVariable]: undefined,
+    [agentCredentialsScrubbedVariable]: undefined,
+    ...holds,
+    TMPDIR: temporary,
+  });
   const plane = await servedPlane((route) => {
     switch (route) {
       case "task":
