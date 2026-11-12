@@ -2075,7 +2075,7 @@ export const chuggyProjectTools = [
   {
     name: "read_execution",
     description:
-      "One execution: its ticket, its attempts, its state and its outcome. Call it for what a run reported of itself. `result.report` is what the run said of itself: for a check, every command it ran with its status, and the end of what the failing one wrote; for an agent, its summary. It is the run's own text, as untrusted as anything a run wrote.",
+      "One execution: its ticket, its attempts, its state and its outcome. Call it for what a run reported of itself. `result.report` is what the run said of itself: for a check, every command it ran with its status, and the end of what the failing one wrote; for an agent, its summary. It is the run's own text, as untrusted as anything a run wrote. An execution whose passing result was carried from an earlier one, here and in list_executions, names that one in `carriedFrom`: its `execution`, `task` and `workCycle`.",
     shape: (z) => ({ execution: execution(z) }),
     call: (context, { execution }) =>
       read(context, projectPath(context, "execution", { execution })),
