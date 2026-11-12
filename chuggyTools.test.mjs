@@ -21,6 +21,7 @@ import {
   chuggyToolDocsResponseBytesMax,
   chuggyToolEpicViewResponseBytesMax,
   chuggyToolImageResponseBytesMax,
+  chuggyToolLandingQueuesResponseBytesMax,
   chuggyToolLeadSettingsResponseBytesMax,
   chuggyToolPrefix,
   chuggyToolResponseBytesMax,
@@ -34,6 +35,7 @@ import {
   epicSummaryCharsMax,
   epicTicketsMax,
   epicTitleCharsMax,
+  landingQueueTicketsAnsweredMax,
   nativeHttpPageItemsMax,
   runTranscriptBatchBytesMax,
   runTranscriptPageBatchesMax,
@@ -1101,6 +1103,168 @@ test("a landings answer at its draw bound is read, and one past it is refused", 
   );
 });
 
+/** A project's landing queues read over a route answering `body`, and the one path it asked. */
+async function landingQueuesRead(body, status = 200) {
+  const api = apiOf(() => ({ status, body }));
+  const answer = await routeOf("read_landing_queues", {}, api);
+  assert.deepEqual(
+    api.calls.map(({ path }) => path),
+    ["/api/v1/tenants/vteng/projects/chuggy/landing-queues"],
+  );
+  return answer;
+}
+
+/**
+ * A queue held by `holder` with `waiters` behind it, in a repository whose
+ * name is `repositoryChars` backslashes, the text an answer's escaping weighs
+ * twice.
+ */
+function landingQueueOf(holder, waiters, repositoryChars = 1) {
+  return {
+    repository: "\\".repeat(repositoryChars),
+    target: "main",
+    holder,
+    waiting: Array.from({ length: waiters }, (_, at) => holder * 1_000 + at),
+  };
+}
+
+test("a project's landing queues that fit one answer are answered as the route answered them", async () => {
+  for (const truncated of [false, true]) {
+    const body = {
+      queues: [
+        { repository: "https://git.test/a.git", holder: 3, waiting: [] },
+        {
+          repository: "https://git.test/b.git",
+          target: "release",
+          holder: 5,
+          waiting: [8, 13],
+        },
+      ],
+      truncated,
+    };
+
+    const answer = await landingQueuesRead(JSON.stringify(body));
+
+    assert.ok(answer.isError === undefined);
+    assert.deepEqual(JSON.parse(textOf(answer)), body);
+  }
+  const none = await landingQueuesRead(
+    JSON.stringify({ queues: [], truncated: false }),
+  );
+  assert.deepEqual(JSON.parse(textOf(none)), { queues: [], truncated: false });
+});
+
+test("landing queues past one answer keep the earliest-ranked whole queues and say truncated", async () => {
+  const waiters = landingQueueTicketsAnsweredMax / 4 - 1;
+  const queues = Array.from({ length: 4 }, (_, at) =>
+    landingQueueOf(at + 1, waiters, 2_000),
+  );
+  const body = JSON.stringify({ queues, truncated: false });
+  assert.ok(
+    chuggyToolAnswerBytes(body) > chuggyToolAnswerBytesMax &&
+      Buffer.byteLength(body) <= chuggyToolLandingQueuesResponseBytesMax,
+    "the queues under test fit one answer, or only past their draw bound",
+  );
+
+  const answer = await landingQueuesRead(body);
+
+  assert.ok(answer.isError === undefined, textOf(answer));
+  assert.ok(chuggyToolAnswerBytes(textOf(answer)) <= chuggyToolAnswerBytesMax);
+  const answered = JSON.parse(textOf(answer));
+  assert.equal(answered.truncated, true);
+  assert.ok(answered.queues.length > 0, "no queue was answered");
+  assert.deepEqual(answered.queues, queues.slice(0, answered.queues.length));
+  assert.ok(
+    chuggyToolAnswerBytes(
+      JSON.stringify({
+        queues: queues.slice(0, answered.queues.length + 1),
+        truncated: true,
+      }),
+    ) > chuggyToolAnswerBytesMax,
+    "a later queue would have fit",
+  );
+});
+
+test("an earliest-ranked queue too large alone is refused rather than cut", async () => {
+  const queue = landingQueueOf(1, 0, chuggyToolAnswerBytesMax);
+
+  const answer = await landingQueuesRead(
+    JSON.stringify({ queues: [queue], truncated: false }),
+  );
+
+  assert.equal(answer.isError, true);
+  assert.match(textOf(answer), /earliest-ranked queue is larger alone/u);
+});
+
+test("a landing queues read the plane refuses is relayed as the refusal it is", async () => {
+  for (const [status, code] of [
+    [403, "Forbidden"],
+    [503, "Unavailable"],
+  ]) {
+    const body = JSON.stringify({ error: { code, message: code } });
+
+    const answer = await landingQueuesRead(body, status);
+
+    assert.equal(answer.isError, true, code);
+    assert.equal(textOf(answer), `HTTP ${String(status)}\n${body}`, code);
+  }
+});
+
+test("a landing queues route's body that is not a project's landing queues is refused rather than answered", async () => {
+  for (const body of [
+    "{}",
+    "not JSON",
+    "null",
+    JSON.stringify({ queues: {}, truncated: false }),
+    JSON.stringify({ queues: [], truncated: "no" }),
+    JSON.stringify({
+      queues: Array.from(
+        { length: landingQueueTicketsAnsweredMax + 1 },
+        (_, at) => landingQueueOf(at + 1, 0),
+      ),
+      truncated: false,
+    }),
+  ]) {
+    const answer = await landingQueuesRead(body);
+
+    assert.equal(answer.isError, true, body);
+    assert.match(textOf(answer), /not a project's landing queues/u, body);
+  }
+});
+
+test("a landing queues answer at its draw bound is read, and one past it is refused", async () => {
+  const body = JSON.stringify({ queues: [], truncated: false });
+  const at = `${body}${" ".repeat(
+    chuggyToolLandingQueuesResponseBytesMax - Buffer.byteLength(body),
+  )}`;
+
+  const read = await landingQueuesRead(at);
+  const over = await landingQueuesRead(`${at} `);
+
+  assert.deepEqual(JSON.parse(textOf(read)), { queues: [], truncated: false });
+  assert.equal(over.isError, true);
+  assert.match(
+    textOf(over),
+    new RegExp(
+      `larger than the ${String(chuggyToolLandingQueuesResponseBytesMax)} bytes`,
+      "u",
+    ),
+  );
+});
+
+test("read_landing_queues says what a holder and a waiter are, that a lone ticket waits on nobody, and what truncated means", () => {
+  const { description } = chuggyProjectTools.find(
+    ({ name }) => name === "read_landing_queues",
+  );
+  for (const claim of [
+    /Its `holder` is the one ticket that may land on that reference now/,
+    /`waiting` the tickets ranked behind it, in rank order, none of which lands there before the holder stops holding it/,
+    /A ticket alone in a queue is its holder and waits on nobody/,
+    /the earliest-ranked queues one answer holds, `truncated` where it leaves later ones out or the route ranked more tickets than one read answers/,
+  ])
+    assert.match(description, claim);
+});
+
 test("a raise too large to store is refused like any other answer", async () => {
   const huge = "x".repeat(chuggyToolAnswerBytesMax);
   const api = {
@@ -1223,6 +1387,7 @@ const readRoutes = [
   [["read_refusals", { limit: 4 }], "/agentic-refusals?limit=4"],
   [["read_ticket_refusals", { ticket: 9 }], "/tickets/9/agentic-refusals"],
   [["read_ticket_landings", { ticket: 9 }], "/tickets/9/landings"],
+  [["read_landing_queues", {}], "/landing-queues"],
   [["read_lead", {}], "/lead"],
   [
     ["read_lead_transcript", { after: 2, entry: 3 }],
@@ -3560,6 +3725,7 @@ const projectToolArguments = {
   read_refusals: {},
   read_ticket_refusals: { ticket: 7 },
   read_ticket_landings: { ticket: 7 },
+  read_landing_queues: {},
   read_lead: {},
   read_lead_transcript: {},
   list_executions: {},
@@ -3850,21 +4016,23 @@ test("every project tool a session holds asks its route, read_docs the docs host
             ? JSON.stringify({ read: "Content", content: "x" })
             : path.endsWith("/landings")
               ? JSON.stringify({ landings: [], truncated: false })
-              : path.includes("/dispatch-view")
-                ? dispatchViewPage([{ ticket: 26, ticketVersion: 41 }])
-                : path.endsWith("/repositories")
-                  ? JSON.stringify({ repositories: [] })
-                  : path.includes("/configurations?")
-                    ? JSON.stringify({ configurations: [] })
-                    : path.endsWith("/epics/3")
-                      ? JSON.stringify(epicRead)
-                      : path.includes("/draft-initializations/")
-                        ? JSON.stringify(draftInitialized)
-                        : path.endsWith("/selector-settings")
-                          ? JSON.stringify(leadSettingsRead())
-                          : path.endsWith("/session-placement")
-                            ? JSON.stringify(placementRead)
-                            : "{}",
+              : path.endsWith("/landing-queues")
+                ? JSON.stringify({ queues: [], truncated: false })
+                : path.includes("/dispatch-view")
+                  ? dispatchViewPage([{ ticket: 26, ticketVersion: 41 }])
+                  : path.endsWith("/repositories")
+                    ? JSON.stringify({ repositories: [] })
+                    : path.includes("/configurations?")
+                      ? JSON.stringify({ configurations: [] })
+                      : path.endsWith("/epics/3")
+                        ? JSON.stringify(epicRead)
+                        : path.includes("/draft-initializations/")
+                          ? JSON.stringify(draftInitialized)
+                          : path.endsWith("/selector-settings")
+                            ? JSON.stringify(leadSettingsRead())
+                            : path.endsWith("/session-placement")
+                              ? JSON.stringify(placementRead)
+                              : "{}",
       }),
     );
 
