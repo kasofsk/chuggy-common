@@ -8,7 +8,7 @@ const task = {
   bounds: { mailboxPollMs: 10, idleMs: 100 },
 };
 
-function mailboxOf(answers) {
+function mailboxOf(answers, bounds = task.bounds) {
   const calls = [];
   let clock = 0;
   const services = {
@@ -27,7 +27,7 @@ function mailboxOf(answers) {
     advance: (milliseconds) => {
       clock += milliseconds;
     },
-    mailbox: sessionMailbox(task, "chgs_b", services),
+    mailbox: sessionMailbox({ ...task, bounds }, "chgs_b", services),
   };
 }
 
@@ -105,6 +105,24 @@ test("an empty mailbox is polled until the idle bound and then ends the iterable
     calls.length,
     task.bounds.idleMs / task.bounds.mailboxPollMs + 1,
   );
+});
+
+test("a mailbox launched with no idle bound is not ended by sitting idle", async () => {
+  const polledEmpty = (task.bounds.idleMs / task.bounds.mailboxPollMs) * 10;
+  const { calls, mailbox } = mailboxOf(
+    [
+      ...Array.from({ length: polledEmpty }, () => ({ status: 204 })),
+      claimed("turn-1"),
+    ],
+    { mailboxPollMs: task.bounds.mailboxPollMs },
+  );
+
+  const turns = mailbox.turns();
+  const first = await turns.next();
+
+  assert.equal(first.done, false, "an idle session with no idle bound ended");
+  assert.equal(mailbox.claimed().turn, "turn-1");
+  assert.equal(calls.length, polledEmpty + 1);
 });
 
 test("a fenced claim ends the iterable rather than asking again", async () => {

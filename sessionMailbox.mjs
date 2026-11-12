@@ -10,9 +10,10 @@
  * of the turn in flight, which claims nothing: it is that turn's own message.
  *
  * BOTH LOOPS ARE BOUNDED. One request is bounded by the plane's own long poll,
- * and the loop as a whole by the idle bound the pod was launched with: a
- * mailbox that stays empty that long ends the iterable, the query ends with it,
- * and the process exits for the scheduler's idle reaper to collect.
+ * and the loop as a whole by the plane's `Stop` and, where the pod was launched
+ * with one, its idle bound: a mailbox that stays empty that long ends the
+ * iterable, the query ends with it, and the process exits for the scheduler's
+ * idle reaper to collect.
  *
  * A CLAIM IS ANNOUNCED BEFORE THE TURN IS YIELDED, which is what lets the pod
  * reset anything a turn owns — its decision staging — with no way for one turn's
@@ -65,6 +66,11 @@ export function sessionUserMessage(input) {
       ? { client_composed: true }
       : {}),
   };
+}
+
+/** Whether a mailbox empty for `idleForMs` has outlasted its idle bound, which it has not where it has none. */
+function sessionMailboxIdled(bounds, idleForMs) {
+  return bounds.idleMs !== undefined && idleForMs >= bounds.idleMs;
 }
 
 export function sessionMailbox(task, bearer, services = {}) {
@@ -135,7 +141,7 @@ export function sessionMailbox(task, bearer, services = {}) {
         if (turn === "Stop") return;
         if (turn === undefined) {
           idleSince ??= now();
-          if (now() - idleSince >= task.bounds.idleMs) return;
+          if (sessionMailboxIdled(task.bounds, now() - idleSince)) return;
           await pause(task.bounds.mailboxPollMs);
           continue;
         }

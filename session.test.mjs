@@ -760,6 +760,21 @@ test("a bound that is not a positive whole number is refused too", () => {
   });
 });
 
+test("a launch with no idle bound is taken, and every other bound is still required", () => {
+  const { idleMs, ...rest } = task.bounds;
+  assert.ok(
+    idleMs !== undefined,
+    "the fixture holds no idle bound to leave out",
+  );
+  assert.equal(sessionBoundNames.includes("idleMs"), false);
+  assert.deepEqual(checkedSessionBounds(rest), rest);
+  assert.deepEqual(
+    [...sessionBoundNames].sort(),
+    Object.keys(rest).sort(),
+    "a bound besides idleMs became optional",
+  );
+});
+
 test("a credential that straddles the result's truncation is scrubbed whole", async () => {
   const plane = planeOf([turnOne], facts);
   const straddled = `${"x".repeat(sessionTurnResultCharsMax - 10)}${token}`;
