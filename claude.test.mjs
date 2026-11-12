@@ -114,6 +114,14 @@ test("a resumed run is the same run in the conversation it left, told the limit 
   assert.equal(claudeAgent.brief, claudeBrief);
 });
 
+/** Catches a resumed run told the limit's prompt in place of the one it was given, or a first run told a prompt in place of its briefing. */
+test("a resumed run given a prompt is told that prompt alone, as its first message", () => {
+  const task = { briefing: { text: "briefing" } };
+
+  assert.equal(claudeBrief(task, "the-session", "-resolve it"), "-resolve it");
+  assert.equal(claudeBrief(task, undefined, "-resolve it"), "briefing");
+});
+
 /** Which runtime may resume is what decides whether a limit can be waited out. */
 test("a Codex run has no conversation to resume, so no limit of its is waited out", () => {
   assert.equal(codexAgent.resumeInvocation, undefined);

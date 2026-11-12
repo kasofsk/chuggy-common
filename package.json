@@ -102,6 +102,7 @@
     "setupEnvironment.mjs",
     "snapshot.mjs",
     "source.mjs",
+    "targetMerge.mjs",
     "ticketImages.mjs",
     "toolListing.mjs",
     "toolProbe.mjs",

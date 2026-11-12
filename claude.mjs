@@ -99,9 +99,9 @@ export function claudeResumeInvocation(task, session) {
   return [...claudeInvocation(task), "--resume", session];
 }
 
-/** What a run's first message says: its briefing, or, carrying on in `session`, that the limit has reset. */
-export function claudeBrief(task, session) {
-  return session === undefined ? task.briefing.text : claudeResumePrompt;
+/** What a run's first message says: its briefing, or, carrying on in `session`, `prompt`, which is a held run's where none is given. */
+export function claudeBrief(task, session, prompt = claudeResumePrompt) {
+  return session === undefined ? task.briefing.text : prompt;
 }
 
 /** `text` as one POSIX shell word, whatever quotes it holds. */
