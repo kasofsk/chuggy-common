@@ -314,6 +314,41 @@ test("every Secret content of a bundle is kept before any of its files is writte
   ]);
 });
 
+/** Catches a placeholder filled with a path read as a replacement pattern, so `$&` in it is not the path. */
+test("a placeholder is filled with its file's path literally, whatever the credential's name holds", async () => {
+  const credential = "a$&b$'c$`d$$e";
+  const bundle = { ...forgeBundle, credential };
+  assert.ok(
+    workerHeldCredentialBundleSchema.safeParse(bundle).success,
+    "the case serves a bundle the contract reads",
+  );
+  const plane = heldPlane({ status: 200, body: { credentials: [bundle] } });
+  const written = [];
+  const held = await heldCredentials({
+    task,
+    bearer: "capability",
+    granted: [credential],
+    credentialFiles: {},
+    directory: "/m",
+    keep: () => {},
+    request: plane.request,
+    makeDirectory: async () => {},
+    write: async (file, content) => {
+      written.push({ file, content });
+    },
+  });
+
+  const bundleDirectory = `/m/held-${credential}`;
+  assert.deepEqual(
+    written.find(({ file }) => file === `${bundleDirectory}/config`).content,
+    `token-file = ${bundleDirectory}/token\n`,
+  );
+  assert.equal(
+    held.find(({ variable }) => variable === "FORGE_ARGUMENTS").value,
+    `--config=${bundleDirectory}/config`,
+  );
+});
+
 /** Catches a granted name that would write its secret outside the minted directory. */
 test("an answer serving a name no file in the minted directory can be named by fails the ask, keeping and writing nothing", async () => {
   const credential = "a/../../x";

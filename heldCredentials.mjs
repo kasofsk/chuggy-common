@@ -82,8 +82,7 @@ function heldCredentialsRead(body, asked) {
 function heldCredentialsBundleFilled(text, paths) {
   let filled = text;
   for (const file of new Set(heldCredentialFilesPlaced(text)))
-    filled = filled.replaceAll(
-      heldCredentialFilePlaceholder(file),
+    filled = filled.replaceAll(heldCredentialFilePlaceholder(file), () =>
       paths.get(file),
     );
   return filled;
