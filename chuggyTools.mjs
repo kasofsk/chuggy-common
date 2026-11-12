@@ -64,9 +64,9 @@
  * ticket's work stands, so `read_ticket_landings` leaves out the oldest whole
  * landings until the rest fit, and says so in `truncated`. The contract bounds
  * what one landing weighs, and the suite holds the heaviest one inside an
- * answer. `read_landing_queues` answers the earliest-ranked whole queues that
- * fit the same way, since its route's bound is likewise its tickets' rather
- * than one answer's.
+ * answer. `read_landing_queues` answers the route's first whole queues that
+ * fit, in the route's order, by repository and then target, since its route's
+ * bound is likewise its tickets' rather than one answer's.
  *
  * ANOTHER IS A CONFIGURATION, ANSWERED BY `path` where it is larger than one
  * answer. Its route answers the canonical whole, bounded by what a
@@ -705,10 +705,10 @@ function readLandingQueuesBody(text) {
 }
 
 /**
- * A project's landing queues as one answer: the earliest-ranked that fit, and
- * `truncated` where the route left tickets out or this answer left queues
- * out. Nothing is answered where the earliest alone does not fit, because a
- * queue is never cut.
+ * A project's landing queues as one answer: the route's first whole queues
+ * that fit, in its order, and `truncated` where the route left tickets out or
+ * this answer left queues out. Nothing is answered where the route's first
+ * queue alone does not fit, because a queue is never cut.
  */
 function readLandingQueuesAnswer(body) {
   const { queues } = body;
@@ -724,7 +724,7 @@ function readLandingQueuesAnswer(body) {
   return undefined;
 }
 
-/** A project's landing queues, earliest-ranked kept where they are more than one answer holds. */
+/** A project's landing queues, the route's first whole queues kept where they are more than one answer holds. */
 async function readLandingQueues(context, path) {
   const body = await drawn(
     context,
@@ -742,7 +742,7 @@ async function readLandingQueues(context, path) {
   const answer = readLandingQueuesAnswer(queues);
   return answer === undefined
     ? answerTooLarge(
-        "its earliest-ranked queue is larger alone, so it cannot be answered",
+        "the route's first queue is larger alone, so it cannot be answered",
       )
     : answered(answer);
 }
@@ -2013,7 +2013,7 @@ export const chuggyProjectTools = [
   {
     name: "read_landing_queues",
     description:
-      "This project's landing queues, one for each reference a Serialized or Stacked ticket lands on. Call it for why a ticket's landing waits on another ticket's. Answers JSON. Each queue carries its `repository` and its `target`, a queue naming no `target` being its tickets' that name none, which is a different queue from one naming the default branch. Its `holder` is the one ticket that may land on that reference now, and `waiting` the tickets ranked behind it, in rank order, none of which lands there before the holder stops holding it. A ticket alone in a queue is its holder and waits on nobody. It answers the earliest-ranked queues one answer holds, `truncated` where it leaves later ones out or the route ranked more tickets than one read answers.",
+      "This project's landing queues, one for each reference a Serialized or Stacked ticket lands on. Call it for why a ticket's landing waits on another ticket's. Answers JSON. Each queue carries its `repository` and its `target`, a queue naming no `target` being its tickets' that name none, which is a different queue from one naming the default branch. Its `holder` is the one ticket that may land on that reference now, and `waiting` the tickets ranked behind it, in rank order, none of which lands there before the holder stops holding it. A ticket alone in a queue is its holder and waits on nobody. It answers the route's first whole queues one answer holds, in the route's order, by repository and then target, `truncated` where it leaves later ones out or the route left tickets out.",
     shape: () => ({}),
     call: (context) =>
       readLandingQueues(context, projectPath(context, "landingQueues")),

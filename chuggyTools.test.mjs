@@ -1115,14 +1115,19 @@ async function landingQueuesRead(body, status = 200) {
 }
 
 /**
- * A queue held by `holder` with `waiters` behind it, in a repository whose
- * name is `repositoryChars` backslashes, the text an answer's escaping weighs
- * twice.
+ * A queue held by `holder` with `waiters` behind it, naming `target` where one
+ * is given, in a repository whose name is `repositoryChars` backslashes, the
+ * text an answer's escaping weighs twice, and then `repositorySuffix`.
  */
-function landingQueueOf(holder, waiters, repositoryChars = 1) {
+function landingQueueOf(
+  holder,
+  waiters,
+  repositoryChars = 1,
+  { repositorySuffix = "", target } = {},
+) {
   return {
-    repository: "\\".repeat(repositoryChars),
-    target: "main",
+    repository: `${"\\".repeat(repositoryChars)}${repositorySuffix}`,
+    ...(target === undefined ? {} : { target }),
     holder,
     waiting: Array.from({ length: waiters }, (_, at) => holder * 1_000 + at),
   };
@@ -1154,10 +1159,28 @@ test("a project's landing queues that fit one answer are answered as the route a
   assert.deepEqual(JSON.parse(textOf(none)), { queues: [], truncated: false });
 });
 
-test("landing queues past one answer keep the earliest-ranked whole queues and say truncated", async () => {
+/** Whether `left` comes before `right` in the route's order: by repository, then target, a queue naming none first. */
+function landingQueueBefore(left, right) {
+  return left.repository === right.repository
+    ? (left.target ?? "") < (right.target ?? "")
+    : left.repository < right.repository;
+}
+
+test("landing queues past one answer keep the route's first whole queues in its order and say truncated", async () => {
   const waiters = landingQueueTicketsAnsweredMax / 4 - 1;
-  const queues = Array.from({ length: 4 }, (_, at) =>
-    landingQueueOf(at + 1, waiters, 2_000),
+  const queues = [
+    ["a", undefined, 13],
+    ["a", "main", 2],
+    ["a", "release", 8],
+    ["b", "main", 1],
+  ].map(([repositorySuffix, target, holder]) =>
+    landingQueueOf(holder, waiters, 2_000, { repositorySuffix, target }),
+  );
+  assert.ok(
+    queues.every(
+      (queue, at) => at === 0 || landingQueueBefore(queues[at - 1], queue),
+    ),
+    "the queues under test are in the route's order",
   );
   const body = JSON.stringify({ queues, truncated: false });
   assert.ok(
@@ -1185,7 +1208,7 @@ test("landing queues past one answer keep the earliest-ranked whole queues and s
   );
 });
 
-test("an earliest-ranked queue too large alone is refused rather than cut", async () => {
+test("a route's first queue too large alone is refused rather than cut", async () => {
   const queue = landingQueueOf(1, 0, chuggyToolAnswerBytesMax);
 
   const answer = await landingQueuesRead(
@@ -1193,7 +1216,7 @@ test("an earliest-ranked queue too large alone is refused rather than cut", asyn
   );
 
   assert.equal(answer.isError, true);
-  assert.match(textOf(answer), /earliest-ranked queue is larger alone/u);
+  assert.match(textOf(answer), /the route's first queue is larger alone/u);
 });
 
 test("a landing queues read the plane refuses is relayed as the refusal it is", async () => {
@@ -1261,7 +1284,7 @@ test("read_landing_queues says what a holder and a waiter are, that a lone ticke
     /`waiting` the tickets ranked behind it, in rank order, none of which lands there before the holder stops holding it/,
     /A ticket alone in a queue is its holder and waits on nobody/,
     /a queue naming no `target` being its tickets' that name none, which is a different queue from one naming the default branch/,
-    /the earliest-ranked queues one answer holds, `truncated` where it leaves later ones out or the route ranked more tickets than one read answers/,
+    /It answers the route's first whole queues one answer holds, in the route's order, by repository and then target, `truncated` where it leaves later ones out or the route left tickets out/,
   ])
     assert.match(description, claim);
 });
