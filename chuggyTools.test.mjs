@@ -144,9 +144,10 @@ test("a tool the roster does not grant is never registered", () => {
 });
 
 /**
- * Every tool that takes a brief, each with what its `brief` parameter says. The
- * brief is described there rather than in the tool's description, which
- * Claude Code cuts.
+ * Every tool that takes a brief, each with what its `brief` parameter says and
+ * what each field it publishes says. The brief is described there rather than
+ * in the tool's description, which Claude Code cuts. A brief that publishes no
+ * fields is an open object, and its parameter says the whole of it.
  */
 function briefTakers() {
   return chuggyToolDefinitions(
@@ -156,16 +157,28 @@ function briefTakers() {
     }),
   )
     .filter((definition) => "brief" in definition.shape(z))
-    .map(({ name, shape }) => ({
-      name,
-      description: shape(z).brief.description ?? "",
-    }));
+    .map(({ name, shape }) => {
+      const { brief } = shape(z);
+      const fields = Object.fromEntries(
+        Object.entries(brief.shape).map(([field, schema]) => [
+          field,
+          schema.description ?? "",
+        ]),
+      );
+      const description = brief.description ?? "";
+      return {
+        name,
+        description,
+        fields,
+        says: [description, ...Object.values(fields)].join("\n"),
+      };
+    });
 }
 
 /**
- * `brief` is an open object on the wire, so a session learns what one carries
- * from the parameter's description alone. A tool that takes one and does not
- * name the title is a tool that files untitled tickets.
+ * A session learns what a brief carries from the brief's descriptions alone.
+ * A tool that takes one and does not name the title is a tool that files
+ * untitled tickets.
  */
 test("every tool that takes a brief names the title it carries", () => {
   const taking = briefTakers();
@@ -175,10 +188,14 @@ test("every tool that takes a brief names the title it carries", () => {
     "file_dependent",
     "revise_draft",
   ]);
-  for (const { name, description } of taking) {
-    assert.ok(description.includes("`title`"), `${name} names no title`);
+  for (const { name, description, fields } of taking) {
+    const title = fields.title ?? description;
     assert.ok(
-      description.includes("always give one"),
+      "title" in fields || description.includes("`title`"),
+      `${name} names no title`,
+    );
+    assert.ok(
+      title.includes("always give one"),
       `${name} does not ask for one`,
     );
   }
@@ -193,8 +210,11 @@ test("every tool that takes a brief says an intent is bounded as a whole, and gi
   const taking = briefTakers();
 
   assert.notEqual(taking.length, 0, "no tool takes a brief");
-  for (const { name, description } of taking) {
-    const [, intent] = /`intent` is ([^;]*);/u.exec(description) ?? [];
+  for (const { name, description, fields } of taking) {
+    const [, intent] = /`intent` is ([^;]*);/u.exec(description) ?? [
+      undefined,
+      fields.intent,
+    ];
     assert.ok(intent !== undefined, `${name} does not say what an intent is`);
     assert.ok(
       intent.includes("bounded only as a whole"),
@@ -2630,6 +2650,14 @@ test("a write relays the status and the body the API answered, unaltered", async
   }
 });
 
+/** The least a draft write's `authoring` and `brief` are, which the contract's shapes admit. */
+const draftAuthoring = { dependencies: [], program: [] };
+const draftBrief = {
+  title: "t",
+  intent: "what the member asked for",
+  links: [],
+};
+
 test("a write is written in the versioned media type the API requires", async () => {
   const { api, call } = toolsOf();
 
@@ -2637,8 +2665,8 @@ test("a write is written in the versioned media type the API requires", async ()
     ticket: 4,
     expectedVersion: 2,
     configurationRevision: "r1",
-    authoring: { dependencies: [] },
-    brief: { title: "t" },
+    authoring: draftAuthoring,
+    brief: draftBrief,
   });
 
   assert.equal(api.calls[0].method, "PUT");
@@ -2649,8 +2677,8 @@ test("a write is written in the versioned media type the API requires", async ()
   assert.deepEqual(JSON.parse(api.calls[0].init.body), {
     expectedVersion: 2,
     configurationRevision: "r1",
-    authoring: { dependencies: [] },
-    brief: { title: "t" },
+    authoring: draftAuthoring,
+    brief: draftBrief,
   });
 });
 
@@ -2659,8 +2687,8 @@ test("a draft fenced at version zero is refused before any call, and one at vers
   const revision = {
     ticket: 4,
     configurationRevision: "r1",
-    authoring: { dependencies: [] },
-    brief: { title: "t" },
+    authoring: draftAuthoring,
+    brief: draftBrief,
   };
   for (const [name, args] of [
     ["revise_draft", revision],
@@ -2743,8 +2771,8 @@ test("a write names the media type only when it sends a body", async () => {
     ticket: 4,
     expectedVersion: 2,
     configurationRevision: "r1",
-    authoring: { dependencies: [] },
-    brief: { title: "t" },
+    authoring: draftAuthoring,
+    brief: draftBrief,
   });
   await call("delete_draft", { ticket: 4, expectedVersion: 2 });
 
@@ -3109,12 +3137,8 @@ test("the configuration read says where the agent that does the work is named", 
  * says it on its `brief` parameter.
  */
 const briefClaims = [
-  /\{title\?, intent, links, images\?, checks\?/,
-  /`images` are this project's images the work is handed, each by the identity fetch_image takes/,
-  new RegExp(
-    `each one line of 1 to ${String(briefLineCharsMax)} characters with no tab, line break or other control character in it`,
-    "u",
-  ),
+  /this project's images the work is handed, each by the identity fetch_image takes/iu,
+  /one line\b.* with no tab, line break or other control character in it/,
   /`commandedCheckStage`, its program stage key, counted from one/,
   /`commandedCheckStageNote` \(the same stage and, for a catalog, its plan, or that none does and which plans would\)/,
   /whose program leaves out that stage, or for a catalog the evaluator in it that runs commands, is refused when it is released whoever releases it \(ProgramSkipsBriefChecks\)/,
@@ -3123,7 +3147,7 @@ const briefClaims = [
   /the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown/,
   /runs under sh -eu with the commit/,
   /reads it as \$\{CHUG_CHANGE_BASE-\} and runs everything where that is empty/,
-  /a brief naming none takes, on a version 2 catalog, the landing of the finalizer its selection lands with where that finalizer names one, and otherwise its repository's landing default/,
+  /[Aa] brief naming (?:none|no `finalization`) takes, on a version 2 catalog, the landing of the finalizer its selection lands with where that finalizer names one, and otherwise its repository's landing default/,
   /for a newly bound repository is a pull request/,
   /`landing`, the mode and target it stored, and its `source`: Brief, Finalizer, Repository, or Default for a brief naming no repository/,
   /never the default branch/,
@@ -3131,12 +3155,41 @@ const briefClaims = [
   /A 400 names the rule the brief broke, and for a check its position in `checks`, counted from zero/,
 ];
 
+/** What an open brief's parameter says that a published brief's shape says instead. */
+const openBriefClaims = [
+  /\{title\?, intent, links, images\?, checks\?/,
+  new RegExp(`a check being 1 to ${String(briefLineCharsMax)} characters`, "u"),
+];
+
 test("every tool that takes a brief says on its parameter what the server does with one", () => {
   const taking = briefTakers();
 
   assert.notEqual(taking.length, 0, "no tool takes a brief");
-  for (const { name, description } of taking)
-    for (const claim of briefClaims) assert.match(description, claim, name);
+  for (const { name, fields, says } of taking) {
+    for (const claim of briefClaims) assert.match(says, claim, name);
+    if (Object.keys(fields).length === 0)
+      for (const claim of openBriefClaims) assert.match(says, claim, name);
+  }
+});
+
+test("an open brief says each field as the published brief says it", () => {
+  const taking = briefTakers();
+  const open = taking.filter(({ fields }) => Object.keys(fields).length === 0);
+  const published = taking.filter(
+    ({ fields }) => Object.keys(fields).length > 0,
+  );
+
+  assert.notEqual(open.length, 0, "no tool takes an open brief");
+  assert.notEqual(published.length, 0, "no tool publishes a brief's shape");
+  for (const { fields } of published)
+    for (const [field, sentence] of Object.entries(fields))
+      for (const { name, says } of open)
+        assert.ok(
+          says.includes(
+            `\`${field}\` ${field.endsWith("s") ? "are" : "is"} ${sentence.charAt(0).toLowerCase()}${sentence.slice(1, -1)}`,
+          ),
+          `${name} says ${field} otherwise`,
+        );
 });
 
 /** What a release or an update of a draft running less than its plan is answered, and what lets it through. */
@@ -3393,13 +3446,23 @@ test("the draft writes open their brief with the minimum brief and say what auth
       .shape(z);
     assert.ok(
       shape.brief.description.startsWith(
-        'The minimum brief is {title, intent, links: [], repository: <clone URL from list_repositories>, branch: "refs/heads/<a new branch of your own>"}.\n`brief` is {title?',
+        'The minimum brief is {title, intent, links: [], repository: <clone URL from list_repositories>, branch: "refs/heads/<a new branch of your own>"}. ',
       ),
       name,
     );
     assert.match(
       shape.authoring.description ?? "",
-      /^`authoring` is \{program, dependencies\}: pass initialize_draft's `defaults` unchanged unless you mean otherwise, and `dependencies` are ticket numbers chosen from list_tickets\.$/,
+      /^How the machine runs the ticket: pass initialize_draft's `defaults` unchanged unless you mean otherwise\.$/,
+      name,
+    );
+    assert.match(
+      shape.authoring.shape.program.description ?? "",
+      /initialize_draft's `defaults\.program`/,
+      name,
+    );
+    assert.match(
+      shape.authoring.shape.dependencies.description ?? "",
+      /chosen from list_tickets/,
       name,
     );
   }
@@ -3584,8 +3647,8 @@ const origination = {
   configurationRevision: "r1",
   configurationDigest: "d1",
   expectedProjectSequence: 12,
-  authoring: { dependencies: [] },
-  brief: { title: "what the member asked for" },
+  authoring: draftAuthoring,
+  brief: draftBrief,
 };
 
 test("an originated draft is filed at the drafts route, fenced and derived from nothing", async () => {
@@ -3670,8 +3733,8 @@ test("what a project tool sends is scrubbed of the session's secrets, and its op
   await call("read_configuration", { revision: held });
   await call("list_tickets", { phase: [held] });
   await chuggyToolDefinitions(context)
-    .find(({ name }) => name === "create_draft")
-    .call({ ...origination, brief: { title: "t", [held]: held } });
+    .find(({ name }) => name === "file_dependent")
+    .call({ ...dependent, brief: { title: "t", [held]: held } });
 
   assert.equal(api.calls.length, 5);
   for (const { path, init } of api.calls) {
@@ -3712,8 +3775,8 @@ async function draftWritesCarry(field, value) {
     ticket: 4,
     expectedVersion: 2,
     configurationRevision: "r1",
-    authoring: { dependencies: [] },
-    brief: { title: "t" },
+    authoring: draftAuthoring,
+    brief: draftBrief,
   };
 
   for (const [tool, args] of [
@@ -3807,7 +3870,12 @@ test("each draft tool's selection parameter says what a selection is", () => {
 test("each draft tool's selection parameter names the revision a ticket follows", () => {
   for (const name of ["create_draft", "file_dependent", "revise_draft"]) {
     const tool = chuggyProjectTools.find((held) => held.name === name);
-    const described = tool?.shape(z).selection?.description ?? "";
+    const selection = tool?.shape(z).selection;
+    const field = selection?.unwrap?.().shape?.configuration?.description;
+    const described =
+      field === undefined
+        ? (selection?.description ?? "")
+        : `\`configuration\` is ${field} ${selection.description}`;
     assert.match(described, /`configuration` is "Pinned" or "Latest"/u, name);
     assert.match(described, /`defaults\.configuration`, or Pinned/u, name);
     assert.match(described, /leaves out part of its plan does not move/u, name);
@@ -3923,8 +3991,8 @@ const projectToolArguments = {
     ticket: 4,
     expectedVersion: 2,
     configurationRevision: "r1",
-    authoring: { dependencies: [] },
-    brief: { title: "t" },
+    authoring: draftAuthoring,
+    brief: draftBrief,
   },
   delete_draft: { ticket: 4, expectedVersion: 2 },
   release_draft: {
