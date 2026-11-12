@@ -354,11 +354,12 @@ test("a request declares the host's platforms and the operator's capabilities af
 });
 
 /**
- * Catches a runner declaring an agent it holds no credential for, or has no
- * image or host to run, which would take jobs requiring it and refuse them;
- * or one it can run left undeclared.
+ * Catches a runner declaring an agent it holds no credential for, or an agent
+ * other than Claude it has no image or host to run, which would take jobs
+ * requiring it and refuse them; or Claude left undeclared where it holds
+ * Claude's credential, which chuggy would then offer no Claude job.
  */
-test("a runner declares each agent it holds a credential file for and has an image declaring, or runs on its host", () => {
+test("a runner declares Claude wherever it holds its credential file, and each other agent it holds one for and has an image declaring, or runs on its host", () => {
   const files = { tokenFile: "/t", agentCredentialFiles: { Codex: "/c" } };
   const images = (...capabilities) => [
     { capabilities: ["Tool:Bazel"] },
@@ -369,9 +370,10 @@ test("a runner declares each agent it holds a credential file for and has an ima
     ["Agent:Claude", "Agent:Codex"],
   );
   assert.deepEqual(registerAgents(files, images("Agent:Codex"), false), [
+    "Agent:Claude",
     "Agent:Codex",
   ]);
-  assert.deepEqual(registerAgents(files, images(), false), []);
+  assert.deepEqual(registerAgents(files, images(), false), ["Agent:Claude"]);
   assert.deepEqual(registerAgents(files, [], true), [
     "Agent:Claude",
     "Agent:Codex",
@@ -407,6 +409,31 @@ const advertising = {
 };
 
 /**
+ * Catches a runner whose selector holds Claude's set, with no image or host
+ * for it, leaving Claude unnamed and so offered no Claude job; or one whose
+ * selector holds no Claude set naming Claude.
+ */
+test("a runner with a selector names Claude exactly where it holds a Claude set, image and host or none", () => {
+  const plain = { ...advertising, images: [], recorded: [] };
+  for (const [documents, host, agents] of [
+    [{ claudeCredential: { kind: "Subscription" } }, false, ["Agent:Claude"]],
+    [{ codexCredential: { authFile: "/c" } }, false, []],
+    [{ codexCredential: { authFile: "/c" } }, true, ["Agent:Codex"]],
+  ]) {
+    const files = {
+      credentials: agentCredentialSelector(agentCredentialSets(documents)),
+    };
+    const why = JSON.stringify({ documents, host });
+    assert.deepEqual(registerAgents(files, [], host), agents, why);
+    assert.deepEqual(
+      registerAdvertised({ ...plain, files, host }),
+      { capabilities: ["Platform:Linux:Amd64", ...agents] },
+      why,
+    );
+  }
+});
+
+/**
  * Catches a runner whose own file declares capabilities still advertising
  * those it was registered with, or one whose file declares none dropping them.
  */
@@ -433,10 +460,11 @@ test("a runner advertises the capabilities its own file declares where it declar
 
 /**
  * Catches a platform taken from what a runner was registered with or from
- * what its file declares, rather than found of the machine, and an agent it
- * was registered with advertised where it has no image or host to run it.
+ * what its file declares, rather than found of the machine; an agent other
+ * than Claude it was registered with advertised where it has no image or host
+ * to run it; and Claude dropped where it holds Claude's credential.
  */
-test("a runner advertises the platforms it finds, never those it was registered with, and an agent it was registered with only where it can run it", () => {
+test("a runner advertises the platforms it finds, never those it was registered with, an agent other than Claude it was registered with only where it can run it, and Claude where it holds its credential", () => {
   const recorded = [
     "Platform:Linux:Amd64",
     "Platform:MacOS:Arm64",
@@ -453,7 +481,12 @@ test("a runner advertises the platforms it finds, never those it was registered 
     recorded,
   };
   assert.deepEqual(registerAdvertised(found), {
-    capabilities: ["Platform:Linux:Arm64", "Agent:Gemini", "Tool:Bazel"],
+    capabilities: [
+      "Platform:Linux:Arm64",
+      "Agent:Gemini",
+      "Tool:Bazel",
+      "Agent:Claude",
+    ],
   });
   assert.deepEqual(registerAdvertised({ ...found, host: true }), {
     capabilities: [

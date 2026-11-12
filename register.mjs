@@ -59,7 +59,7 @@ import {
  *   | {kind: "ChatHost", api: URL, token: string}} RegisterAskedRequest
  *   chuggy's origin, the token, the name a pool takes, a personal runner taking none, what the operator declares beside the platforms, and whether a job that pins no image runs on the machine itself; a chat host declares nothing
  * @typedef {RegisterAskedRequest} RegisterRequest
- *   `capabilities` is whole: this machine's platforms first, then what the operator declared, then the agents the runner can run that the operator did not
+ *   `capabilities` is whole: this machine's platforms first, then what the operator declared, then the agents `registerAgents` names that the operator did not
  *
  * @typedef {object} RegisterAsked what the operator asked
  * @property {string | undefined} api
@@ -74,7 +74,7 @@ import {
  * @property {string} hostname
  * @property {string} arch as `process.arch` names its containers' machine
  * @property {readonly string[]} [hosted] the platforms it runs work on its host, beside its containers'
- * @property {readonly string[]} [agents] the capabilities of the agents its runner can run, as `registerAgents` finds them, declared beside what the operator declared
+ * @property {readonly string[]} [agents] the capabilities of its runner's agents, as `registerAgents` names them, declared beside what the operator declared
  */
 
 /** Where a pool's token is redeemed, under chuggy's API. */
@@ -389,13 +389,24 @@ export function registerRequest(asked, machine) {
   return { request: { ...answer.checked, capabilities } };
 }
 
+/** The capability a runner holding Claude's credential always names. */
+const registerClaudeCapability = jobAgentCapability(jobClaudeAgent);
+
 /**
- * The capabilities of the agents a runner can run, which it declares beside
- * what its operator does: each agent it holds a credential file or set for that has
- * somewhere to run, an image its owner listed declaring that agent, or this
- * machine itself where the runner is registered with `--host`. A runner
- * declaring an agent it has nowhere to run would be offered a job requiring
- * it and refuse it, where that job would otherwise wait for a runner that can.
+ * The capabilities of a runner's agents, which it declares beside what its
+ * operator does: Claude wherever it holds Claude's credential file or set, and
+ * each other agent it holds one for that has somewhere to run, an image its
+ * owner listed declaring that agent, or this machine itself where the runner
+ * is registered with `--host`. Any other agent declared with nowhere to run
+ * would be offered a job requiring it and refuse it, where that job would
+ * otherwise wait for a runner that can. Claude is named regardless, since a
+ * Claude job pinning its own image needs no image or host here and chuggy
+ * offers an agent's job only to a runner naming it. The cost: a job that pins
+ * no image and requires `Agent:Claude` is offered to a runner with no image or
+ * host for it, which refuses it, and chuggy blocks a refused execution (its
+ * `RequiredCapabilityUnavailable`) rather than holding it, so a job a pool or
+ * a second runner would have run is blocked instead. It is accepted because
+ * otherwise a plainly set up runner takes no Claude job at all.
  *
  * @param {import("./job.mjs").JobCredentialFiles} files
  * @param {readonly {capabilities: readonly string[]}[]} images what its owner listed
@@ -409,7 +420,11 @@ export function registerAgents(files, images, host) {
       : files.credentials.agents;
   return held
     .map(jobAgentCapability)
-    .filter((agent) => registerAgentRunnable(agent, images, host));
+    .filter(
+      (agent) =>
+        agent === registerClaudeCapability ||
+        registerAgentRunnable(agent, images, host),
+    );
 }
 
 /**
@@ -450,7 +465,7 @@ export const registerDeclaredSchema = workerPoolCapabilitiesSchema.superRefine(
 /**
  * @typedef {object} RegisterRunner what a runner finds of itself when it starts
  * @property {readonly string[]} platforms those it runs work on, its containers' first
- * @property {import("./job.mjs").JobCredentialFiles} files
+ * @property {import("./job.mjs").JobCredentialFiles} files whose agents `registerAgents` names
  * @property {readonly {capabilities: readonly string[]}[]} images what its owner listed
  * @property {boolean} host whether a job that pins no image runs on the machine itself, as the pool file says
  * @property {readonly string[] | undefined} declared what its own file declares, as `registerDeclaredSchema` reads it, where the file names the key
@@ -460,11 +475,11 @@ export const registerDeclaredSchema = workerPoolCapabilitiesSchema.superRefine(
 /**
  * The capabilities a runner names on each poll, whose set replaces the one
  * its registration recorded: its platforms first, then its operator's and the
- * agents `registerAgents` finds, each once. Its operator's are what its own
+ * agents `registerAgents` names, each once. Its operator's are what its own
  * file declares where it names the key, and otherwise what the pool was
  * registered with, less the platforms, which a runner finds of itself, and
- * less any agent it has no image or host to run, whose job it would be
- * offered and refuse.
+ * less any agent it has no image or host to run; Claude, so dropped, is
+ * named again by `registerAgents` where the runner holds its credential.
  *
  * @param {RegisterRunner} runner
  * @returns {{capabilities: string[]} | {refused: string}}
