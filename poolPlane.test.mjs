@@ -14,6 +14,9 @@ import {
   workerRunnerHeader,
   workerRunnerMemoryCeilingHeader,
   workerRunnerCountOf,
+  workerRunnerCredentialsHeader,
+  workerRunnerCredentialsOf,
+  workerRunnerCredentialsPerAgentMax,
   workerRunnerMemoryRoomHeader,
   workerRunnerOf,
 } from "@chuggy/worker-contract/workerPool";
@@ -432,6 +435,80 @@ test("a client given no capabilities names none on any poll", async () => {
     await capabilitiesNamed(undefined),
     Array(2).fill({ present: false, named: { named: "None" } }),
   );
+});
+
+/**
+ * Catches a poll's credentials held back from a plane that answered an
+ * earlier version or none yet, each of whose polls would then pause its
+ * owner's whole agent, or a header the plane reads as other names than the
+ * terms', which it would read as naming none.
+ */
+test("a poll names its terms' credentials as the plane reads them, whatever version it last answered, and none it would not read back as them", async () => {
+  const named = { Claude: ["max-1", "key-1"], Codex: ["openai-1"] };
+  const seen = [];
+  let release = "1.77.0";
+  const plane = poolPlaneClient(planeSettings, async (_input, init) => {
+    seen.push(init.headers[workerRunnerCredentialsHeader]);
+    return new globalThis.Response(
+      JSON.stringify({ assignments: [], sessions: [], stop: [] }),
+      { status: 200, headers: { [workerContractHeader]: release } },
+    );
+  });
+  await plane.poll("pool-token", [], 1, 0, { credentials: named });
+  await plane.poll("pool-token", [], 1, 0, { credentials: named });
+  release = workerContractRelease;
+  await plane.poll("pool-token", [], 1, 0, { credentials: named });
+  assert.deepEqual(
+    seen.map((header) => workerRunnerCredentialsOf(header)),
+    Array(3).fill(named),
+  );
+
+  const bound = Array.from(
+    { length: workerRunnerCredentialsPerAgentMax + 1 },
+    (_, index) => `key-${String(index)}`,
+  );
+  for (const credentials of [
+    undefined,
+    {},
+    { Claude: [] },
+    { Claude: ["max-1", "max-1"] },
+    { Claude: ["max-1"], Gemini: ["gemini-1"] },
+    { Claude: ["max 1"] },
+    { Claude: bound },
+  ]) {
+    seen.length = 0;
+    await plane.poll("pool-token", [], 1, 0, { credentials });
+    assert.deepEqual(seen, [undefined], JSON.stringify(credentials));
+  }
+});
+
+/**
+ * Catches an answer's credential outcomes or pauses dropped as the answer is
+ * rebuilt, or either made up where the plane left it out.
+ */
+test("an answer's credential outcomes and pauses are passed on, and none where it names none", async () => {
+  const stopping = { assignments: [], sessions: [], stop: ["job-1"] };
+  const credentialOutcomes = [
+    { assignment: "job-1", outcome: "CreditsExhausted" },
+  ];
+  const credentialPauses = [
+    { agent: "Claude", credential: "max-1", pausedUntil: 1_900_000_000 },
+  ];
+  const passed = await answering(
+    200,
+    JSON.stringify({ ...stopping, credentialOutcomes, credentialPauses }),
+  ).poll("pool-token", [], 1);
+  assert.deepEqual(
+    [passed.credentialOutcomes, passed.credentialPauses],
+    [credentialOutcomes, credentialPauses],
+  );
+  const none = await answering(200, JSON.stringify(stopping)).poll(
+    "pool-token",
+    [],
+    1,
+  );
+  assert.equal(none.polled, "Reconciled");
+  assert.ok(!("credentialOutcomes" in none) && !("credentialPauses" in none));
 });
 
 /**

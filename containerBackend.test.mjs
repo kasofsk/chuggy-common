@@ -1424,8 +1424,12 @@ test("a job requiring an agent mounts that agent's credential file and is told t
   ]);
 });
 
-/** Catches a credential outcome a backend is handed reaching no selector, or benching another than the one its assignment mounted. */
-test("a credential outcome handed the backend benches the credential its assignment mounted", async (t) => {
+/**
+ * Catches a credential outcome or pause a backend is handed reaching no
+ * selector, an outcome benching another than the one its assignment mounted,
+ * or a poll naming other credentials than the selector would run on.
+ */
+test("a credential outcome handed the backend benches the credential its assignment mounted, a pause passes one over, and a poll names what the selector names", async (t) => {
   const selector = rotatingSelector();
   const { backend, state } = await harness(t, {
     tokenFile: undefined,
@@ -1439,27 +1443,40 @@ test("a credential outcome handed the backend benches the credential its assignm
       image: undefined,
       capabilities: ["Platform:Linux:Amd64", "Agent:Claude"],
     });
+  assert.deepEqual(backend.credentialsNamed(), {
+    Claude: ["max-1", "max-2"],
+    Codex: ["openai-1"],
+  });
+  backend.credentialPausesTaken([
+    { agent: "Claude", credential: "max-1", pausedUntil: 4_000_000_000 },
+  ]);
   await backend.place(claude("asg-1"), "Job");
   backend.credentialOutcomesTaken([
     { assignment: "asg-1", outcome: "CreditsExhausted" },
   ]);
-  assert.deepEqual(selector.benchOf("max-1"), {
+  assert.deepEqual(selector.benchOf("max-2"), {
     state: "BenchedUntilRestart",
   });
-  assert.deepEqual(selector.benchOf("max-2"), { state: "Available" });
+  assert.deepEqual(selector.benchOf("max-1"), { state: "Available" });
   assert.deepEqual(backend.capabilitiesWithheld(), []);
+  backend.credentialPausesTaken([]);
   await backend.place(claude("asg-2"), "Job");
   backend.credentialOutcomesTaken([
     { assignment: "asg-2", outcome: "CreditsExhausted" },
   ]);
   assert.deepEqual(backend.capabilitiesWithheld(), ["Agent:Claude"]);
+  assert.deepEqual(backend.credentialsNamed(), { Codex: ["openai-1"] });
   await backend.settled();
 });
 
-/** Catches a container backend without a selector withholding a capability its runner was built with. */
-test("a container backend without a selector withholds nothing", async (t) => {
+/** Catches a container backend without a selector withholding a capability its runner was built with, naming a credential, or failing on a pause. */
+test("a container backend without a selector withholds nothing, names no credential and takes a pause as nothing", async (t) => {
   const { backend } = await harness(t);
+  backend.credentialPausesTaken([
+    { agent: "Claude", credential: "claude", pausedUntil: 4_000_000_000 },
+  ]);
   assert.deepEqual(backend.capabilitiesWithheld(), []);
+  assert.deepEqual(backend.credentialsNamed(), {});
   await backend.settled();
 });
 

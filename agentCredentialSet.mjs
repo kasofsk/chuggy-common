@@ -28,6 +28,14 @@
  * benching the last of them still runs, on the credential whose bench ends
  * soonest, and may fail once.
  *
+ * A POLL NAMES WHAT A JOB WOULD RUN ON, AND A PAUSED CREDENTIAL IS PASSED
+ * OVER. Each poll names, per agent, the credentials its policy allows that
+ * are not benched, and none of an agent with more than the plane reads. The
+ * plane answers those its owner's thresholds pause, and each answer's pauses
+ * replace the last's. A job runs on a credential neither benched nor paused,
+ * else on the one free soonest. A pause withholds no capability, since the
+ * plane is what holds a claim back.
+ *
  * A WORKLOAD IS TOLD THE CREDENTIAL'S TYPE AND NAME, never its value: Claude's
  * kind in `claudeCredentialVariable`, Codex's type in
  * `codexCredentialVariable`, and the name in `agentCredentialNameVariable`.
@@ -36,6 +44,10 @@
  * they hold.
  */
 
+import {
+  workerRunnerCredentialAgents,
+  workerRunnerCredentialsPerAgentMax,
+} from "@chuggy/worker-contract/workerPool";
 import { z } from "zod";
 
 import {
@@ -187,6 +199,8 @@ export const agentCredentialSetKeys = {
  * @typedef {{until: number} | {untilRestart: true}} AgentCredentialBench `until` in Unix milliseconds
  * @typedef {{state: "Available"} | {state: "Benched", until: number} | {state: "BenchedUntilRestart"}} AgentCredentialBenchState
  * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolCredentialOutcome} WorkerPoolCredentialOutcome
+ * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolCredentialPause} WorkerPoolCredentialPause
+ * @typedef {import("@chuggy/worker-contract/workerPool").WorkerRunnerCredentials} WorkerRunnerCredentials
  */
 
 /** A Claude credential of one kind as the credential of a set of one. */
@@ -473,28 +487,36 @@ function agentCredentialBenchEndsMs(state) {
 }
 
 /**
+ * Every credential `set`'s policy allows, in the order it prefers them.
+ *
+ * @param {AgentCredentialSet} set
+ * @returns {AgentCredential[]}
+ */
+function agentCredentialAllowed(set) {
+  return "fixed" in set
+    ? [set.fixed]
+    : agentCredentialPreferred[set.prefer].flatMap(
+        (type) => set.pools[type]?.credentials ?? [],
+      );
+}
+
+/**
  * Of every credential `agent`'s policy allows, in the order it prefers them,
- * the first whose bench ends soonest; none where the runner holds no set for
+ * the first that is free soonest; none where the runner holds no set for
  * `agent`.
  *
  * @param {AgentCredentialSets} sets
  * @param {string} agent
- * @param {(credential: AgentCredential) => AgentCredentialBenchState} benchOf
+ * @param {(credential: AgentCredential) => number} freeMsOf when a credential is free, `-Infinity` for one free now
  * @returns {AgentCredential | undefined}
  */
-export function agentCredentialSoonest(sets, agent, benchOf) {
+export function agentCredentialSoonest(sets, agent, freeMsOf) {
   const set = Object.hasOwn(sets, agent) ? sets[agent] : undefined;
   if (set === undefined) return undefined;
-  const allowed =
-    "fixed" in set
-      ? [set.fixed]
-      : agentCredentialPreferred[set.prefer].flatMap(
-          (type) => set.pools[type]?.credentials ?? [],
-        );
   let soonest;
   let soonestMs = Infinity;
-  for (const credential of allowed) {
-    const endsMs = agentCredentialBenchEndsMs(benchOf(credential));
+  for (const credential of agentCredentialAllowed(set)) {
+    const endsMs = freeMsOf(credential);
     if (soonest === undefined || endsMs < soonestMs) {
       soonest = credential;
       soonestMs = endsMs;
@@ -512,20 +534,95 @@ export function agentCredentialSoonest(sets, agent, benchOf) {
  * @param {(credential: AgentCredential) => AgentCredentialBenchState} benchOf
  */
 export function agentCredentialUnavailable(sets, agent, benchOf) {
-  const soonest = agentCredentialSoonest(sets, agent, benchOf);
+  const soonest = agentCredentialSoonest(sets, agent, (credential) =>
+    agentCredentialBenchEndsMs(benchOf(credential)),
+  );
   return soonest !== undefined && benchOf(soonest).state !== "Available";
+}
+
+/**
+ * The credentials each agent's next job would run on now, as a poll names
+ * them: of each agent of the contract's the sets hold, those its policy
+ * allows that `benched` does not, in the set's order and each once, and none
+ * of an agent with none or more than a poll names.
+ *
+ * @param {AgentCredentialSets} sets
+ * @param {(credential: AgentCredential) => boolean} benched
+ * @returns {WorkerRunnerCredentials}
+ */
+export function agentCredentialsNamed(sets, benched) {
+  /** @type {WorkerRunnerCredentials} */
+  const named = {};
+  for (const agent of workerRunnerCredentialAgents) {
+    const set = Object.hasOwn(sets, agent) ? sets[agent] : undefined;
+    if (set === undefined) continue;
+    const names = [
+      ...new Set(
+        agentCredentialAllowed(set)
+          .filter((credential) => !benched(credential))
+          .map((credential) => credential.name),
+      ),
+    ];
+    if (names.length > 0 && names.length <= workerRunnerCredentialsPerAgentMax)
+      named[agent] = names;
+  }
+  return named;
 }
 
 /**
  * @typedef {object} AgentCredentialSelector
  * @property {readonly AgentCredentialAgent[]} agents the agents it holds a set for
  * @property {AgentCredentialSets} sets
- * @property {(agent: string, assignment?: string) => AgentCredential | undefined} chosen the credential `agent`'s next workload runs on, remembered as `assignment`'s where one is named: an available one as `agentCredentialChosen` answers it, else the one whose bench ends soonest
+ * @property {(agent: string, assignment?: string) => AgentCredential | undefined} chosen the credential `agent`'s next workload runs on, remembered as `assignment`'s where one is named: one neither benched nor paused as `agentCredentialChosen` answers it, else the one free soonest, at the later of its bench's end and its pause's
  * @property {(outcomes: readonly WorkerPoolCredentialOutcome[]) => void} outcomesTaken benches the credential each outcome's assignment was chosen, where it remembers one
+ * @property {() => WorkerRunnerCredentials} named what a poll names now, as `agentCredentialsNamed` answers it, taking no turn
+ * @property {(pauses: readonly WorkerPoolCredentialPause[]) => void} pausesTaken replaces the pauses it holds with an answer's, each of a credential of its agent's set
  * @property {(name: string) => AgentCredentialBenchState} benchOf where the bench of the credential `name` stands now
  * @property {() => AgentCredentialAgent[]} unavailable the agents it holds a set for of which no credential its policy allows is available now
  * @property {() => ReturnType<typeof agentCredentialsDescribed>} described each credential as `agentCredentialsDescribed` describes it, with its bench now
  */
+
+/**
+ * The pauses a selector holds from an answer: each answer's replace the
+ * last's, each kept only for a credential of its agent's set, and one whose
+ * end has passed reads as free.
+ *
+ * @param {AgentCredentialSets} sets
+ * @param {() => number} nowMs
+ * @returns {{taken: (pauses: readonly WorkerPoolCredentialPause[]) => void, untilMs: (name: string) => number}}
+ */
+function agentCredentialPauses(sets, nowMs) {
+  /** @type {Map<string, number>} when each paused credential's pause ends, in Unix milliseconds */
+  let held = new Map();
+  return {
+    taken(pauses) {
+      held = new Map();
+      for (const pause of pauses) {
+        const set = Object.hasOwn(sets, pause.agent)
+          ? sets[pause.agent]
+          : undefined;
+        if (
+          set === undefined ||
+          !agentCredentialSetCredentials(set).some(
+            (credential) => credential.name === pause.credential,
+          )
+        )
+          continue;
+        held.set(
+          pause.credential,
+          Math.max(
+            held.get(pause.credential) ?? -Infinity,
+            pause.pausedUntil * 1_000,
+          ),
+        );
+      }
+    },
+    untilMs(name) {
+      const untilMs = held.get(name);
+      return untilMs !== undefined && untilMs > nowMs() ? untilMs : -Infinity;
+    },
+  };
+}
 
 /**
  * The selector a runner holds over its sets for the life of its process.
@@ -541,6 +638,8 @@ export function agentCredentialSelector(sets, nowMs = Date.now) {
   const benches = new Map();
   /** @type {Map<string, string>} the credential name each assignment was chosen */
   const chosenFor = new Map();
+  const paused = agentCredentialPauses(sets, nowMs);
+  const pausedUntilMs = paused.untilMs;
   const benchOf = (name) =>
     agentCredentialBenchState(benches.get(name), nowMs());
   const remembered = (assignment, name) => {
@@ -560,12 +659,19 @@ export function agentCredentialSelector(sets, nowMs = Date.now) {
         sets,
         state,
         agent,
-        (credential) => benchOf(credential.name).state === "Available",
+        (credential) =>
+          benchOf(credential.name).state === "Available" &&
+          pausedUntilMs(credential.name) === -Infinity,
       );
       state = next.state;
       const credential =
         next.credential ??
-        agentCredentialSoonest(sets, agent, (held) => benchOf(held.name));
+        agentCredentialSoonest(sets, agent, (held) =>
+          Math.max(
+            agentCredentialBenchEndsMs(benchOf(held.name)),
+            pausedUntilMs(held.name),
+          ),
+        );
       if (credential !== undefined && assignment !== undefined)
         remembered(assignment, credential.name);
       return credential;
@@ -578,6 +684,12 @@ export function agentCredentialSelector(sets, nowMs = Date.now) {
         benches.set(name, agentCredentialBenchLater(benches.get(name), bench));
       }
     },
+    named: () =>
+      agentCredentialsNamed(
+        sets,
+        (credential) => benchOf(credential.name).state !== "Available",
+      ),
+    pausesTaken: paused.taken,
     benchOf,
     unavailable: () =>
       agents.filter((agent) =>
