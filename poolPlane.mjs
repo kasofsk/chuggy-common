@@ -15,7 +15,9 @@
  * A runner names its package and version on the poll, and the answer may name
  * the release chuggy pins for that package. A runner may name its capabilities
  * on the poll too, whose set replaces the one its registration recorded, and a
- * client given none names none, leaving that set as it is.
+ * client given none names none, leaving that set as it is. A poll names that
+ * set less what its terms withhold, so it never names a capability the client
+ * was not given.
  *
  * A poll may name the memory room the pool offers jobs and its ceiling for
  * one, each only where the contract reads it, since a plane refuses a poll
@@ -28,6 +30,9 @@
  * A member's chat host names on every poll how long a session it claims may
  * sit idle, where its client is given that, and the answer names it the
  * image its sessions run in, which is passed on.
+ *
+ * An answer may name how the credential stopped each job it stops, which is
+ * passed on.
  *
  * A runner's report of itself is posted under the token it is given, and is
  * taken only where the plane answers 204; the client keeps the version the
@@ -312,7 +317,7 @@ async function poolPlaneReconciled(answered) {
       polled: "Unavailable",
       evidence: "the plane answered no reconciliation this pool can read",
     };
-  const { release, jobsWaiting, chatImage } = read.data;
+  const { release, jobsWaiting, chatImage, credentialOutcomes } = read.data;
   const waiting = poolPlaneClaimsByRoom(answered) ? jobsWaiting : undefined;
   return {
     polled: "Reconciled",
@@ -322,6 +327,7 @@ async function poolPlaneReconciled(answered) {
     ...(release === undefined ? {} : { release }),
     ...(waiting === undefined ? {} : { jobsWaiting: waiting }),
     ...(chatImage === undefined ? {} : { chatImage }),
+    ...(credentialOutcomes === undefined ? {} : { credentialOutcomes }),
   };
 }
 
@@ -347,7 +353,11 @@ async function poolPlanePolled(
   let answered;
   try {
     const url = poolPlaneAssignmentsUrl(settings, held, wanted, wantedSessions);
-    const { runner, capabilities } = settings;
+    const { runner } = settings;
+    const withheld = new Set(terms.withheld);
+    const capabilities = settings.capabilities?.filter(
+      (capability) => !withheld.has(capability),
+    );
     answered = await fetcher(url, {
       method: "GET",
       signal: globalThis.AbortSignal.timeout(settings.pollTimeoutMs),

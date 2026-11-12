@@ -10,6 +10,7 @@ import {
   claudeCredentialSecrets,
   claudeCredentialVariables,
 } from "./claudeCredential.mjs";
+import { claudeControlChannel } from "./claudeControl.mjs";
 import { coreRuntime } from "./coreRuntime.mjs";
 import { agentResult, agentResultSchema } from "./result.mjs";
 
@@ -68,10 +69,18 @@ function configuredArguments(task) {
 const claudeResumePrompt =
   "The usage limit that stopped this run has reset. Carry on where you left off, in the same workspace, and finish the task.";
 
-/** Every argument of a run but its prompt. */
-function claudeRunArguments(task) {
+/**
+ * The argv of one run. Its brief is no word of it: the run reads its messages
+ * from stdin, the first of them the brief, so the core can ask the run what
+ * its window holds while it works (`./claudeControl.mjs`). The configuration
+ * is given as `--mcp-config=`, since `--mcp-config` takes every word after it
+ * up to the next option.
+ */
+export function claudeInvocation(task) {
   return [
     "-p",
+    "--input-format",
+    "stream-json",
     "--output-format",
     "stream-json",
     "--verbose",
@@ -85,24 +94,14 @@ function claudeRunArguments(task) {
   ];
 }
 
-/**
- * The argv of one run. The briefing comes after `--`, so it is the prompt
- * whatever precedes it: `--mcp-config` takes every word after it up to the
- * next option, as can an option a worker configures, and either would
- * otherwise take the briefing as one of its values. The configuration is
- * given as `--mcp-config=` for the same reason.
- */
-export function claudeInvocation(task) {
-  return [...claudeRunArguments(task), "--", task.briefing.text];
+/** The same run carrying on in the conversation `session` named. */
+export function claudeResumeInvocation(task, session) {
+  return [...claudeInvocation(task), "--resume", session];
 }
 
-/** The same run carrying on in the conversation `session` named, told `prompt`, which is a held run's where none is given. */
-export function claudeResumeInvocation(
-  task,
-  session,
-  prompt = claudeResumePrompt,
-) {
-  return [...claudeRunArguments(task), "--resume", session, "--", prompt];
+/** What a run's first message says: its briefing, or, carrying on in `session`, `prompt`, which is a held run's where none is given. */
+export function claudeBrief(task, session, prompt = claudeResumePrompt) {
+  return session === undefined ? task.briefing.text : prompt;
 }
 
 /** `text` as one POSIX shell word, whatever quotes it holds. */
@@ -150,10 +149,9 @@ export function claudeResult(events) {
 /**
  * What Claude Code is started with of its credential, read as `text` from the
  * file at `path`: the variables set, the ones withheld from what it would
- * otherwise inherit, and every secret the file holds. Where `environment`
- * names no kind the file is a subscription's token and nothing is withheld,
- * which is every Claude run there was before a kind could be named; where it
- * names one, that kind is the only one in force (`./claudeCredential.mjs`).
+ * otherwise inherit, and every secret the file holds. The kind `environment`
+ * names is the only one in force (`./claudeCredential.mjs`), and where it
+ * names none the file is a subscription's token, as it always was.
  *
  * @param {string} text
  * @param {{path?: string, environment?: Readonly<Record<string, string | undefined>>}} [given]
@@ -161,13 +159,9 @@ export function claudeResult(events) {
  */
 export function claudeCredentialPrepared(text, given = {}) {
   const { path = "", environment = {} } = given;
-  const setting = claudeCredentialNamed(environment);
-  if (setting === undefined)
-    return {
-      environment: { ...claudeEnvironment, CLAUDE_CODE_OAUTH_TOKEN: text },
-      withheld: [],
-      secrets: [text],
-    };
+  const setting = claudeCredentialNamed(environment) ?? {
+    kind: "Subscription",
+  };
   const refused = claudeCredentialRefusal(setting, text, path);
   if (refused !== undefined) throw new Error(refused);
   return {
@@ -196,6 +190,8 @@ export const claudeAgent = {
   credential: "claude-code",
   invocation: claudeInvocation,
   resumeInvocation: claudeResumeInvocation,
+  brief: claudeBrief,
+  channel: claudeControlChannel,
   result: claudeResult,
   ended: claudeEnded,
   prepareCredential: claudeCredentialPrepared,

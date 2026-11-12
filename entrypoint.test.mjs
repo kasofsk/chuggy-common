@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { Buffer, constants } from "node:buffer";
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import {
   chmod,
   copyFile,
@@ -34,6 +35,7 @@ import {
   runConfigurationBytesMax,
   workerPlaneBytesMediaType,
   workerPlaneUploadBytesMax,
+  workerRunContextSchema,
 } from "@chuggy/worker-contract/workerPlane";
 import { workTaskAnswerSchema } from "@chuggy/worker-contract/workerTask";
 
@@ -69,10 +71,17 @@ import {
   chatCheckoutVariable,
   chatMintedVariable,
 } from "./chatChannel.mjs";
+import {
+  claudeControlChannel,
+  claudeControlRefusal,
+  claudeControlWaitMs,
+} from "./claudeControl.mjs";
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import { codexAgent } from "./codex.mjs";
 import {
   fiveHourResetsAtSecs,
+  creditsDepletedSnapshot,
+  creditsDepletedTypes,
   limitSnapshot,
   ordinarySnapshot,
   rolloutFolder,
@@ -92,7 +101,11 @@ import {
   strayLeftFor,
 } from "./claudeCredential.fixture.mjs";
 import { pausedClock } from "./clock.fixture.mjs";
+import { contextWindow } from "./contextReading.mjs";
+import { contextUsage } from "./contextUsage.fixture.mjs";
 import {
+  creditsRefused,
+  creditsResult,
   limitFrames,
   limitRefused,
   limitRejected,
@@ -166,7 +179,10 @@ import {
 } from "./source.mjs";
 import { workerPlaneAwayMillisecondsMax, workerRequest } from "./transport.mjs";
 
-const task = { workerPlane: { url: "http://worker-plane.test:3001" } };
+const task = {
+  workerPlane: { url: "http://worker-plane.test:3001" },
+  briefing: { text: "the briefing" },
+};
 const secret = "sk-ant-oat01-0123456789abcdefghijklmnop";
 const minted = {
   username: "x-access-token",
@@ -1332,6 +1348,25 @@ test("a check stage's shells are told the commit its input names the change star
 });
 
 /**
+ * Catches a reference kind the entrypoint does not read, such as the
+ * `ChangeIdentity` a plane pins for carrying a verdict, stopping a run or
+ * displacing the references it does read.
+ */
+test("a check stage runs as before beside an input reference of a kind it does not read", async () => {
+  let pinned;
+
+  const told = await evaluationPrinted((base) => {
+    pinned = base;
+    return [
+      { ordinal: 3, kind: "ChangeBase", reference: base },
+      { ordinal: 4, kind: "ChangeIdentity", reference: "a".repeat(40) },
+    ];
+  });
+
+  assert.deepEqual(told, { printed: pinned, setUp: pinned });
+});
+
+/**
  * Catches a stage told a base its bundle never named, which a check would
  * narrow to; unset, it runs everything.
  */
@@ -1942,6 +1977,14 @@ test("an agent's summary is cut to a report on a code point", async () => {
   assert.equal(report.length, resultReportCharsMax - 1);
 });
 
+/** Evidence that keeps nothing, for a run whose evidence is not what is under test. */
+const evidenceIdle = {
+  observed: () => undefined,
+  record: () => undefined,
+  turnsFolded: () => 0,
+  context: () => undefined,
+};
+
 /**
  * The run an agent's process leaves, the agent stood in for by a shell that
  * writes the one result event Claude Code ends with, its shell prepared with
@@ -1956,7 +1999,7 @@ function agentRun(summary, verdict = "Pass") {
     task,
     directory: process.cwd(),
     agentEnvironment: {},
-    evidence: { observed: () => undefined, record: () => undefined },
+    evidence: evidenceIdle,
     agent: {
       ...claudeAgent,
       executable: "/bin/sh",
@@ -2016,7 +2059,7 @@ test("an agent is started as a check stage's shells inherit, and its shell prepa
     directory: process.cwd(),
     changeBase,
     agentEnvironment: {},
-    evidence: { observed: () => undefined, record: () => undefined },
+    evidence: evidenceIdle,
     agent: {
       ...claudeAgent,
       executable: "/bin/sh",
@@ -2061,7 +2104,7 @@ test("an agent's shell is handed no change base where the attempt knows none", a
     task,
     directory: process.cwd(),
     agentEnvironment: {},
-    evidence: { observed: () => undefined, record: () => undefined },
+    evidence: evidenceIdle,
     agent: {
       ...claudeAgent,
       executable: "/bin/sh",
@@ -2092,7 +2135,7 @@ test("an agent's shell is handed what the job's setup passed on, and the agent's
     directory: process.cwd(),
     setupEnvironment: { PASSED: "on", NODE_PATH: "/setup/node_modules" },
     agentEnvironment: {},
-    evidence: { observed: () => undefined, record: () => undefined },
+    evidence: evidenceIdle,
     agent: {
       ...claudeAgent,
       executable: "/bin/sh",
@@ -2124,7 +2167,7 @@ test("an agent's process is started with what the agent adds to the whole of its
     task,
     directory: process.cwd(),
     agentEnvironment: { CHUG_SUITE_CREDENTIAL: "credential" },
-    evidence: { observed: () => undefined, record: () => undefined },
+    evidence: evidenceIdle,
     agent: {
       ...claudeAgent,
       executable: "/bin/sh",
@@ -2160,24 +2203,31 @@ const briefImage = {
 
 /**
  * A stand-in agent ending its run with a failing verdict, so a work attempt it
- * runs pushes nothing, and every task it was started on.
+ * runs pushes nothing, and every brief its stdin opened with.
  */
-function briefedAgent() {
-  const started = [];
+async function briefedAgent(t) {
+  const started = join(await suiteDirectory(t, "chuggy-briefed-"), "started");
   const ended = JSON.stringify({
     type: "result",
     structured_output: { verdict: "Fail", summary: "ended" },
   });
   return {
-    started,
+    briefs: async () =>
+      (await readFile(started, "utf8"))
+        .split("\n")
+        .filter((line) => line !== "")
+        .map((line) => JSON.parse(line).message.content),
     agent: {
       ...claudeAgent,
       executable: "/bin/sh",
       prepareShell: async () => ({ environment: {}, arguments: [] }),
-      invocation: (begun) => {
-        started.push(begun);
-        return ["-c", 'printf "%s\\n" "$1"', "agent", ended];
-      },
+      invocation: () => [
+        "-c",
+        'IFS= read -r brief; printf "%s\\n" "$brief" >> "$2"; printf "%s\\n" "$1"',
+        "agent",
+        ended,
+        started,
+      ],
     },
   };
 }
@@ -2196,6 +2246,7 @@ function briefedFile(text, identity) {
  * the temporary directory, or its briefing not told where.
  */
 test("an agent is started on its briefing told where each image was read to", async (t) => {
+  const { briefs, agent } = await briefedAgent(t);
   const temporary = await mkdtemp(join(tmpdir(), "chuggy-temporary-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   podHolds(t, { TMPDIR: temporary });
@@ -2204,7 +2255,6 @@ test("an agent is started on its briefing told where each image was read to", as
     read.push(request.path);
     return { status: 200, body: briefImage.bytes };
   });
-  const { started, agent } = briefedAgent();
   const briefed = { ...task, briefing: { text: "## Your role\nWork." } };
 
   await runWorkerTask({
@@ -2217,14 +2267,14 @@ test("an agent is started on its briefing told where each image was read to", as
     }),
     directory: process.cwd(),
     agentEnvironment: {},
-    evidence: { observed: () => undefined, record: () => undefined },
+    evidence: evidenceIdle,
     agent,
   });
 
   assert.deepEqual(read, ["/v1/input/artifacts/image/png:one"]);
-  const [{ briefing }] = started;
-  assert.ok(briefing.text.startsWith("## Your role\nWork.\n\n"));
-  const file = briefedFile(briefing.text, "image/png:one");
+  const [brief] = await briefs();
+  assert.ok(brief.startsWith("## Your role\nWork.\n\n"));
+  const file = briefedFile(brief, "image/png:one");
   assert.equal(dirname(dirname(file)), temporary);
   assert.match(file, /\/chuggy-ticket-images-[^/]+\/1\.png$/u);
   assert.deepEqual(await readFile(file), briefImage.bytes);
@@ -2232,10 +2282,10 @@ test("an agent is started on its briefing told where each image was read to", as
 
 /** Catches a briefing changed, or a directory made, where the bundle pins no image. */
 test("an agent whose bundle pins no image is started on its briefing as written", async (t) => {
+  const { briefs, agent } = await briefedAgent(t);
   const temporary = await mkdtemp(join(tmpdir(), "chuggy-temporary-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   podHolds(t, { TMPDIR: temporary });
-  const { started, agent } = briefedAgent();
   const briefed = { ...task, briefing: { text: "## Your role\nWork." } };
 
   await runWorkerTask({
@@ -2243,11 +2293,11 @@ test("an agent whose bundle pins no image is started on its briefing as written"
     bearer: "the attempt's bearer",
     directory: process.cwd(),
     agentEnvironment: {},
-    evidence: { observed: () => undefined, record: () => undefined },
+    evidence: evidenceIdle,
     agent,
   });
 
-  assert.equal(started[0], briefed);
+  assert.deepEqual(await briefs(), [briefed.briefing.text]);
   assert.deepEqual(await readdir(temporary), []);
 });
 
@@ -3281,12 +3331,16 @@ test("a work attempt whose commit carries its Claude credential fails and pushes
 /**
  * A stand-in for Claude Code that writes its process's whole environment to
  * `dump` and fails with `summary` read from the variable it names, so nothing
- * is pushed and the plane is told what it printed.
+ * is pushed and the plane is told what it printed; where `init` is set, it
+ * says first that it started, as Claude Code's init event does.
  */
-function environmentDumpingAgent(dump, summary) {
+function environmentDumpingAgent(dump, summary, init = false) {
   const script = [
     `const { writeFileSync } = await import("node:fs");`,
     `writeFileSync(process.argv[1], JSON.stringify(process.env));`,
+    ...(init
+      ? [`console.log(JSON.stringify({ type: "system", subtype: "init" }));`]
+      : []),
     `const summary = String(process.env[process.argv[2]]);`,
     `console.log(JSON.stringify({ type: "result", structured_output: { verdict: "Fail", summary } }));`,
   ].join("\n");
@@ -3302,9 +3356,9 @@ function environmentDumpingAgent(dump, summary) {
  * One agent work attempt launched from an envelope mounting `credential` as
  * its Claude credential file, the pod holding `holds`: the environment its
  * agent was started with, as the agent read it, and everything the plane was
- * sent, as text.
+ * sent, as text. Where `init` is set, its agent says it started.
  */
-async function credentialAttempt(t, credential, holds, summary) {
+async function credentialAttempt(t, credential, holds, summary, init = false) {
   const root = await suiteDirectory(t, "chuggy-credential-attempt-");
   const providerCredentialFile = join(root, "claude-code");
   await writeFile(providerCredentialFile, credential);
@@ -3350,7 +3404,7 @@ async function credentialAttempt(t, credential, holds, summary) {
       minted: root,
       write: async () => undefined,
       clone: async () => directory,
-      agent: environmentDumpingAgent(dump, summary),
+      agent: environmentDumpingAgent(dump, summary, init),
     }),
   );
   return {
@@ -3367,12 +3421,11 @@ async function credentialAttempt(t, credential, holds, summary) {
 
 /**
  * Catches a site pool's agent, whose runner names no kind of credential,
- * started on anything but the environment every agent was before a kind
- * could be named: the pod's, a subscription's token and the run's switches
- * over it, and its shell's, nothing the pod holds withheld beyond what it
- * always was.
+ * started beside a key or an endpoint the pod's environment left, which would
+ * outrank its token or send it elsewhere: it runs on the token as a
+ * subscription's, the only credential in force.
  */
-test("an agent whose runner names no kind of credential is started as every agent was before one could be named", async (t) => {
+test("an agent whose runner names no kind of credential is started on its token alone", async (t) => {
   const run = await credentialAttempt(
     t,
     `${secret}\n`,
@@ -3381,15 +3434,60 @@ test("an agent whose runner names no kind of credential is started as every agen
   );
 
   assert.deepEqual(run.environment, {
-    ...workerAgentEnvironment(process.env),
+    ...workerEnvironmentWithout(
+      workerAgentEnvironment(process.env),
+      decidingFor("Subscription"),
+    ),
     ...claudeEnvironment,
+    CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: "1",
     CLAUDE_CODE_OAUTH_TOKEN: secret,
   });
-  for (const [name, value] of Object.entries(strayEnvironment))
-    if (name !== "CLAUDE_CODE_OAUTH_TOKEN")
-      assert.equal(run.environment[name], value, name);
+  assert.deepEqual(strayLeftFor("Subscription", run.environment), []);
   assert.ok(run.reported);
   assert.ok(!run.sent.includes(secret));
+});
+
+/**
+ * Catches a run that does not report the credential it ran on, or reports
+ * more of it than its agent, type and name, and a secret of another
+ * credential of its runner's sets, which a job on its runner's host could
+ * read, reaching the plane.
+ */
+test("a run reports the credential it ran on by name, and every credential of its runner's sets is scrubbed", async (t) => {
+  const other = await suiteDirectory(t, "chuggy-credential-set-");
+  const otherKey = "sk-ant-api03-another-credential-of-the-set-0123";
+  const otherFile = join(other, "api-key");
+  await writeFile(otherFile, `${otherKey}\n`);
+  const run = await credentialAttempt(
+    t,
+    `${secret}\n`,
+    {
+      ...strayEnvironment,
+      [claudeCredentialVariable]: JSON.stringify({ kind: "Subscription" }),
+      CHUG_WORKER_CREDENTIAL_NAME: "personal-1",
+      CHUG_WORKER_CREDENTIALS_SCRUBBED: JSON.stringify([
+        { agent: "Claude", type: "ApiKey", file: otherFile },
+      ]),
+      CHUG_SUITE_PROBE: otherKey,
+    },
+    "CHUG_SUITE_PROBE",
+    true,
+  );
+
+  assert.ok(
+    run.sent.includes(
+      `"credential":${JSON.stringify({ agent: "Claude", type: "OAuth", name: "personal-1" })}`,
+    ),
+    run.sent,
+  );
+  assert.ok(!run.sent.includes(secret));
+  assert.ok(!run.sent.includes(otherKey));
+  assert.ok(run.sent.includes("[redacted credential]"));
+  for (const name of [
+    "CHUG_WORKER_CREDENTIAL_NAME",
+    "CHUG_WORKER_CREDENTIALS_SCRUBBED",
+  ])
+    assert.ok(!Object.hasOwn(run.environment, name), name);
 });
 
 /**
@@ -3580,6 +3678,134 @@ test("a host job's clone and push write the git credential in the job's own mint
   });
 });
 
+/** What the plane answers an attempt's mint, its report, and every route that only records. */
+function attemptAnswered(route) {
+  if (route === "credential")
+    return { status: 200, body: { ...minted, expiresAtMs: 1_900_000_000_000 } };
+  if (route === "report") return { status: 202, body: { action: "stop" } };
+  return { status: 204 };
+}
+
+/** What an attempt's workspace record says, read from the workspace it describes. */
+function workspaceRecordIn(workspace) {
+  return JSON.parse(
+    readFileSync(join(workspace, "chuggy-workspace.json"), "utf8"),
+  );
+}
+
+/**
+ * One commanded work attempt over a real checkout from an envelope naming a
+ * workspace of its own, the remote refusing every push of it where `refused`
+ * says: its workspace's record as it stood when the plane was asked for the
+ * input, and as the attempt left it.
+ */
+async function recordedAttempt(
+  t,
+  { remote, directory, base },
+  commands,
+  refused = false,
+) {
+  await git("git", ["push", remote, `${base}:refs/heads/main`], {
+    cwd: directory,
+  });
+  if (refused) await remoteRefuses(remote, "pre-receive", "exit 1");
+  const root = await suiteDirectory(t, "chuggy-recorded-");
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  let atInput;
+  const plane = await servedPlane((route) => {
+    switch (route) {
+      case "task":
+        return commandedTask(commands);
+      case "input":
+        atInput = workspaceRecordIn(workspace);
+        return inputAnswer(remote, base);
+      default:
+        return attemptAnswered(route);
+    }
+  });
+  t.after(() => plane.close());
+  const served = { ...envelope, callbackUrl: plane.url, workspace };
+  const { task: answered } = await envelopeTask(served);
+  await workerAttempt(envelopeLaunch(served, answered), {
+    minted: root,
+    write: async () => undefined,
+  });
+  return { atInput, left: workspaceRecordIn(workspace), workspace };
+}
+
+/** Whose work an attempt of `fetchedAnswer` in `remote`'s repository holds. */
+const recordedWork = (remote) => ({
+  ticket: fetchedAnswer.ticket,
+  attempt: fetchedAnswer.attempt,
+  stage: fetchedAnswer.stage,
+  repository: remote,
+});
+
+/**
+ * Catches a workspace whose record names no work until too late to be read
+ * of a run killed early, or says its work is safe before a push landed it.
+ */
+test("a work attempt records whose work its workspace holds once it has its task, and records it safe once its pass has landed, never committing or pushing the record", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { atInput, left, workspace } = await recordedAttempt(t, checkout, [
+      "echo done > done.txt",
+    ]);
+
+    assert.deepEqual(atInput, {
+      ticket: fetchedAnswer.ticket,
+      attempt: fetchedAnswer.attempt,
+      stage: fetchedAnswer.stage,
+      safe: false,
+    });
+    assert.deepEqual(left, { ...recordedWork(checkout.remote), safe: true });
+    const { stdout: refs } = await git(
+      "git",
+      ["for-each-ref", "--format=%(refname)"],
+      { cwd: checkout.remote },
+    );
+    const pushed = refs.split("\n").filter((ref) => ref.includes("/attempts/"));
+    assert.equal(pushed.length, 1);
+    const { stdout: files } = await git(
+      "git",
+      ["ls-tree", "-r", "--name-only", pushed[0]],
+      { cwd: checkout.remote },
+    );
+    assert.ok(files.split("\n").includes("done.txt"), files);
+    assert.ok(!files.includes("chuggy-workspace.json"), files);
+    const { stdout: status } = await git(
+      "git",
+      ["status", "--porcelain", "--ignored"],
+      { cwd: join(workspace, "repository") },
+    );
+    assert.ok(!status.includes("chuggy-workspace.json"), status);
+  });
+});
+
+test("a failed work attempt whose changes were kept, or that changed nothing, records its work safe", async (t) => {
+  for (const commands of [["echo half > half.txt && exit 1"], ["exit 1"]])
+    await inCheckout(async (checkout) => {
+      const { left } = await recordedAttempt(t, checkout, commands);
+      assert.deepEqual(
+        left,
+        { ...recordedWork(checkout.remote), safe: true },
+        commands[0],
+      );
+    });
+});
+
+test("a failed work attempt whose changes could not be kept records nothing safe", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { left } = await recordedAttempt(
+      t,
+      checkout,
+      ["echo half > half.txt && exit 1"],
+      true,
+    );
+    assert.deepEqual(left, { ...recordedWork(checkout.remote), safe: false });
+  });
+});
+
 /** A plane serving one attempt `answer` as its task, an input bundle pinning `briefImage`, and that image. */
 function imagePlane(answer, remote, base) {
   return servedPlane((route) => {
@@ -3657,7 +3883,7 @@ test("an agent's attempt reads the images its bundle pins with its bearer before
       base,
     );
     t.after(() => plane.close());
-    const { started, agent } = briefedAgent();
+    const { briefs, agent } = await briefedAgent(t);
 
     const temporary = await imageAttempt(t, plane, directory, agent);
 
@@ -3665,7 +3891,8 @@ test("an agent's attempt reads the images its bundle pins with its bearer before
     assert.deepEqual(reads, [
       { route: "inputArtifact", authorization: `Bearer ${envelope.bearer}` },
     ]);
-    const file = briefedFile(started[0].briefing.text, "image/png:one");
+    const [brief] = await briefs();
+    const file = briefedFile(brief, "image/png:one");
     assert.equal(dirname(dirname(file)), temporary);
     assert.deepEqual(await readFile(file), briefImage.bytes);
   });
@@ -3696,7 +3923,7 @@ test("an agent's shell is told which job it is in", async (t) => {
     );
     t.after(() => plane.close());
     const preparedWith = [];
-    const { agent } = briefedAgent();
+    const { agent } = await briefedAgent(t);
 
     await imageAttempt(t, plane, directory, {
       ...agent,
@@ -4399,7 +4626,7 @@ test("an agent's shell is handed a held credential's file over the pod's own val
     directory: process.cwd(),
     heldCredentials: { [trackRecord.variable]: file },
     agentEnvironment: {},
-    evidence: { observed: () => undefined, record: () => undefined },
+    evidence: evidenceIdle,
   };
   const ended = (summary) =>
     `printf '{"type":"result","structured_output":{"verdict":"Pass","summary":"%s"}}\\n' ${summary}`;
@@ -4554,12 +4781,77 @@ function revokedRun(file = "half.txt") {
   };
 }
 
+/** The source of `standInRuntime`'s executable, its runs and its records under `root`. */
+function standInRuntimeScript(root) {
+  return `#!${process.execPath}
+const { execSync, spawn } = require("node:child_process");
+const { appendFileSync, readFileSync } = require("node:fs");
+const { createInterface } = require("node:readline");
+const root = ${JSON.stringify(root)};
+const log = readFileSync(root + "/started", "utf8");
+const at = log === "" ? 0 : log.trimEnd().split("\\n").length;
+const run = JSON.parse(readFileSync(root + "/runs.json", "utf8"))[at];
+const input = createInterface({ input: process.stdin })[Symbol.asyncIterator]();
+const answer = (request) =>
+  process.stdout.write(
+    JSON.stringify({
+      type: "control_response",
+      response:
+        run.context === undefined
+          ? { subtype: "error", request_id: request.request_id, error: "none" }
+          : { subtype: "success", request_id: request.request_id, response: run.context },
+    }) + "\\n",
+  );
+(async () => {
+  const first = process.argv.includes("--input-format")
+    ? await input.next()
+    : { done: true };
+  appendFileSync(
+    root + "/started",
+    JSON.stringify({
+      pid: process.pid,
+      argv: process.argv.slice(2),
+      ...(first.done ? {} : { brief: JSON.parse(first.value).message.content }),
+    }) + "\\n",
+  );
+  if (run.work !== undefined) execSync(run.work, { stdio: "ignore" });
+  if (run.holder !== undefined)
+    spawn("sh", ["-c", run.holder], { stdio: ["ignore", "inherit", "ignore"] }).unref();
+  for (const frame of run.frames)
+    process.stdout.write(
+      (typeof frame === "string" ? frame : JSON.stringify(frame)) + "\\n",
+    );
+  if (run.linger === true) {
+    setTimeout(() => undefined, 300000);
+    return;
+  }
+  if (!first.done && run.frames.some((frame) => frame?.type === "result")) {
+    for (let line = await input.next(); !line.done; line = await input.next()) {
+      const message = JSON.parse(line.value);
+      appendFileSync(root + "/asked", JSON.stringify(message) + "\\n");
+      if (message.type === "control_request" && run.silent !== true)
+        answer(message);
+    }
+    appendFileSync(root + "/closed", String(at) + "\\n");
+  }
+  process.stdin.destroy();
+  process.exitCode = run.exit ?? 0;
+})();
+`;
+}
+
 /**
  * A stand-in for the runtime: an executable that, each time it is started,
- * records its pid and argv, runs that start's `work` in the workspace, writes
- * that start's `frames`, stays alive where told to `linger`, and exits as told.
- * A start past the last of `runs` fails, so a run started once too often does
- * not pass for one that was not. It is found as `name`.
+ * records its pid, its argv and, started to read its input as Claude Code's
+ * stream, the brief its stdin opens with, runs that
+ * start's `work` in the workspace, writes that start's `frames`, stays alive
+ * where told to `linger`, and exits as told. As Claude Code does, a start that
+ * wrote a result answers each control request on its stdin, with that start's
+ * `context` where it has one, nothing where it is `silent`, and an error
+ * otherwise, and exits only once
+ * its stdin closes, which it records. A start past the last of `runs` fails, so
+ * a run started once too often does not pass for one that was not. It is found
+ * as `name`.
  */
 async function standInRuntime(t, runs, name = "claude") {
   const root = await suiteDirectory(t, "chuggy-stand-in-");
@@ -4567,39 +4859,21 @@ async function standInRuntime(t, runs, name = "claude") {
   const started = join(root, "started");
   await writeFile(started, "");
   await writeFile(join(root, "runs.json"), JSON.stringify(runs));
-  await writeFile(
-    executable,
-    `#!${process.execPath}
-const { execSync, spawn } = require("node:child_process");
-const { appendFileSync, readFileSync } = require("node:fs");
-const root = ${JSON.stringify(root)};
-const log = readFileSync(root + "/started", "utf8");
-const at = log === "" ? 0 : log.trimEnd().split("\\n").length;
-appendFileSync(
-  root + "/started",
-  JSON.stringify({ pid: process.pid, argv: process.argv.slice(2) }) + "\\n",
-);
-const run = JSON.parse(readFileSync(root + "/runs.json", "utf8"))[at];
-if (run.work !== undefined) execSync(run.work, { stdio: "ignore" });
-if (run.holder !== undefined)
-  spawn("sh", ["-c", run.holder], { stdio: ["ignore", "inherit", "ignore"] }).unref();
-for (const frame of run.frames)
-  process.stdout.write(
-    (typeof frame === "string" ? frame : JSON.stringify(frame)) + "\\n",
-  );
-if (run.linger === true) setTimeout(() => undefined, 300000);
-else process.exitCode = run.exit ?? 0;
-`,
-  );
+  await writeFile(executable, standInRuntimeScript(root));
   await chmod(executable, 0o755);
+  const lines = async (file) =>
+    (await readFile(join(root, file), "utf8").catch(() => ""))
+      .split("\n")
+      .filter((line) => line !== "");
   return {
     directory: root,
     executable,
     starts: async () =>
-      (await readFile(started, "utf8"))
-        .split("\n")
-        .filter((line) => line !== "")
-        .map((line) => JSON.parse(line)),
+      (await lines("started")).map((line) => JSON.parse(line)),
+    /** Every message a start that wrote a result read after its brief. */
+    asked: async () => (await lines("asked")).map((line) => JSON.parse(line)),
+    /** Each start that saw its stdin close after its result. */
+    closed: async () => (await lines("closed")).map(Number),
   };
 }
 
@@ -4712,6 +4986,7 @@ async function standInAttempt(
     ...seams.agent,
   };
   const workspace = join(root, "workspace");
+  await mkdir(workspace);
   const served = {
     ...envelope,
     callbackUrl: plane.url,
@@ -4782,12 +5057,15 @@ const readToken = "ghs_read0123456789abcdefghijklmnop";
  * naming no place to find it, and a keep that changes the failure into a step's
  * label: a run with no verdict is reported with the label it always was.
  */
-test("a work run that ends without a verdict leaves its work on the ticket's checkpoint, and its text says where", async (t) => {
+test("a work run that ends without a verdict leaves its work on the ticket's checkpoint, its text says where, and its workspace record says its work is safe", async (t) => {
   await inCheckout(async (checkout) => {
     await targetPushed(checkout);
 
-    const { failure } = await standInAttempt(t, checkout, [revokedRun()]);
+    const { failure, workspace } = await standInAttempt(t, checkout, [
+      revokedRun(),
+    ]);
 
+    assert.equal(workspaceRecordIn(workspace).safe, true);
     assert.ok(!(failure instanceof RunStepFailure), String(failure));
     const { stdout: commit } = await git("git", ["rev-parse", checkpointRef], {
       cwd: checkout.remote,
@@ -4868,13 +5146,16 @@ function remoteSays(bytes) {
 }
 
 /** Catches a failure to keep that masks why the run ended, or moves its label to the push's. */
-test("a run whose work could not be kept still ends as it ended, and says so", async (t) => {
+test("a run whose work could not be kept still ends as it ended, says so, and records nothing safe", async (t) => {
   await inCheckout(async (checkout) => {
     await targetPushed(checkout);
     await remoteRefuses(checkout.remote, "pre-receive", "exit 1");
 
-    const { failure } = await standInAttempt(t, checkout, [revokedRun()]);
+    const { failure, workspace } = await standInAttempt(t, checkout, [
+      revokedRun(),
+    ]);
 
+    assert.equal(workspaceRecordIn(workspace).safe, false);
     assert.ok(!(failure instanceof RunStepFailure), String(failure));
     assert.match(failure.message, /^Claude Code exited 1$/mu);
     assert.ok(failure.message.includes(revokedSentence));
@@ -4882,14 +5163,15 @@ test("a run whose work could not be kept still ends as it ended, and says so", a
   });
 });
 
-test("a run that changed nothing keeps nothing, and its text says so", async (t) => {
+test("a run that changed nothing keeps nothing, its text says so, and its workspace record says its work is safe", async (t) => {
   await inCheckout(async (checkout) => {
     await targetPushed(checkout);
 
-    const { failure } = await standInAttempt(t, checkout, [
+    const { failure, workspace } = await standInAttempt(t, checkout, [
       { frames: [], exit: 1 },
     ]);
 
+    assert.equal(workspaceRecordIn(workspace).safe, true);
     assert.equal(
       failure.message,
       "Claude Code exited 1\nThe run changed nothing, so nothing is kept.",
@@ -4918,8 +5200,8 @@ test("the next work attempt starts from what the last left, and is told", async 
     ]);
 
     assert.equal(failure, undefined, String(failure));
-    const [{ argv }] = await runtime.starts();
-    assert.match(argv.at(-1), /## Unfinished work from an earlier attempt/u);
+    const [{ brief }] = await runtime.starts();
+    assert.match(brief, /## Unfinished work from an earlier attempt/u);
     assert.equal(await readFile(join(seen, "status"), "utf8"), "?? half.txt\n");
     assert.equal(
       await readFile(join(seen, "head"), "utf8"),
@@ -4943,8 +5225,8 @@ test("an attempt with nothing to start from is told nothing of it", async (t) =>
 
     const { runtime } = await standInAttempt(t, checkout, [verdictRun()]);
 
-    const [{ argv }] = await runtime.starts();
-    assert.ok(!argv.at(-1).includes("Unfinished work"));
+    const [{ brief }] = await runtime.starts();
+    assert.ok(!brief.includes("Unfinished work"));
   });
 });
 
@@ -4970,8 +5252,8 @@ test("a checkpoint that cannot be restored leaves the attempt to run from its ba
     ]);
 
     assert.equal(failure, undefined, String(failure));
-    const [{ argv }] = await runtime.starts();
-    assert.ok(!argv.at(-1).includes("Unfinished work"));
+    const [{ brief }] = await runtime.starts();
+    assert.ok(!brief.includes("Unfinished work"));
   });
 });
 
@@ -4994,14 +5276,68 @@ test("an evaluation neither restores a checkpoint nor leaves one", async (t) => 
 
     assert.match(failure.message, /^Claude Code exited 1$/mu);
     assert.ok(!failure.message.includes("kept"));
-    const [{ argv }] = await runtime.starts();
-    assert.ok(!argv.at(-1).includes("Unfinished work"));
+    const [{ brief }] = await runtime.starts();
+    assert.ok(!brief.includes("Unfinished work"));
     const { stdout: after } = await git("git", ["rev-parse", checkpointRef], {
       cwd: checkout.remote,
     });
     assert.equal(after, before);
   });
 });
+
+/**
+ * Exhausted credits through the real path, beside a window that would
+ * otherwise be waited out. Catches the run held for a reset that cannot bring
+ * its credits back, ended under another label, or ended with a text naming no
+ * credential.
+ */
+test(
+  "a Claude run whose credits ran out is not held, ends RunCreditsExhausted, and its text names the credential",
+  { timeout: 60_000 },
+  async (t) => {
+    await inCheckout(async (checkout) => {
+      await targetPushed(checkout);
+      const reopenedSecs = Math.floor(Date.now() / 1_000) - 120;
+      const rejected = {
+        ...limitRejected,
+        rate_limit_info: {
+          ...limitRejected.rate_limit_info,
+          resetsAt: reopenedSecs,
+        },
+      };
+      const carried = envelopeCarried({ timeoutSecsMax: limitFitsSecs });
+
+      const { ran, plane, runtime } = await launchedStandIn(
+        t,
+        checkout,
+        [
+          { ...limitRun(), frames: [rejected, creditsRefused, creditsResult] },
+          verdictRun(),
+        ],
+        async (given) => ({
+          ...(await carried(given)),
+          CHUG_WORKER_CREDENTIAL_NAME: "max-1",
+        }),
+      );
+
+      assert.equal(ran.code, 1, ran.stderr);
+      assert.equal((await runtime.starts()).length, 1);
+      assert.deepEqual(planeBodies(plane, "runEnded"), [
+        { evidence: "RunCreditsExhausted" },
+      ]);
+      assert.ok(!ran.stderr.includes("chuggy_run_held"));
+      const [uploaded] = planeBodies(plane, "artifact");
+      assert.deepEqual(
+        Buffer.from(uploaded).toString("utf8").split("\n").slice(0, 3),
+        [
+          "Claude Code exited 1",
+          creditsResult.result,
+          "The credits of the credential max-1 are exhausted, so the run was not held.",
+        ],
+      );
+    });
+  },
+);
 
 /**
  * The whole of a hold through the real path. Catches a run not held, a second
@@ -5037,13 +5373,10 @@ test("a run the limit stopped waits it out, its work kept first, and carries on 
     assert.equal(prepared.times, 1);
     const [first, second] = await runtime.starts();
     assert.equal(first.argv.indexOf("--resume"), -1);
-    const flags = first.argv.slice(0, first.argv.indexOf("--"));
-    assert.deepEqual(second.argv.slice(0, flags.length), flags);
-    assert.deepEqual(second.argv.slice(flags.length, flags.length + 2), [
-      "--resume",
-      limitSession,
-    ]);
-    assert.match(second.argv.at(-1), /has reset/u);
+    assert.deepEqual(second.argv, [...first.argv, "--resume", limitSession]);
+    assert.match(first.brief, /^## Your role\nImplement one task/u);
+    assert.match(second.brief, /has reset/u);
+    assert.deepEqual(await runtime.closed(), [0, 1]);
     const held = transcriptSent(plane)
       .split("\n")
       .filter((line) => line.includes("chuggy_run_held"))
@@ -5110,6 +5443,144 @@ test("a held run's configuration is uploaded once", async (t) => {
 
     assert.equal(failure, undefined, String(failure));
     assert.equal(planeBodies(plane, "runConfiguration").length, 1);
+  });
+});
+
+/** A compaction as Claude Code's stream marks one. */
+const compactFrame = {
+  type: "system",
+  subtype: "compact_boundary",
+  compact_metadata: {
+    trigger: "auto",
+    pre_tokens: 167_000,
+    post_tokens: 9_000,
+  },
+};
+
+/**
+ * Catches a run whose window is read at none of its start, its compaction or
+ * its end, a reading asked for in more than summary, its brief kept nowhere
+ * now its argv does not carry it, or a stdin left open past the result, which
+ * Claude Code waits on.
+ */
+test("a Claude run's window is read at its start, after a compaction and at its end, and its stdin closes after its result", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const init = { type: "system", subtype: "init", session_id: limitSession };
+
+    const { failure, plane, runtime } = await standInAttempt(t, checkout, [
+      {
+        ...verdictRun(),
+        frames: [init, compactFrame, verdictFrame()],
+        context: contextUsage,
+      },
+    ]);
+
+    assert.equal(failure, undefined, String(failure));
+    const readings = planeBodies(plane, "runContext").flatMap(
+      (body) => body.readings,
+    );
+    const window = contextWindow(contextUsage, (text) => text);
+    assert.deepEqual(readings, [
+      { ordinal: 1, afterTurn: 0, cause: "Start", window },
+      {
+        ordinal: 2,
+        afterTurn: 0,
+        cause: "Compaction",
+        compaction: {
+          trigger: "Auto",
+          tokensBefore: 167_000,
+          tokensAfter: 9_000,
+        },
+        window,
+      },
+      { ordinal: 3, afterTurn: 0, cause: "End", window },
+    ]);
+    assert.ok(workerRunContextSchema.safeParse({ readings }).success);
+    const asked = await runtime.asked();
+    assert.equal(asked.length, 3);
+    for (const { type, request } of asked) {
+      assert.equal(type, "control_request");
+      assert.deepEqual(request, {
+        subtype: "get_context_usage",
+        detail: "summary",
+      });
+    }
+    assert.deepEqual(await runtime.closed(), [0]);
+    const [configuration] = planeBodies(plane, "runConfiguration").map((body) =>
+      JSON.parse(Buffer.from(body).toString("utf8")),
+    );
+    const [{ brief }] = await runtime.starts();
+    assert.equal(configuration.brief, brief);
+    assert.ok(!configuration.argv.includes(brief));
+    assert.ok(!transcriptSent(plane).includes("control_"));
+  });
+});
+
+/**
+ * Catches a run held on a reading its runtime never answers. The bound is
+ * waited out on a pause that ends at once, so what is proved is that the run
+ * goes on when it ends, and the bound's length is `claudeControlWaitMs`.
+ */
+test("a reading the runtime never answers does not hold the run past its bound", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const init = { type: "system", subtype: "init", session_id: limitSession };
+    const asked = [];
+
+    const { failure, plane, runtime } = await standInAttempt(
+      t,
+      checkout,
+      [{ ...verdictRun(), frames: [init, verdictFrame()], silent: true }],
+      {
+        agent: {
+          channel: (input, given) =>
+            claudeControlChannel(input, {
+              ...given,
+              pause: async (milliseconds) => {
+                asked.push(milliseconds);
+              },
+            }),
+        },
+      },
+    );
+
+    assert.equal(failure, undefined, String(failure));
+    assert.deepEqual(asked, [claudeControlWaitMs, claudeControlWaitMs]);
+    assert.deepEqual(planeBodies(plane, "runContext"), []);
+    assert.deepEqual(await runtime.closed(), [0]);
+    assert.equal(planeBodies(plane, "report")[0]?.verdict, "Pass");
+  });
+});
+
+/** Catches a permission prompt or a hook callback left unanswered, which a run would wait on with its stdin open. */
+test("a control request the runtime sends a run is answered with an error", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const prompt = {
+      type: "control_request",
+      request_id: "cli-1",
+      request: { subtype: "can_use_tool", tool_name: "Bash", input: {} },
+    };
+
+    const { failure, runtime } = await standInAttempt(t, checkout, [
+      { ...verdictRun(), frames: [prompt, verdictFrame()] },
+    ]);
+
+    assert.equal(failure, undefined, String(failure));
+    const answers = (await runtime.asked()).filter(
+      ({ type }) => type === "control_response",
+    );
+    assert.deepEqual(answers, [
+      {
+        type: "control_response",
+        response: {
+          subtype: "error",
+          request_id: "cli-1",
+          error: claudeControlRefusal,
+        },
+      },
+    ]);
   });
 });
 
@@ -5438,6 +5909,48 @@ test("a Codex limit whose rollout named no reset ends rate-limited, saying the r
   ]);
 });
 
+/**
+ * A workspace's depleted Codex credits through a real pod. Catches the run
+ * ended as a limit to wait out, or with a text naming no credential.
+ */
+test("a Codex run whose workspace credits are depleted ends RunCreditsExhausted, its text naming the credential", async (t) => {
+  for (const reached of creditsDepletedTypes)
+    await inCheckout(async (checkout) => {
+      await targetPushed(checkout);
+      const carried = envelopeCarried();
+      const { ran, plane } = await launchedStandIn(
+        t,
+        checkout,
+        codexRuns({
+          lines: [
+            rolloutLine(tokenCount(creditsDepletedSnapshot(reached))),
+            rolloutLine(usageLimitComplete),
+          ],
+        }),
+        async (given) => ({
+          ...(await carried(given)),
+          CHUG_WORKER_CREDENTIAL_NAME: "codex-1",
+        }),
+        codexLaunched,
+      );
+
+      assert.equal(ran.code, 1, ran.stderr);
+      assert.deepEqual(planeBodies(plane, "runEnded"), [
+        { evidence: "RunCreditsExhausted" },
+      ]);
+      const [uploaded] = planeBodies(plane, "artifact");
+      assert.deepEqual(
+        Buffer.from(uploaded).toString("utf8").split("\n").slice(0, 3),
+        [
+          "Codex exited 1",
+          usageLimitSentence,
+          "The credits of the credential codex-1 are exhausted, so the run was not held.",
+        ],
+        reached,
+      );
+    });
+});
+
 /** Catches a missing rollout failing the run in its own way, or read as a limit. */
 test("a Codex run with no rollout ends failed as it always did, and the log says why", async (t) => {
   const { evidence, lines, stderr } = await codexLaunchedEnded(
@@ -5698,8 +6211,8 @@ test("a pass whose push failed leaves its work on the checkpoint, its label its 
     const next = await standInAttempt(t, checkout, [verdictRun("more.txt")]);
 
     assert.equal(next.failure, undefined, String(next.failure));
-    const [{ argv }] = await next.runtime.starts();
-    assert.match(argv.at(-1), /## Unfinished work from an earlier attempt/u);
+    const [{ brief }] = await next.runtime.starts();
+    assert.match(brief, /## Unfinished work from an earlier attempt/u);
     const [{ source }] = planeBodies(next.plane, "report");
     assert.equal(await remoteFile(remote, source.commit, "work.txt"), "done\n");
     assert.equal(await remoteFile(remote, source.commit, "more.txt"), "done\n");
@@ -6331,8 +6844,8 @@ test("a rework is not handed what an earlier attempt threw away", async (t) => {
       [verdictRun()],
     );
 
-    const [{ argv }] = await rework.runtime.starts();
-    assert.ok(!argv.at(-1).includes("Unfinished work"));
+    const [{ brief }] = await rework.runtime.starts();
+    assert.ok(!brief.includes("Unfinished work"));
     const [{ source: reworked }] = planeBodies(rework.plane, "report");
     assert.equal(
       await remoteFile(remote, reworked.commit, "rejected.txt"),
@@ -6403,8 +6916,8 @@ test(
         (await readFile(join(seen, "head"), "utf8")).trim(),
         carried.base,
       );
-      const [{ argv }] = await runtime.starts();
-      assert.ok(!argv.at(-1).includes("Unfinished work"));
+      const [{ brief }] = await runtime.starts();
+      assert.ok(!brief.includes("Unfinished work"));
     });
   },
 );
@@ -6833,8 +7346,8 @@ test("a pass whose report is refused leaves its checkpoint to the next attempt",
     });
 
     assert.equal(next.failure, undefined, String(next.failure));
-    const [{ argv }] = await next.runtime.starts();
-    assert.match(argv.at(-1), /## Unfinished work from an earlier attempt/u);
+    const [{ brief }] = await next.runtime.starts();
+    assert.match(brief, /## Unfinished work from an earlier attempt/u);
     assert.ok(!(await remoteRefs(remote)).includes(checkpointRef));
   });
 });
@@ -7199,8 +7712,8 @@ test("a hook setup installs refuses neither a keep nor the restore after it", as
       }),
     });
 
-    const [{ argv }] = await runtime.starts();
-    assert.match(argv.at(-1), /## Unfinished work from an earlier attempt/u);
+    const [{ brief }] = await runtime.starts();
+    assert.match(brief, /## Unfinished work from an earlier attempt/u);
   });
 });
 
@@ -7342,13 +7855,10 @@ test("a start whose merge conflicts leaves it to the agent, briefed, and pushes 
     );
 
     passStands(failure, plane);
-    const [{ argv }] = await runtime.starts();
-    assert.match(
-      argv.at(-1),
-      /## A merge of the target branch is in progress/u,
-    );
-    assert.ok(argv.at(-1).includes(`${targetRef} at ${tip}`), argv.at(-1));
-    assert.match(argv.at(-1), /^- README\.md$/mu);
+    const [{ brief }] = await runtime.starts();
+    assert.match(brief, /## A merge of the target branch is in progress/u);
+    assert.ok(brief.includes(`${targetRef} at ${tip}`), brief);
+    assert.match(brief, /^- README\.md$/mu);
     const { commit, merges } = await candidatePushed(checkout.remote, base);
     assert.equal(merges.length, 1);
     assert.ok(await remoteHolds(checkout.remote, tip, commit));
@@ -7573,12 +8083,11 @@ test("an end merge that conflicts resumes the agent's conversation, naming the t
     passStands(failure, plane);
     const tip = await targetTip(checkout.remote);
     const [, resumed] = await runtime.starts();
-    assert.deepEqual(resumed.argv.slice(-4), [
-      "--resume",
-      limitSession,
-      "--",
+    assert.deepEqual(resumed.argv.slice(-2), ["--resume", limitSession]);
+    assert.equal(
+      resumed.brief,
       targetMergeMovedNudge({ targetRef, tip, paths: ["README.md"] }),
-    ]);
+    );
     const { commit, merges } = await candidatePushed(
       checkout.remote,
       checkout.base,
@@ -7630,7 +8139,7 @@ test("an end conflict the agent never resolves resumes it up to the cap and then
     assert.equal(starts.length, 1 + targetMergeNudgesMax);
     const tip = await targetTip(checkout.remote);
     assert.equal(
-      starts[2].argv.at(-1),
+      starts[2].brief,
       targetMergeConflictNudge({ targetRef, tip, paths: ["README.md"] }),
     );
   });
@@ -7761,4 +8270,208 @@ test("a failing work attempt merges nothing at its end, whatever the target did"
       undefined,
     );
   });
+});
+
+/** A commit of `files` on the checkout's `HEAD`, left as `HEAD` and named. */
+async function committedFiles(directory, files, message) {
+  for (const [path, content] of Object.entries(files))
+    await writeFile(join(directory, path), content);
+  await git("git", ["add", "--all"], { cwd: directory });
+  await git("git", [...author, "commit", "-m", message], { cwd: directory });
+  return headOf(directory);
+}
+
+/** A plane serving one commanded task of `taskKind` that leaves a file where its command runs, and an input pinning `base` of `remote` beside `references`. */
+function recheckPlane(taskKind, remote, base, references) {
+  return servedPlane((route) => {
+    switch (route) {
+      case "task":
+        return {
+          status: 200,
+          body: workTaskAnswerSchema.parse({
+            ...fetchedAnswer,
+            taskKind,
+            worker: {
+              mode: {
+                type: "Commands",
+                commands: ["echo ran > workload-ran"],
+              },
+              setup: [],
+              files: [],
+            },
+          }),
+        };
+      case "input": {
+        const input = inputAnswer(remote, base);
+        input.body.references.push(
+          ...references.map((entry, index) => ({
+            ordinal: 3 + index,
+            ...entry,
+          })),
+        );
+        return input;
+      }
+      case "credential":
+        return {
+          status: 200,
+          body: { ...minted, expiresAtMs: 1_900_000_000_000 },
+        };
+      case "report":
+        return { status: 202, body: { action: "stop" } };
+      default:
+        return { status: 204 };
+    }
+  });
+}
+
+/**
+ * One commanded attempt at a task of `taskKind` in a real checkout whose target
+ * is `base` after `build` has made it and returned the commit a re-check names,
+ * over a plane whose input carries `references(recheck, base)`: the report the
+ * plane took, whether the workload ran, and the commit's parents.
+ */
+async function recheckAttempt(taskKind, build, references) {
+  let outcome;
+  await inCheckout(async ({ remote, directory, base: origin }) => {
+    await git("git", ["push", remote, `${origin}:refs/heads/main`], {
+      cwd: directory,
+    });
+    const { base, recheck } = await build(directory, origin);
+    await git("git", ["checkout", "--detach", base], { cwd: directory });
+    const plane = await recheckPlane(taskKind, remote, base, [
+      ...references(recheck, base),
+    ]);
+    const root = await mkdtemp(join(tmpdir(), "chuggy-recheck-"));
+    try {
+      const served = { ...envelope, callbackUrl: plane.url };
+      const { task } = await envelopeTask(served);
+      await workerAttempt(envelopeLaunch(served, task), {
+        minted: root,
+        write: async () => undefined,
+        clone: async () => directory,
+      });
+      const report = plane.requests.find(
+        ({ route }) => route === "report",
+      ).body;
+      const commit = report.source?.commit;
+      outcome = {
+        report,
+        ran: await readFile(join(directory, "workload-ran"), "utf8").then(
+          () => true,
+          () => false,
+        ),
+        refs: await remoteRefs(remote),
+        base,
+        recheck,
+        tree: (
+          await git("git", ["rev-parse", "HEAD^{tree}"], { cwd: directory })
+        ).stdout.trim(),
+        parents:
+          commit === undefined
+            ? undefined
+            : (
+                await git("git", ["rev-list", "--parents", "-n", "1", commit], {
+                  cwd: directory,
+                })
+              ).stdout
+                .trim()
+                .split(" ")
+                .slice(1),
+      };
+    } finally {
+      await plane.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  return outcome;
+}
+
+/** The accepted commit already holds the target: target T, accepted A above it. */
+async function recheckContained(directory) {
+  const base = await committedFiles(directory, { "target.txt": "t\n" }, "t");
+  const recheck = await committedFiles(directory, { "a.txt": "a\n" }, "a");
+  return { base, recheck };
+}
+
+/** The target moved past the base the accepted commit started from, without touching its files. */
+async function recheckMoved(directory, origin) {
+  const recheck = await committedFiles(directory, { "a.txt": "a\n" }, "a");
+  await git("git", ["checkout", "--detach", origin], { cwd: directory });
+  const base = await committedFiles(directory, { "target.txt": "t\n" }, "t");
+  return { base, recheck };
+}
+
+/** The target moved and changed what the accepted commit changed. */
+async function recheckConflicting(directory, origin) {
+  const recheck = await committedFiles(directory, { "README.md": "a\n" }, "a");
+  await git("git", ["checkout", "--detach", origin], { cwd: directory });
+  const base = await committedFiles(directory, { "README.md": "t\n" }, "t");
+  return { base, recheck };
+}
+
+const recheckReference = (recheck) => [{ kind: "Recheck", reference: recheck }];
+
+/**
+ * Catches a re-check that runs the workload where the accepted commit already
+ * holds the target, or reports anything but that commit as the source.
+ */
+test("a Recheck whose commit already holds the target re-reports it and runs no workload", async () => {
+  const run = await recheckAttempt("Work", recheckContained, recheckReference);
+
+  assert.equal(run.ran, false);
+  assert.equal(run.report.verdict, "Pass");
+  assert.equal(run.report.source.commit, run.recheck);
+  assert.equal(run.report.source.base, run.base);
+  assert.match(run.refs, new RegExp(run.recheck, "u"));
+});
+
+/**
+ * Catches a moved target left unmerged, a merge that is not a merge commit, or
+ * a workload run for it.
+ */
+test("a Recheck whose target moved reports a --no-ff merge of the target into it and runs no workload", async () => {
+  const run = await recheckAttempt("Work", recheckMoved, recheckReference);
+
+  assert.equal(run.ran, false);
+  assert.equal(run.report.verdict, "Pass");
+  assert.deepEqual(run.parents.toSorted(), [run.base, run.recheck].toSorted());
+});
+
+/**
+ * Catches a conflicting re-check reported, or one that leaves the workspace
+ * anywhere but at the target the workload then starts from.
+ */
+test("a Recheck whose merge conflicts falls through to the workload at the target", async () => {
+  const run = await recheckAttempt(
+    "Work",
+    recheckConflicting,
+    recheckReference,
+  );
+
+  assert.equal(run.ran, true);
+  assert.equal(run.report.verdict, "Pass");
+  assert.deepEqual(run.parents, [run.base]);
+});
+
+/** Catches a re-check inferred from the commits' shape rather than named. */
+test("a work task without a Recheck reference runs its workload though the target is contained", async () => {
+  const run = await recheckAttempt("Work", recheckContained, () => []);
+
+  assert.equal(run.ran, true);
+  assert.notEqual(run.report.source.commit, run.recheck);
+});
+
+/** Catches a tree reported without the reference, or none reported with it. */
+test("an evaluation reports the tree it evaluated only when its input carries an ExpectedTree", async () => {
+  const named = await recheckAttempt("Evaluation", recheckContained, () => [
+    { kind: "ExpectedTree", reference: "f".repeat(40) },
+  ]);
+  const unnamed = await recheckAttempt(
+    "Evaluation",
+    recheckContained,
+    () => [],
+  );
+
+  assert.equal(named.report.evaluatedTree, named.tree);
+  assert.ok(!Object.hasOwn(unnamed.report, "evaluatedTree"));
 });

@@ -1,7 +1,7 @@
 /**
  * The evidence a worker produces while the agent runs: the per-turn fold, the
- * transcript batcher, the run totals and the credential scrub every uploaded
- * byte passes through.
+ * transcript batcher, the run totals, the readings of its context window and
+ * the credential scrub every uploaded byte passes through.
  *
  * THE SCRUB IS THE ONLY FILTER. It replaces exact occurrences of the values the
  * worker was itself handed, so what a reader sees is what the run emitted and
@@ -17,6 +17,18 @@
  * against the run's own cap on batches as it is queued, so it is never more
  * than a transcript.
  *
+ * A TURN IS ONE API CALL. Claude Code emits an `assistant` event per content
+ * block, each repeating its call's `message.id` and usage, so the first event
+ * of an id makes the row and the rest add none. A row names the subagent call
+ * it was made under, from the event's `parent_tool_use_id`, only to a plane
+ * that takes the field.
+ *
+ * A READING IS OFFERED, NOT FOLDED. What reads the window hands each reading
+ * over with the turn it follows, and it is posted to a plane that takes
+ * readings and to no other; one it refuses stops the readings and nothing
+ * else. A window the contract refuses costs a compaction's reading its window
+ * and any other reading itself.
+ *
  * EVIDENCE NEVER FAILS A RUN. A refused evidence call stops the transcript and
  * is remembered as the reason an already-failing run ended; it does not itself
  * end one, because the ticket's work is not what this module is for.
@@ -26,7 +38,13 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 
 import {
+  workerContractCredentialOutcome,
+  workerContractRunContext,
+} from "@chuggy/worker-contract/workerContract";
+import {
   nativeHttpPageItemsMax,
+  runContextPageReadingsMax,
+  runContextReadingsMax,
   runEndedEvidences,
   runModelCharsMax,
   runOutcomeLabelCharsMax,
@@ -36,9 +54,12 @@ import {
   runUsageWindows,
   workerPlaneBytesMediaType,
   workerPlaneRoutes,
+  workerRunContextSchema,
+  workerRunTurnsSchema,
 } from "@chuggy/worker-contract/workerPlane";
 
 import {
+  creditsExhausted,
   observeCodexReadings,
   observeCodexRollout,
   observeRateLimit,
@@ -49,7 +70,12 @@ import {
   rateLimited,
 } from "./rateLimit.mjs";
 import { workerRequest } from "./transport.mjs";
-import { rosterLabel, routePath } from "./wire.mjs";
+import {
+  answeredVersion,
+  rosterLabel,
+  routePath,
+  versionReaches,
+} from "./wire.mjs";
 
 /** The interval a run's transcript is shipped on, whether or not anyone reads. */
 export const runTranscriptFlushMs = 5_000;
@@ -75,11 +101,21 @@ const turnsExhaustedSubtype = "error_max_turns";
 const runCostBasis = "List";
 const unnamedModel = "unknown";
 const runTurnPagesMax = Math.ceil(runTurnSeriesMax / nativeHttpPageItemsMax);
+const runContextPagesMax = Math.ceil(
+  runContextReadingsMax / runContextPageReadingsMax,
+);
 
 /** The plane's labels for how a run ended, each refused as this module loads where the contract no longer has it. */
-const [runFailed, runRateLimited, runTurnsExhausted, runUploadRefused] = [
+const [
+  runFailed,
+  runRateLimited,
+  runCreditsExhausted,
+  runTurnsExhausted,
+  runUploadRefused,
+] = [
   "RunFailed",
   "RunRateLimited",
+  "RunCreditsExhausted",
   "RunTurnsExhausted",
   "RunUploadRefused",
 ].map((label) => rosterLabel(runEndedEvidences, label));
@@ -317,17 +353,23 @@ function streamTokens(usage) {
 /**
  * One assistant turn's usage, or nothing when the event is not a turn the
  * runtime charged for. It carries no instant: the plane dates the row it
- * stores, and a worker clock is no authority on when a row was stored.
+ * stores, and a worker clock is no authority on when a row was stored. It
+ * names the subagent call it was made under where the event names one the
+ * contract holds.
  */
 export function runTurn(event, ordinal) {
   const model = event?.message?.model;
   if (event?.type !== "assistant" || typeof model !== "string")
     return undefined;
-  return {
+  const turn = {
     ordinal,
     model: boundedModel(model),
     ...streamTokens(event.message.usage),
   };
+  const named = { ...turn, parentToolUseId: event.parent_tool_use_id };
+  return workerRunTurnsSchema.safeParse({ turns: [named] }).success
+    ? named
+    : turn;
 }
 
 function reportedModels(modelUsage) {
@@ -454,10 +496,20 @@ function runTotalsSoFar(state) {
  * A hold outranks the account, because a run that exhausted its turns while the
  * provider was refusing every request never had the turns to spend. What counts
  * as a hold is `rateLimit.mjs`'s, folded from the frames as they went past.
+ *
+ * Exhausted credits outrank a hold, since no reset brings them back, and are
+ * labelled so only to a plane whose answers named `version` at or past the
+ * one that takes the label; to another, the run is labelled as though its
+ * credits had not run out.
  */
-export function endedEvidence(result, planeRefused, sightings, step) {
+export function endedEvidence(result, planeRefused, sightings, step, version) {
   const subtype = typeof result?.subtype === "string" ? result.subtype : "";
   if (step !== undefined) return step;
+  if (
+    creditsExhausted(sightings) &&
+    versionReaches(version, workerContractCredentialOutcome)
+  )
+    return runCreditsExhausted;
   if (rateLimited(sightings)) return runRateLimited;
   if (subtype === turnsExhaustedSubtype) return runTurnsExhausted;
   if (result !== null && result !== undefined) return runFailed;
@@ -496,6 +548,7 @@ function runEndedBody(state, step) {
     state.planeRefused,
     state.sightings,
     step,
+    state.version,
   );
   const limit =
     evidence === runRateLimited ? runLimit(state.sightings.reset) : undefined;
@@ -533,8 +586,13 @@ function evidenceState(scrub) {
     planeRefused: false,
     acknowledged: 0,
     ordinal: 0,
+    messages: new Set(),
     turns: [],
     pending: [],
+    version: undefined,
+    contextRecorded: 0,
+    contextPending: [],
+    contextRefused: false,
     result: undefined,
     carried: undefined,
     turnsCarried: 0,
@@ -560,8 +618,12 @@ function wouldExceedBatch(state, text) {
 
 function foldTurn(state, event) {
   if (state.ordinal >= runTurnSeriesMax) return undefined;
+  const message = event?.message?.id;
+  const identified = typeof message === "string";
+  if (identified && state.messages.has(message)) return undefined;
   const turn = runTurn(event, state.ordinal + 1);
   if (turn === undefined) return undefined;
+  if (identified) state.messages.add(message);
   state.ordinal += 1;
   state.turns.push(turn);
   if (!state.transcriptRefused && state.ordinal > state.acknowledged)
@@ -569,6 +631,38 @@ function foldTurn(state, event) {
   return state.ordinal === runTurnSeriesMax
     ? turnsTruncationLine(runTurnSeriesMax)
     : undefined;
+}
+
+/** The cause whose reading carries the compaction's facts, so it stands without a window. */
+const contextCompactionCause = "Compaction";
+
+/** An offered reading, numbered after every one taken so far, while the run's readings are still taken. */
+function foldContext(state, { cause, afterTurn, compaction, window }) {
+  if (state.contextRefused || state.contextRecorded >= runContextReadingsMax)
+    return;
+  const reading = {
+    ordinal: state.contextRecorded + 1,
+    afterTurn,
+    cause,
+    ...(compaction === undefined ? {} : { compaction }),
+  };
+  const kept = [
+    ...(window === undefined ? [] : [{ ...reading, window }]),
+    ...(cause === contextCompactionCause ? [reading] : []),
+  ].find(
+    (offer) => workerRunContextSchema.safeParse({ readings: [offer] }).success,
+  );
+  if (kept === undefined) return;
+  state.contextRecorded += 1;
+  state.contextPending.push(kept);
+}
+
+/** A turn row as the plane is offered it: without the subagent it names where the plane does not take that. */
+function offeredTurn(state, turn) {
+  if (versionReaches(state.version, workerContractRunContext)) return turn;
+  const offered = { ...turn };
+  delete offered.parentToolUseId;
+  return offered;
 }
 
 async function acknowledgedTurns(answer) {
@@ -590,7 +684,9 @@ async function deliverTurns(state, call) {
     const answer = await call(workerPlaneRoutes.runTurns.path, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ turns: rows }),
+      body: JSON.stringify({
+        turns: rows.map((turn) => offeredTurn(state, turn)),
+      }),
     });
     state.acknowledged = Math.max(
       state.acknowledged,
@@ -657,6 +753,34 @@ function refuse(state, warn, what, failure) {
   warn(`${what} refused: ${failureText(failure)}\n`);
 }
 
+/**
+ * The readings waiting, in pages, to a plane whose answers name the version
+ * that takes them. One refused drops those waiting and stops the readings, and
+ * nothing else of the run's evidence.
+ */
+async function deliverReadings(state, call, warn) {
+  if (!versionReaches(state.version, workerContractRunContext)) return;
+  try {
+    for (
+      let page = 0;
+      page < runContextPagesMax && state.contextPending.length > 0;
+      page += 1
+    ) {
+      const readings = state.contextPending.slice(0, runContextPageReadingsMax);
+      await call(workerPlaneRoutes.runContext.path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ readings }),
+      });
+      state.contextPending = state.contextPending.slice(readings.length);
+    }
+  } catch (failure) {
+    state.contextPending = [];
+    state.contextRefused = true;
+    warn(`run context refused: ${failureText(failure)}\n`);
+  }
+}
+
 async function flushOnce(state, call, warn) {
   try {
     await deliverTurns(state, call);
@@ -669,6 +793,7 @@ async function flushOnce(state, call, warn) {
     state.pending = [];
     refuse(state, warn, "run evidence", failure);
   }
+  await deliverReadings(state, call, warn);
 }
 
 function evidenceUploads(state, call, warn, drain, done) {
@@ -725,7 +850,13 @@ export function runEvidenceRecorder(task, bearer, scrub, services = {}) {
     now = Date.now,
   } = services;
   const state = evidenceState(scrub);
-  const call = (path, init) => request(task, bearer, path, init);
+  // Every answer names the plane's release, and the latest named is what the
+  // optional evidence is offered to.
+  const call = async (path, init) => {
+    const answer = await request(task, bearer, path, init);
+    state.version = answeredVersion(answer) ?? state.version;
+    return answer;
+  };
   // One flush at a time: a tick that finds one in flight starts no other, and
   // what it would have shipped goes with the next.
   const flush = () => {
@@ -753,6 +884,12 @@ export function runEvidenceRecorder(task, bearer, scrub, services = {}) {
       append(state.scrub(truncatedEvent(line)));
       const marker = foldTurn(state, event);
       if (marker !== undefined) append(marker);
+    },
+    /** How many turns are folded so far, which a reading taken now follows. */
+    turnsFolded: () => state.ordinal,
+    /** A reading of the window, after the turn `afterTurn` names. */
+    context(offered) {
+      foldContext(state, offered);
     },
     observed(result) {
       state.result = result;

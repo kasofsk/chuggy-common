@@ -28,6 +28,14 @@
  * changes — would price every API error as a hold and leave the retry budget
  * unenforceable.
  *
+ * EXHAUSTED CREDITS ARE THE SAME FRAME'S `billing_error`, which the same
+ * closed set declares and the runtime sets where the account has no credit
+ * left. It is no hold: no window reopens. Codex declares exhausted credits
+ * only for a ChatGPT workspace, as a snapshot's `rate_limit_reached_type`
+ * of `workspace_owner_credits_depleted` or `workspace_member_credits_depleted`.
+ * An API key's exhausted balance is `usage_limit_exceeded`, as is a used-up
+ * quota, so it is never read as exhausted credits.
+ *
  * THE LATEST STATUS IS THE ONE THAT COUNTS, for that same reason: a run rejected
  * at one point and allowed again later was not being held when it ended.
  *
@@ -80,8 +88,13 @@ const rateLimitEventType = "rate_limit_event";
 const rateLimitRejectedStatus = "rejected";
 const assistantMessageType = "assistant";
 const rateLimitErrorKind = "rate_limit";
+const creditsExhaustedErrorKind = "billing_error";
 
 const codexUsageLimitErrorInfo = "usage_limit_exceeded";
+const codexCreditsDepletedTypes = new Set([
+  "workspace_owner_credits_depleted",
+  "workspace_member_credits_depleted",
+]);
 const codexUsedPercentFull = 100;
 const codexTimestampPattern =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u;
@@ -94,7 +107,12 @@ const codexWindowNames = new Map([
 
 /** What has been seen so far, which until a frame says otherwise is nothing. */
 export function rateLimitSightings() {
-  return { status: undefined, refused: false, reset: undefined };
+  return {
+    status: undefined,
+    refused: false,
+    reset: undefined,
+    creditsExhausted: false,
+  };
 }
 
 /** When the window a frame's `info` refuses reopens and which it is, or nothing where it refuses none or does not say. */
@@ -127,11 +145,10 @@ export function observeRateLimit(sightings, event) {
     }
     return sightings;
   }
-  if (
-    event?.type === assistantMessageType &&
-    event.error === rateLimitErrorKind
-  )
-    sightings.refused = true;
+  if (event?.type !== assistantMessageType) return sightings;
+  if (event.error === rateLimitErrorKind) sightings.refused = true;
+  if (event.error === creditsExhaustedErrorKind)
+    sightings.creditsExhausted = true;
   return sightings;
 }
 
@@ -161,7 +178,8 @@ function codexResetOf(snapshot) {
 /**
  * Folds what a Codex rollout declared — `snapshot`, its last `token_count`'s
  * `rate_limits`, and `errorInfo`, its `task_complete`'s `codex_error_info` —
- * into the sightings, where it says the account was refused.
+ * into the sightings, where it says the account was refused, and whether a
+ * workspace's credits were depleted.
  */
 export function observeCodexRollout(sightings, { snapshot, errorInfo }) {
   const reached =
@@ -169,6 +187,8 @@ export function observeCodexRollout(sightings, { snapshot, errorInfo }) {
     codexWindowsFull(snapshot).length > 0;
   if (!reached && errorInfo !== codexUsageLimitErrorInfo) return sightings;
   sightings.refused = true;
+  if (codexCreditsDepletedTypes.has(snapshot?.rate_limit_reached_type))
+    sightings.creditsExhausted = true;
   sightings.reset = codexResetOf(snapshot);
   return sightings;
 }
@@ -178,6 +198,11 @@ export function rateLimited(sightings) {
   return (
     sightings?.refused === true || sightings?.status === rateLimitRejectedStatus
   );
+}
+
+/** Whether what was seen says the account's credits are exhausted. */
+export function creditsExhausted(sightings) {
+  return sightings?.creditsExhausted === true;
 }
 
 /** The latest reading of each window, which until a frame gives one is none. */

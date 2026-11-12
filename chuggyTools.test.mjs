@@ -8,7 +8,10 @@ import test from "node:test";
 import { setImmediate } from "node:timers";
 import { URL } from "node:url";
 
-import { sessionStoreBatchBytesMax } from "@chuggy/worker-contract/sessionPlane";
+import {
+  sessionCapabilities,
+  sessionStoreBatchBytesMax,
+} from "@chuggy/worker-contract/sessionPlane";
 import {
   agenticRefusalsAnsweredMax,
   allChuggyTools,
@@ -16,7 +19,10 @@ import {
   chuggyDocsIndex,
   chuggyToolCapabilities,
   chuggyToolDocsResponseBytesMax,
+  chuggyToolEpicViewResponseBytesMax,
   chuggyToolImageResponseBytesMax,
+  chuggyToolLandingQueuesResponseBytesMax,
+  chuggyToolLeadSettingsResponseBytesMax,
   chuggyToolPrefix,
   chuggyToolResponseBytesMax,
   chuggyToolRunErrorResponseBytesMax,
@@ -24,10 +30,17 @@ import {
   chuggyToolTicketLandingBytesMax,
   chuggyToolTicketLandingsResponseBytesMax,
   chuggyToolTimeoutMs,
+  epicPageLimitMax,
+  epicContentBytesMax,
+  epicSummaryCharsMax,
+  epicTicketsMax,
+  epicTitleCharsMax,
+  landingQueueTicketsAnsweredMax,
   nativeHttpPageItemsMax,
   runTranscriptBatchBytesMax,
   runTranscriptPageBatchesMax,
   selectorHistoryLimitMax,
+  selectorProjectOverridesSchema,
   threadTurnsAnsweredMax,
   ticketLandingsAnsweredMax,
 } from "@chuggy/worker-contract/sessionTools";
@@ -53,7 +66,7 @@ import {
   chuggyToolServer,
   chuggyToolSignal,
   chuggyTranscriptBodyBytesMax,
-  readConfigurationChildCharsMax,
+  readAtPathChildCharsMax,
   sessionAllowedTools,
   sessionBuiltInTools,
   sessionCapabilityTools,
@@ -131,9 +144,10 @@ test("a tool the roster does not grant is never registered", () => {
 });
 
 /**
- * Every tool that takes a brief, each with what its `brief` parameter says. The
- * brief is described there rather than in the tool's description, which
- * Claude Code cuts.
+ * Every tool that takes a brief, each with what its `brief` parameter says and
+ * what each field it publishes says. The brief is described there rather than
+ * in the tool's description, which Claude Code cuts. A brief that publishes no
+ * fields is an open object, and its parameter says the whole of it.
  */
 function briefTakers() {
   return chuggyToolDefinitions(
@@ -143,16 +157,28 @@ function briefTakers() {
     }),
   )
     .filter((definition) => "brief" in definition.shape(z))
-    .map(({ name, shape }) => ({
-      name,
-      description: shape(z).brief.description ?? "",
-    }));
+    .map(({ name, shape }) => {
+      const { brief } = shape(z);
+      const fields = Object.fromEntries(
+        Object.entries(brief.shape).map(([field, schema]) => [
+          field,
+          schema.description ?? "",
+        ]),
+      );
+      const description = brief.description ?? "";
+      return {
+        name,
+        description,
+        fields,
+        says: [description, ...Object.values(fields)].join("\n"),
+      };
+    });
 }
 
 /**
- * `brief` is an open object on the wire, so a session learns what one carries
- * from the parameter's description alone. A tool that takes one and does not
- * name the title is a tool that files untitled tickets.
+ * A session learns what a brief carries from the brief's descriptions alone.
+ * A tool that takes one and does not name the title is a tool that files
+ * untitled tickets.
  */
 test("every tool that takes a brief names the title it carries", () => {
   const taking = briefTakers();
@@ -162,10 +188,14 @@ test("every tool that takes a brief names the title it carries", () => {
     "file_dependent",
     "revise_draft",
   ]);
-  for (const { name, description } of taking) {
-    assert.ok(description.includes("`title`"), `${name} names no title`);
+  for (const { name, description, fields } of taking) {
+    const title = fields.title ?? description;
     assert.ok(
-      description.includes("always give one"),
+      "title" in fields || description.includes("`title`"),
+      `${name} names no title`,
+    );
+    assert.ok(
+      title.includes("always give one"),
       `${name} does not ask for one`,
     );
   }
@@ -180,8 +210,11 @@ test("every tool that takes a brief says an intent is bounded as a whole, and gi
   const taking = briefTakers();
 
   assert.notEqual(taking.length, 0, "no tool takes a brief");
-  for (const { name, description } of taking) {
-    const [, intent] = /`intent` is ([^;]*);/u.exec(description) ?? [];
+  for (const { name, description, fields } of taking) {
+    const [, intent] = /`intent` is ([^;]*);/u.exec(description) ?? [
+      undefined,
+      fields.intent,
+    ];
     assert.ok(intent !== undefined, `${name} does not say what an intent is`);
     assert.ok(
       intent.includes("bounded only as a whole"),
@@ -203,6 +236,8 @@ test("every tool that takes a brief says an intent is bounded as a whole, and gi
 const pageBounds = {
   list_tickets: nativeHttpPageItemsMax,
   list_drafts: nativeHttpPageItemsMax,
+  list_epics: epicPageLimitMax,
+  read_epic_history: epicPageLimitMax,
   list_configurations: nativeHttpPageItemsMax,
   read_decision_log: selectorHistoryLimitMax,
   read_refusals: agenticRefusalsAnsweredMax,
@@ -661,6 +696,134 @@ test("a run event of the largest size, too heavy for one answer as the transcrip
   assert.equal(previews[0].bytes, Buffer.byteLength(line));
 });
 
+/**
+ * The events of a run's first batch: the init event with the runtime's lists
+ * beside what it says of the run, thinking under its signature, and rate-limit
+ * events between.
+ */
+const transcriptShapedEvents = [
+  {
+    type: "system",
+    subtype: "init",
+    uuid: "i-1",
+    session_id: "s-1",
+    cwd: "/work",
+    model: "claude-opus-5-5",
+    tools: ["Bash", "Edit", "mcp__chuggy__read_run_transcript"],
+    slash_commands: Array.from(
+      { length: 60 },
+      (_, at) => `command-${String(at)}`,
+    ),
+    skills: Array.from({ length: 30 }, (_, at) => `skill-${String(at)}`),
+    plugins: [{ name: "plugin", path: "/plugins/plugin" }],
+  },
+  {
+    type: "rate_limit_event",
+    uuid: "l-1",
+    rate_limit_info: { status: "allowed" },
+  },
+  {
+    type: "assistant",
+    uuid: "t-1",
+    message: {
+      role: "assistant",
+      content: [
+        {
+          type: "thinking",
+          thinking: "edit source",
+          signature: "E".repeat(800),
+        },
+        { type: "tool_use", id: "c-1", name: "Edit", input: {} },
+      ],
+    },
+  },
+  {
+    type: "rate_limit_event",
+    uuid: "l-2",
+    rate_limit_info: { status: "allowed" },
+  },
+];
+
+test("each transcript tool answers an entry as what it says of the session and counts what it leaves out", async () => {
+  const pages = {
+    read_run_transcript: [
+      { execution: "e-1", attempt: "a-1" },
+      runPageOf([runBatchOf(1, transcriptShapedEvents)]),
+    ],
+    read_lead_transcript: [
+      {},
+      JSON.stringify({ stream: "lead-1", entries: transcriptShapedEvents }),
+    ],
+    read_thread_transcript: [
+      { session: "t-1" },
+      JSON.stringify({ stream: "t-1", entries: transcriptShapedEvents }),
+    ],
+  };
+
+  for (const [name, [args, body]] of Object.entries(pages)) {
+    const { call } = toolsOf({}, () => ({ status: 200, body }));
+
+    const answer = JSON.parse(textOf(await call(name, args)));
+
+    assert.deepEqual(
+      answer.entries,
+      [
+        {
+          type: "system",
+          subtype: "init",
+          uuid: "i-1",
+          cwd: "/work",
+          model: "claude-opus-5-5",
+          tools: ["Bash", "Edit", "mcp__chuggy__read_run_transcript"],
+        },
+        {
+          type: "assistant",
+          uuid: "t-1",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "edit source" },
+              { type: "tool_use", id: "c-1", name: "Edit", input: {} },
+            ],
+          },
+        },
+      ],
+      name,
+    );
+    assert.deepEqual(answer.omitted, { rate_limit_event: 2 }, name);
+    assert.equal(answer.next, undefined, name);
+  }
+});
+
+/**
+ * What a reader of a transcript is told of its cursor: what each half counts,
+ * where a stream starts, and how it knows it has read to the end.
+ */
+test("the transcript reads say what their cursor counts, where a stream starts and where it ends", () => {
+  const described = (tool) =>
+    chuggyProjectTools.find(({ name }) => name === tool).description;
+  const claims = [
+    /`after` counts the stream's store batches, not its entries/,
+    /`entry` counts the entries of that page already answered, those left out included/,
+    /A stream starts with neither: a read at any other `after` starts past what earlier batches hold/,
+    /without its `signature`/,
+    /the init entry reduced to what identifies it and its `model`, `cwd` and `tools` names/,
+    /left out and counted by its `type` under `omitted`/,
+  ];
+  const ends = {
+    read_run_transcript: /An answer with no `next` has read all the run wrote/,
+    read_lead_transcript:
+      /An answer with no `next` has read to the stream's end/,
+    read_thread_transcript:
+      /An answer with no `next` has read to the stream's end/,
+  };
+
+  for (const [tool, end] of Object.entries(ends)) {
+    for (const claim of claims) assert.match(described(tool), claim, tool);
+    assert.match(described(tool), end, tool);
+  }
+});
+
 test("a run transcript page at its draw bound is read, and one past it is refused", async () => {
   const page = runPageOf([runBatchOf(1, [runEventOf("r-1", "x", 8)])]);
   const at = `${page}${" ".repeat(
@@ -1088,6 +1251,192 @@ test("a landings answer at its draw bound is read, and one past it is refused", 
   );
 });
 
+/** A project's landing queues read over a route answering `body`, and the one path it asked. */
+async function landingQueuesRead(body, status = 200) {
+  const api = apiOf(() => ({ status, body }));
+  const answer = await routeOf("read_landing_queues", {}, api);
+  assert.deepEqual(
+    api.calls.map(({ path }) => path),
+    ["/api/v1/tenants/vteng/projects/chuggy/landing-queues"],
+  );
+  return answer;
+}
+
+/**
+ * A queue held by `holder` with `waiters` behind it, naming `target` where one
+ * is given, in a repository whose name is `repositoryChars` backslashes, the
+ * text an answer's escaping weighs twice, and then `repositorySuffix`.
+ */
+function landingQueueOf(
+  holder,
+  waiters,
+  repositoryChars = 1,
+  { repositorySuffix = "", target } = {},
+) {
+  return {
+    repository: `${"\\".repeat(repositoryChars)}${repositorySuffix}`,
+    ...(target === undefined ? {} : { target }),
+    holder,
+    waiting: Array.from({ length: waiters }, (_, at) => holder * 1_000 + at),
+  };
+}
+
+test("a project's landing queues that fit one answer are answered as the route answered them", async () => {
+  for (const truncated of [false, true]) {
+    const body = {
+      queues: [
+        { repository: "https://git.test/a.git", holder: 3, waiting: [] },
+        {
+          repository: "https://git.test/b.git",
+          target: "release",
+          holder: 5,
+          waiting: [8, 13],
+        },
+      ],
+      truncated,
+    };
+
+    const answer = await landingQueuesRead(JSON.stringify(body));
+
+    assert.ok(answer.isError === undefined);
+    assert.deepEqual(JSON.parse(textOf(answer)), body);
+  }
+  const none = await landingQueuesRead(
+    JSON.stringify({ queues: [], truncated: false }),
+  );
+  assert.deepEqual(JSON.parse(textOf(none)), { queues: [], truncated: false });
+});
+
+/** Whether `left` comes before `right` in the route's order: by repository, then target, a queue naming none first. */
+function landingQueueBefore(left, right) {
+  return left.repository === right.repository
+    ? (left.target ?? "") < (right.target ?? "")
+    : left.repository < right.repository;
+}
+
+test("landing queues past one answer keep the route's first whole queues in its order and say truncated", async () => {
+  const waiters = landingQueueTicketsAnsweredMax / 4 - 1;
+  const queues = [
+    ["a", undefined, 13],
+    ["a", "main", 2],
+    ["a", "release", 8],
+    ["b", "main", 1],
+  ].map(([repositorySuffix, target, holder]) =>
+    landingQueueOf(holder, waiters, 2_000, { repositorySuffix, target }),
+  );
+  assert.ok(
+    queues.every(
+      (queue, at) => at === 0 || landingQueueBefore(queues[at - 1], queue),
+    ),
+    "the queues under test are in the route's order",
+  );
+  const body = JSON.stringify({ queues, truncated: false });
+  assert.ok(
+    chuggyToolAnswerBytes(body) > chuggyToolAnswerBytesMax &&
+      Buffer.byteLength(body) <= chuggyToolLandingQueuesResponseBytesMax,
+    "the queues under test fit one answer, or only past their draw bound",
+  );
+
+  const answer = await landingQueuesRead(body);
+
+  assert.ok(answer.isError === undefined, textOf(answer));
+  assert.ok(chuggyToolAnswerBytes(textOf(answer)) <= chuggyToolAnswerBytesMax);
+  const answered = JSON.parse(textOf(answer));
+  assert.equal(answered.truncated, true);
+  assert.ok(answered.queues.length > 0, "no queue was answered");
+  assert.deepEqual(answered.queues, queues.slice(0, answered.queues.length));
+  assert.ok(
+    chuggyToolAnswerBytes(
+      JSON.stringify({
+        queues: queues.slice(0, answered.queues.length + 1),
+        truncated: true,
+      }),
+    ) > chuggyToolAnswerBytesMax,
+    "a later queue would have fit",
+  );
+});
+
+test("a route's first queue too large alone is refused rather than cut", async () => {
+  const queue = landingQueueOf(1, 0, chuggyToolAnswerBytesMax);
+
+  const answer = await landingQueuesRead(
+    JSON.stringify({ queues: [queue], truncated: false }),
+  );
+
+  assert.equal(answer.isError, true);
+  assert.match(textOf(answer), /the route's first queue is larger alone/u);
+});
+
+test("a landing queues read the plane refuses is relayed as the refusal it is", async () => {
+  for (const [status, code] of [
+    [403, "Forbidden"],
+    [503, "Unavailable"],
+  ]) {
+    const body = JSON.stringify({ error: { code, message: code } });
+
+    const answer = await landingQueuesRead(body, status);
+
+    assert.equal(answer.isError, true, code);
+    assert.equal(textOf(answer), `HTTP ${String(status)}\n${body}`, code);
+  }
+});
+
+test("a landing queues route's body that is not a project's landing queues is refused rather than answered", async () => {
+  for (const body of [
+    "{}",
+    "not JSON",
+    "null",
+    JSON.stringify({ queues: {}, truncated: false }),
+    JSON.stringify({ queues: [], truncated: "no" }),
+    JSON.stringify({
+      queues: Array.from(
+        { length: landingQueueTicketsAnsweredMax + 1 },
+        (_, at) => landingQueueOf(at + 1, 0),
+      ),
+      truncated: false,
+    }),
+  ]) {
+    const answer = await landingQueuesRead(body);
+
+    assert.equal(answer.isError, true, body);
+    assert.match(textOf(answer), /not a project's landing queues/u, body);
+  }
+});
+
+test("a landing queues answer at its draw bound is read, and one past it is refused", async () => {
+  const body = JSON.stringify({ queues: [], truncated: false });
+  const at = `${body}${" ".repeat(
+    chuggyToolLandingQueuesResponseBytesMax - Buffer.byteLength(body),
+  )}`;
+
+  const read = await landingQueuesRead(at);
+  const over = await landingQueuesRead(`${at} `);
+
+  assert.deepEqual(JSON.parse(textOf(read)), { queues: [], truncated: false });
+  assert.equal(over.isError, true);
+  assert.match(
+    textOf(over),
+    new RegExp(
+      `larger than the ${String(chuggyToolLandingQueuesResponseBytesMax)} bytes`,
+      "u",
+    ),
+  );
+});
+
+test("read_landing_queues says what a holder and a waiter are, that a lone ticket waits on nobody, that no target is not the default branch, and what truncated means", () => {
+  const { description } = chuggyProjectTools.find(
+    ({ name }) => name === "read_landing_queues",
+  );
+  for (const claim of [
+    /Its `holder` is the one ticket that may land on that reference now/,
+    /`waiting` the tickets ranked behind it, in rank order, none of which lands there before the holder stops holding it/,
+    /A ticket alone in a queue is its holder and waits on nobody/,
+    /a queue naming no `target` being its tickets' that name none, which is a different queue from one naming the default branch/,
+    /It answers the route's first whole queues one answer holds, in the route's order, by repository and then target, `truncated` where it leaves later ones out or the route left tickets out/,
+  ])
+    assert.match(description, claim);
+});
+
 test("a raise too large to store is refused like any other answer", async () => {
   const huge = "x".repeat(chuggyToolAnswerBytesMax);
   const api = {
@@ -1210,6 +1559,7 @@ const readRoutes = [
   [["read_refusals", { limit: 4 }], "/agentic-refusals?limit=4"],
   [["read_ticket_refusals", { ticket: 9 }], "/tickets/9/agentic-refusals"],
   [["read_ticket_landings", { ticket: 9 }], "/tickets/9/landings"],
+  [["read_landing_queues", {}], "/landing-queues"],
   [["read_lead", {}], "/lead"],
   [
     ["read_lead_transcript", { after: 2, entry: 3 }],
@@ -1647,7 +1997,7 @@ test("an outline too long for one answer is read to its end by offset", async ()
     ]),
   );
   for (const child of Object.values(workloads))
-    assert.ok(JSON.stringify(child).length <= readConfigurationChildCharsMax);
+    assert.ok(JSON.stringify(child).length <= readAtPathChildCharsMax);
   const { call } = configurationToolsOf({ version: 2, workloads });
 
   const pieces = await configurationReadOn(
@@ -2300,6 +2650,14 @@ test("a write relays the status and the body the API answered, unaltered", async
   }
 });
 
+/** The least a draft write's `authoring` and `brief` are, which the contract's shapes admit. */
+const draftAuthoring = { dependencies: [], program: [] };
+const draftBrief = {
+  title: "t",
+  intent: "what the member asked for",
+  links: [],
+};
+
 test("a write is written in the versioned media type the API requires", async () => {
   const { api, call } = toolsOf();
 
@@ -2307,8 +2665,8 @@ test("a write is written in the versioned media type the API requires", async ()
     ticket: 4,
     expectedVersion: 2,
     configurationRevision: "r1",
-    authoring: { dependencies: [] },
-    brief: { title: "t" },
+    authoring: draftAuthoring,
+    brief: draftBrief,
   });
 
   assert.equal(api.calls[0].method, "PUT");
@@ -2319,8 +2677,8 @@ test("a write is written in the versioned media type the API requires", async ()
   assert.deepEqual(JSON.parse(api.calls[0].init.body), {
     expectedVersion: 2,
     configurationRevision: "r1",
-    authoring: { dependencies: [] },
-    brief: { title: "t" },
+    authoring: draftAuthoring,
+    brief: draftBrief,
   });
 });
 
@@ -2329,8 +2687,8 @@ test("a draft fenced at version zero is refused before any call, and one at vers
   const revision = {
     ticket: 4,
     configurationRevision: "r1",
-    authoring: { dependencies: [] },
-    brief: { title: "t" },
+    authoring: draftAuthoring,
+    brief: draftBrief,
   };
   for (const [name, args] of [
     ["revise_draft", revision],
@@ -2413,8 +2771,8 @@ test("a write names the media type only when it sends a body", async () => {
     ticket: 4,
     expectedVersion: 2,
     configurationRevision: "r1",
-    authoring: { dependencies: [] },
-    brief: { title: "t" },
+    authoring: draftAuthoring,
+    brief: draftBrief,
   });
   await call("delete_draft", { ticket: 4, expectedVersion: 2 });
 
@@ -2779,12 +3137,8 @@ test("the configuration read says where the agent that does the work is named", 
  * says it on its `brief` parameter.
  */
 const briefClaims = [
-  /\{title\?, intent, links, images\?, checks\?/,
-  /`images` are this project's images the work is handed, each by the identity fetch_image takes/,
-  new RegExp(
-    `each one line of 1 to ${String(briefLineCharsMax)} characters with no tab, line break or other control character in it`,
-    "u",
-  ),
+  /this project's images the work is handed, each by the identity fetch_image takes/iu,
+  /one line\b.* with no tab, line break or other control character in it/,
   /`commandedCheckStage`, its program stage key, counted from one/,
   /`commandedCheckStageNote` \(the same stage and, for a catalog, its plan, or that none does and which plans would\)/,
   /whose program leaves out that stage, or for a catalog the evaluator in it that runs commands, is refused when it is released whoever releases it \(ProgramSkipsBriefChecks\)/,
@@ -2793,7 +3147,7 @@ const briefClaims = [
   /the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown/,
   /runs under sh -eu with the commit/,
   /reads it as \$\{CHUG_CHANGE_BASE-\} and runs everything where that is empty/,
-  /a brief naming none takes, on a version 2 catalog, the landing of the finalizer its selection lands with where that finalizer names one, and otherwise its repository's landing default/,
+  /[Aa] brief naming (?:none|no `finalization`) takes, on a version 2 catalog, the landing of the finalizer its selection lands with where that finalizer names one, and otherwise its repository's landing default/,
   /for a newly bound repository is a pull request/,
   /`landing`, the mode and target it stored, and its `source`: Brief, Finalizer, Repository, or Default for a brief naming no repository/,
   /never the default branch/,
@@ -2801,12 +3155,41 @@ const briefClaims = [
   /A 400 names the rule the brief broke, and for a check its position in `checks`, counted from zero/,
 ];
 
+/** What an open brief's parameter says that a published brief's shape says instead. */
+const openBriefClaims = [
+  /\{title\?, intent, links, images\?, checks\?/,
+  new RegExp(`a check being 1 to ${String(briefLineCharsMax)} characters`, "u"),
+];
+
 test("every tool that takes a brief says on its parameter what the server does with one", () => {
   const taking = briefTakers();
 
   assert.notEqual(taking.length, 0, "no tool takes a brief");
-  for (const { name, description } of taking)
-    for (const claim of briefClaims) assert.match(description, claim, name);
+  for (const { name, fields, says } of taking) {
+    for (const claim of briefClaims) assert.match(says, claim, name);
+    if (Object.keys(fields).length === 0)
+      for (const claim of openBriefClaims) assert.match(says, claim, name);
+  }
+});
+
+test("an open brief says each field as the published brief says it", () => {
+  const taking = briefTakers();
+  const open = taking.filter(({ fields }) => Object.keys(fields).length === 0);
+  const published = taking.filter(
+    ({ fields }) => Object.keys(fields).length > 0,
+  );
+
+  assert.notEqual(open.length, 0, "no tool takes an open brief");
+  assert.notEqual(published.length, 0, "no tool publishes a brief's shape");
+  for (const { fields } of published)
+    for (const [field, sentence] of Object.entries(fields))
+      for (const { name, says } of open)
+        assert.ok(
+          says.includes(
+            `\`${field}\` ${field.endsWith("s") ? "are" : "is"} ${sentence.charAt(0).toLowerCase()}${sentence.slice(1, -1)}`,
+          ),
+          `${name} says ${field} otherwise`,
+        );
 });
 
 /** What a release or an update of a draft running less than its plan is answered, and what lets it through. */
@@ -2939,7 +3322,7 @@ test("read_abilities says who the session is and what it may do", () => {
       /^Who this session acts as and what it may do on this project, read live\./,
       /Call it once before acting\./,
       /`principal` is the session's own principal, encoded as a ticket's `creator` is, so the tickets whose `creator` is it are yours/,
-      /`dispatch` and `skipPlannedEvaluations` among them: read a permit here rather than learning it from a refusal/,
+      /`dispatch`, `skipPlannedEvaluations` and `writeEpic` among them: read a permit here rather than learning it from a refusal/,
     ],
   };
 
@@ -3003,6 +3386,27 @@ test("list_executions takes only the states its route takes, named as read_execu
   );
 });
 
+/**
+ * Catches a carried execution's source being dropped on its way to the
+ * caller, or the description no longer saying where it is named.
+ */
+test("read_execution answers the execution a carried result came from, and says where it names it", async () => {
+  const body = JSON.stringify({
+    id: "e-2",
+    carriedFrom: { execution: "e-1", task: 3, workCycle: 1 },
+  });
+  const { call } = toolsOf({}, () => ({ status: 200, body }));
+
+  const answer = await call("read_execution", { execution: "e-2" });
+
+  assert.equal(textOf(answer), `HTTP 200\n${body}`);
+  assert.match(
+    chuggyProjectTools.find(({ name }) => name === "read_execution")
+      .description,
+    /carried from an earlier one, here and in list_executions, names that one in `carriedFrom`/,
+  );
+});
+
 test("list_tickets lists by recent activity on the server's own cursor, and by number unchanged without it", async () => {
   const { api, call } = toolsOf({}, () => ({ status: 200, body: "{}" }));
 
@@ -3042,13 +3446,23 @@ test("the draft writes open their brief with the minimum brief and say what auth
       .shape(z);
     assert.ok(
       shape.brief.description.startsWith(
-        'The minimum brief is {title, intent, links: [], repository: <clone URL from list_repositories>, branch: "refs/heads/<a new branch of your own>"}.\n`brief` is {title?',
+        'The minimum brief is {title, intent, links: [], repository: <clone URL from list_repositories>, branch: "refs/heads/<a new branch of your own>"}. ',
       ),
       name,
     );
     assert.match(
       shape.authoring.description ?? "",
-      /^`authoring` is \{program, dependencies\}: pass initialize_draft's `defaults` unchanged unless you mean otherwise, and `dependencies` are ticket numbers chosen from list_tickets\.$/,
+      /^How the machine runs the ticket: pass initialize_draft's `defaults` unchanged unless you mean otherwise\.$/,
+      name,
+    );
+    assert.match(
+      shape.authoring.shape.program.description ?? "",
+      /initialize_draft's `defaults\.program`/,
+      name,
+    );
+    assert.match(
+      shape.authoring.shape.dependencies.description ?? "",
+      /chosen from list_tickets/,
       name,
     );
   }
@@ -3075,12 +3489,12 @@ test("a ticket's landings are described as the route answers them, and read_tick
     /the newest one answer holds, oldest first, `truncated` where it leaves older ones out/,
     /Each landing carries its `state`/,
     /Unavailable \(it could not go through and escalated: as the newest, its ticket waits on a person; an older one stays after a resume\)/,
-    /`failureKind` where it failed, such as MergeConflict or QueueChecksFailed \(the merge queue removed its pull request twice for failed checks; its work went back to Work\)/,
+    /`failureKind` where it failed, such as MergeConflict, QueueChecksFailed \(the merge queue removed its pull request twice for failed checks; its work went back to Work\) or RecheckRequired/,
+    /RecheckRequired, with `recheck` unless recorded before re-checks kept one: its `reason`, TargetMoved \(the target moved past the accepted commit\), StackTreeDiffers \(the merge's tree is not its stack's\) or MergedTreeDiffers \(its merged pull request left a tree its work was not checked on\), and `baseRef`, the base checked against, where present/,
     /A Held landing carries `hold`, and an Unavailable one the `hold` it escalated from where one is recorded: its `kind`, [^.]*, and `since`, when a hold of that kind began/,
-    /`hold\.removal`, recorded where its pull request left its base's merge queue, is `reason`, the forge's own word such as `manual`, `failed_checks` or `checks_timed_out`, and `actor`, the login removing it, where named/,
-    /An AwaitingMerge landing carries `wait`: its `reason`, [^.]*, and `checkedAt`, when the forge was last heard about its merge/,
-    /\(Blocked by the forge's rules, as where the queue will not take it yet; HeadMoved; or Queued, waiting its turn in the queue\)/,
-    /`proposal` is the pull request [^.]*: its `url`, [^.]*its `mergeability`, and `mergeState`, the forge's own word for that, GitHub's `mergeable_state`/,
+    /`hold\.removal`, where its pull request left the merge queue, is the forge's `reason`, such as `manual`, and the `actor` removing it, where named/,
+    /An AwaitingMerge landing carries `wait`: its `reason` \(Blocked by the forge's rules, as where the queue will not take it yet; HeadMoved; or Queued, waiting its turn\) and `checkedAt`, when the forge was last heard about its merge/,
+    /`proposal` is the pull request [^.]*: its `url`, [^.]*its `mergeability`, and `mergeState`, GitHub's `mergeable_state`/,
     /its `status` as chuggy last read it, [^.]*so a Proposed landing's is the one it opened with/,
     /`conflict` is the paths its newest attempt conflicted on, `truncated` where they were cut/,
   ];
@@ -3233,8 +3647,8 @@ const origination = {
   configurationRevision: "r1",
   configurationDigest: "d1",
   expectedProjectSequence: 12,
-  authoring: { dependencies: [] },
-  brief: { title: "what the member asked for" },
+  authoring: draftAuthoring,
+  brief: draftBrief,
 };
 
 test("an originated draft is filed at the drafts route, fenced and derived from nothing", async () => {
@@ -3319,8 +3733,8 @@ test("what a project tool sends is scrubbed of the session's secrets, and its op
   await call("read_configuration", { revision: held });
   await call("list_tickets", { phase: [held] });
   await chuggyToolDefinitions(context)
-    .find(({ name }) => name === "create_draft")
-    .call({ ...origination, brief: { title: "t", [held]: held } });
+    .find(({ name }) => name === "file_dependent")
+    .call({ ...dependent, brief: { title: "t", [held]: held } });
 
   assert.equal(api.calls.length, 5);
   for (const { path, init } of api.calls) {
@@ -3361,8 +3775,8 @@ async function draftWritesCarry(field, value) {
     ticket: 4,
     expectedVersion: 2,
     configurationRevision: "r1",
-    authoring: { dependencies: [] },
-    brief: { title: "t" },
+    authoring: draftAuthoring,
+    brief: draftBrief,
   };
 
   for (const [tool, args] of [
@@ -3456,7 +3870,12 @@ test("each draft tool's selection parameter says what a selection is", () => {
 test("each draft tool's selection parameter names the revision a ticket follows", () => {
   for (const name of ["create_draft", "file_dependent", "revise_draft"]) {
     const tool = chuggyProjectTools.find((held) => held.name === name);
-    const described = tool?.shape(z).selection?.description ?? "";
+    const selection = tool?.shape(z).selection;
+    const field = selection?.unwrap?.().shape?.configuration?.description;
+    const described =
+      field === undefined
+        ? (selection?.description ?? "")
+        : `\`configuration\` is ${field} ${selection.description}`;
     assert.match(described, /`configuration` is "Pinned" or "Latest"/u, name);
     assert.match(described, /`defaults\.configuration`, or Pinned/u, name);
     assert.match(described, /leaves out part of its plan does not move/u, name);
@@ -3474,6 +3893,67 @@ test("read_ticket says what a following ticket's `following` answers", () => {
   );
 });
 
+const epicContentGiven = {
+  title: "Search",
+  summary: "Find things",
+  description: "All of search.",
+  visibility: "Active",
+  tickets: [4, 5],
+};
+
+/** The content revise_epic is given without a description, which it keeps. */
+const epicContentKeptGiven = {
+  title: epicContentGiven.title,
+  summary: epicContentGiven.summary,
+  visibility: epicContentGiven.visibility,
+  tickets: epicContentGiven.tickets,
+};
+
+/** A project's lead settings as the route answers them, `overrides` replacing what the project sets. */
+function leadSettingsRead(overrides = leadSettingsOverrides, revision = 5) {
+  const effective = {
+    revision: 9,
+    projectRevision: revision,
+    mode: "Running",
+    installationMode: "Running",
+    dispatchMode: "Automatic",
+    basePrompt: "Base.",
+    northStar: "North.",
+    threadStandingRules: "Rules.",
+    modelAllowlist: [],
+    toolAllowlist: [],
+    limits: {},
+    installationLimits: {},
+    operationalContextMaxAgeMs: 60_000,
+    leadOffering: "Own",
+  };
+  return {
+    partition: { tenant: task.tenant, project: task.project },
+    revision,
+    overrides,
+    effective,
+  };
+}
+
+/** What a project's settings override, each kind of field among them. */
+const leadSettingsOverrides = {
+  northStar: "Ship the worker core.",
+  basePrompt: "You are the lead.",
+  mode: "Running",
+  modelAllowlist: ["claude-opus-5-5"],
+  limits: { tokensPerDecision: 100, toolCallsPerDecision: 20 },
+};
+
+/** A project's placement as the route answers it. */
+const placementRead = {
+  thread: { route: "InCluster", source: "Default" },
+  lead: { route: "InCluster", source: "Project" },
+  leadOffering: "Subsidized",
+  leadOfferings: ["Own", "Subsidized"],
+  choices: ["InCluster", "Pool"],
+  runners: { mine: "Unregistered", project: "Live" },
+};
+
 /** What every project tool is driven with where a suite drives them all. */
 const projectToolArguments = {
   list_tickets: {},
@@ -3486,6 +3966,7 @@ const projectToolArguments = {
   read_refusals: {},
   read_ticket_refusals: { ticket: 7 },
   read_ticket_landings: { ticket: 7 },
+  read_landing_queues: {},
   read_lead: {},
   read_lead_transcript: {},
   list_executions: {},
@@ -3500,14 +3981,18 @@ const projectToolArguments = {
   fetch_image: { artifact: "image/png:ce47" },
   read_docs: {},
   read_abilities: {},
+  list_epics: {},
+  read_epic: { epic: 3 },
+  read_epic_history: { epic: 3 },
+  read_epic_graph: { epic: 3 },
   initialize_draft: { revision: "r1" },
   file_dependent: dependent,
   revise_draft: {
     ticket: 4,
     expectedVersion: 2,
     configurationRevision: "r1",
-    authoring: { dependencies: [] },
-    brief: { title: "t" },
+    authoring: draftAuthoring,
+    brief: draftBrief,
   },
   delete_draft: { ticket: 4, expectedVersion: 2 },
   release_draft: {
@@ -3524,6 +4009,14 @@ const projectToolArguments = {
     authoringVersion: 2,
     configurationRevision: "r1",
   },
+  create_epic: epicContentGiven,
+  revise_epic: { epic: 3, expectedRevision: 5, ...epicContentGiven },
+  add_epic_tickets: { epic: 3, tickets: [9] },
+  remove_epic_tickets: { epic: 3, tickets: [4] },
+  read_lead_settings: {},
+  update_lead_settings: { expectedRevision: 5, set: { mode: "Paused" } },
+  read_placement: {},
+  update_placement: { lead: "Pool" },
 };
 
 /** What every member tool is driven with where a suite drives them all. */
@@ -3588,12 +4081,20 @@ test("origination, revocation, updating and dispatching are registered for a thr
     "create_draft",
     "revoke_ticket",
     "update_ticket",
+    "create_epic",
+    "revise_epic",
+    "add_epic_tickets",
+    "remove_epic_tickets",
   ]);
   assert.deepEqual(registered(["TicketDispatch"]), ["dispatch_ticket"]);
   for (const tool of [
     "create_draft",
     "revoke_ticket",
     "update_ticket",
+    "create_epic",
+    "revise_epic",
+    "add_epic_tickets",
+    "remove_epic_tickets",
     "dispatch_ticket",
   ]) {
     assert.ok(registered([...threadRoster]).includes(tool), tool);
@@ -3601,6 +4102,133 @@ test("origination, revocation, updating and dispatching are registered for a thr
       !registered([...leadRoster]).includes(tool),
       `a lead's roster registered ${tool}`,
     );
+  }
+});
+
+/** What each offer tool is driven with where a suite drives them all, `navigate` with a page carrying a field beside its name. */
+const offerToolArguments = {
+  navigate: { page: "TicketNew", draft: 7 },
+  offer_release: { ticket: 4, authoringVersion: 2 },
+  offer_revoke: { ticket: 26, revision: 3 },
+};
+
+test("the offer tools are registered under ThreadOffer alone, and no roster without it reaches one", () => {
+  const offers = Object.keys(offerToolArguments);
+  const registered = (capabilities) =>
+    chuggyToolDefinitions(
+      chuggyToolContext(task, bearer, {
+        capabilities,
+        staging: leadDecisionStaging(),
+      }),
+    ).map(({ name }) => name);
+  const without = everyCapability.filter(
+    (capability) => capability !== "ThreadOffer",
+  );
+
+  assert.deepEqual(registered(["ThreadOffer"]), offers);
+  assert.deepEqual(
+    registered(without).filter((name) => offers.includes(name)),
+    [],
+  );
+  const { allowedTools, disallowedTools } = sessionAllowedTools(without);
+  for (const offer of offers) {
+    assert.ok(!allowedTools.includes(`${chuggyToolPrefix}${offer}`), offer);
+    assert.ok(disallowedTools.includes(`${chuggyToolPrefix}${offer}`), offer);
+  }
+});
+
+test("each offer tool takes the contract's shape and answers without asking any route", async () => {
+  for (const [name, args] of Object.entries(offerToolArguments)) {
+    const { api, call } = toolsOf();
+
+    const answer = await call(name, args);
+
+    assert.ok(answer.isError === undefined, name);
+    assert.equal(api.calls.length, 0, name);
+  }
+});
+
+test("navigate answers the page it was given, a field beside its name included", async () => {
+  for (const page of [
+    { page: "TicketNew", draft: 7 },
+    { page: "TicketNew", from: 3 },
+    { page: "TicketNew" },
+    { page: "Ticket", ticket: 41 },
+    { page: "Settings", section: "ProjectPlacement" },
+    { page: "Repository", repository: "github.com/acme/atlas" },
+    { page: "Inbox" },
+  ]) {
+    const { call } = toolsOf();
+
+    const answer = await call("navigate", page);
+
+    assert.ok(answer.isError === undefined, JSON.stringify(page));
+    assert.deepEqual(
+      JSON.parse(/^.*? to (\{.*\})\.$/u.exec(textOf(answer))[1]),
+      page,
+    );
+  }
+});
+
+test("each offer tool refuses an input the contract does not parse, as an error that asks no route", async () => {
+  for (const [name, args, why] of [
+    ["navigate", { page: "Nowhere" }, /page/u],
+    ["navigate", { page: "Ticket" }, /navigate names no page/u],
+    ["navigate", { page: "Inbox", ticket: 4 }, /navigate names no page/u],
+    [
+      "navigate",
+      { page: "TicketNew", from: 3, draft: 7 },
+      /navigate names no page/u,
+    ],
+    ["navigate", { page: "Settings", section: "Nowhere" }, /section/u],
+    ["offer_release", { ticket: 4 }, /authoringVersion/u],
+    ["offer_release", { ticket: 4, authoringVersion: -1 }, /authoringVersion/u],
+    ["offer_revoke", { ticket: 26 }, /revision/u],
+    ["offer_revoke", { ticket: 26, revision: 0 }, /revision/u],
+    ["navigate", { page: "Inbox", tab: "Unread" }, /tab/u],
+    [
+      "offer_release",
+      { ticket: 4, authoringVersion: 2, revision: 3 },
+      /revision/u,
+    ],
+    [
+      "offer_revoke",
+      { ticket: 26, revision: 3, authoringVersion: 2 },
+      /authoringVersion/u,
+    ],
+  ]) {
+    const { api, call } = toolsOf();
+
+    const answer = await call(name, args);
+
+    assert.equal(answer.isError, true, `${name} ${JSON.stringify(args)}`);
+    assert.match(textOf(answer), why);
+    assert.equal(api.calls.length, 0, name);
+  }
+});
+
+/**
+ * The runtime validates a call against the schema it was handed before the
+ * handler sees it, so an undeclared key the handed schema drops never reaches
+ * the handler's own check, and still stands in the call the console reads.
+ */
+test("the server hands the runtime an offer tool's input as a schema that refuses an undeclared key", () => {
+  const server = chuggyToolServer(
+    chuggyToolContext(task, bearer, {
+      capabilities: ["ThreadOffer"],
+      staging: leadDecisionStaging(),
+    }),
+    {
+      z,
+      tool: (name, description, schema) => ({ name, schema }),
+      createSdkMcpServer: (options) => options,
+    },
+  );
+
+  for (const { name, schema } of server.tools) {
+    const args = offerToolArguments[name];
+    assert.equal(schema.safeParse(args).success, true, name);
+    assert.equal(schema.safeParse({ ...args, extra: 1 }).success, false, name);
   }
 });
 
@@ -3629,21 +4257,37 @@ test("every project tool a session holds asks its route, read_docs the docs host
             ? JSON.stringify({ read: "Content", content: "x" })
             : path.endsWith("/landings")
               ? JSON.stringify({ landings: [], truncated: false })
-              : path.includes("/dispatch-view")
-                ? dispatchViewPage([{ ticket: 26, ticketVersion: 41 }])
-                : path.endsWith("/repositories")
-                  ? JSON.stringify({ repositories: [] })
-                  : path.includes("/configurations?")
-                    ? JSON.stringify({ configurations: [] })
-                    : path.includes("/draft-initializations/")
-                      ? JSON.stringify(draftInitialized)
-                      : "{}",
+              : path.endsWith("/landing-queues")
+                ? JSON.stringify({ queues: [], truncated: false })
+                : path.includes("/dispatch-view")
+                  ? dispatchViewPage([{ ticket: 26, ticketVersion: 41 }])
+                  : path.endsWith("/repositories")
+                    ? JSON.stringify({ repositories: [] })
+                    : path.includes("/configurations?")
+                      ? JSON.stringify({ configurations: [] })
+                      : path.endsWith("/epics/3")
+                        ? JSON.stringify(epicRead)
+                        : path.includes("/draft-initializations/")
+                          ? JSON.stringify(draftInitialized)
+                          : path.endsWith("/selector-settings")
+                            ? JSON.stringify(leadSettingsRead())
+                            : path.endsWith("/session-placement")
+                              ? JSON.stringify(placementRead)
+                              : "{}",
       }),
     );
 
     const answer = await call(name, projectToolArguments[name]);
 
-    const asked = { dispatch_ticket: 2, read_docs: 0 }[name] ?? 1;
+    const asked =
+      {
+        dispatch_ticket: 2,
+        read_docs: 0,
+        add_epic_tickets: 2,
+        remove_epic_tickets: 2,
+        update_lead_settings: 2,
+        update_placement: 2,
+      }[name] ?? 1;
     assert.equal(api.calls.length, asked, name);
     assert.equal(docs.length, name === "read_docs" ? 1 : 0, name);
     assert.ok(answer.isError === undefined, name);
@@ -4033,4 +4677,918 @@ test("every tool's description is whole within what Claude Code passes an agent"
       description.length <= toolDescriptionCharsMax,
       `${name}: ${String(description.length)}`,
     );
+});
+
+/** An epic as its route reads it. */
+const epicRead = {
+  number: 3,
+  revision: 5,
+  title: "Search",
+  summary: "Find things",
+  visibility: "Active",
+  progress: { byPhase: { Done: 1, Pending: 1 }, done: 1, total: 2 },
+  status: "in_progress",
+  waitingOnOutside: [],
+  description: "All of search.",
+  tickets: [4, 5],
+};
+
+const epicsPath = "/api/v1/tenants/vteng/projects/chuggy/epics";
+
+/** A fake chuggy that holds one epic: reads answer it, writes answer `written` in turn. */
+function epicApi(written) {
+  const answers = [...written];
+  return toolsOf({}, (_path, init) =>
+    (init?.method ?? "GET") === "GET"
+      ? { status: 200, body: JSON.stringify(epicRead) }
+      : answers.shift(),
+  );
+}
+
+test("each epic tool reaches the route the contract names for it", async () => {
+  for (const [[name, args], suffix] of [
+    [["list_epics", {}], "/epics"],
+    [
+      [
+        "list_epics",
+        {
+          search: "find",
+          visibility: "All",
+          ticket: 4,
+          sort: "title",
+          after: 2,
+          limit: 5,
+        },
+      ],
+      "/epics?search=find&visibility=All&ticket=4&sort=title&after=2&limit=5",
+    ],
+    [["read_epic", { epic: 3 }], "/epics/3"],
+    [
+      ["read_epic_history", { epic: 3, after: 2, limit: 5 }],
+      "/epics/3/history?after=2&limit=5",
+    ],
+    [["read_epic_graph", { epic: 3 }], "/epics/3/graph"],
+    [["list_tickets", { epic: 3, limit: 5 }], "?limit=5&epic=3"],
+  ]) {
+    const api = apiOf();
+
+    await routeOf(name, args, api);
+
+    assert.equal(
+      api.calls[0].path,
+      `/api/v1/tenants/vteng/projects/chuggy${suffix}`,
+      name,
+    );
+    assert.equal(api.calls[0].method, "GET", name);
+  }
+});
+
+test("create_epic writes the content at the epics route as a Create", async () => {
+  const saved = JSON.stringify({ epic: 8, revision: 1 });
+  const { api, call } = toolsOf({}, () => ({ status: 200, body: saved }));
+
+  const answer = await call("create_epic", epicContentGiven);
+
+  assert.equal(api.calls.length, 1);
+  assert.equal(api.calls[0].method, "POST");
+  assert.equal(api.calls[0].path, epicsPath);
+  assert.deepEqual(JSON.parse(api.calls[0].init.body), {
+    kind: "Create",
+    content: epicContentGiven,
+  });
+  assert.equal(textOf(answer), `HTTP 200\n${saved}`);
+  assert.ok(answer.isError === undefined);
+});
+
+test("revise_epic writes whole against the revision it was given, and a refusal is relayed unaltered and never asked again", async () => {
+  const body = JSON.stringify({
+    error: { code: "StaleRevision", message: "stale" },
+    current: 6,
+  });
+  const { api, call } = toolsOf({}, () => ({ status: 409, body }));
+
+  const answer = await call("revise_epic", {
+    epic: 3,
+    expectedRevision: 5,
+    ...epicContentGiven,
+  });
+
+  assert.equal(api.calls.length, 1);
+  assert.deepEqual(JSON.parse(api.calls[0].init.body), {
+    kind: "Revise",
+    epic: 3,
+    expected: 5,
+    content: epicContentGiven,
+  });
+  assert.equal(textOf(answer), `HTTP 409\n${body}`);
+  assert.equal(answer.isError, true);
+});
+
+test("an epic write past the title, summary, content or tickets bound is refused before any call is made", async () => {
+  const { api, call } = toolsOf();
+  const tooMany = Array.from({ length: epicTicketsMax + 1 }, (_, i) => i + 1);
+
+  for (const content of [
+    { ...epicContentGiven, title: "t".repeat(epicTitleCharsMax + 1) },
+    { ...epicContentGiven, summary: "s".repeat(epicSummaryCharsMax + 1) },
+    { ...epicContentGiven, description: "d".repeat(epicContentBytesMax + 1) },
+    { ...epicContentGiven, visibility: "All" },
+    { ...epicContentGiven, tickets: tooMany },
+  ])
+    assert.equal((await call("create_epic", content)).isError, true);
+  for (const tool of ["add_epic_tickets", "remove_epic_tickets"])
+    assert.equal(
+      (await call(tool, { epic: 3, tickets: tooMany })).isError,
+      true,
+    );
+  assert.equal(api.calls.length, 0);
+});
+
+test("an epic's title and summary are bounded in code points, as the API counts them", async () => {
+  const saved = JSON.stringify({ epic: 8, revision: 1 });
+  const { api, call } = toolsOf({}, () => ({ status: 200, body: saved }));
+  const astral = "\u{1F50D}";
+
+  const answer = await call("create_epic", {
+    ...epicContentGiven,
+    title: astral.repeat(epicTitleCharsMax),
+    summary: astral.repeat(epicSummaryCharsMax),
+  });
+
+  assert.ok(answer.isError === undefined, textOf(answer));
+  assert.equal(api.calls.length, 1);
+});
+
+test("add_epic_tickets reads the epic and revises it with only its members changed", async () => {
+  const saved = JSON.stringify({ epic: 3, revision: 6 });
+  const { api, call } = epicApi([{ status: 200, body: saved }]);
+
+  const answer = await call("add_epic_tickets", { epic: 3, tickets: [9, 4] });
+
+  assert.deepEqual(
+    api.calls.map(({ method }) => method),
+    ["GET", "POST"],
+  );
+  assert.equal(api.calls[0].path, `${epicsPath}/3`);
+  assert.deepEqual(JSON.parse(api.calls[1].init.body), {
+    kind: "Revise",
+    epic: 3,
+    expected: 5,
+    content: {
+      title: "Search",
+      summary: "Find things",
+      description: "All of search.",
+      visibility: "Active",
+      tickets: [4, 5, 9],
+    },
+  });
+  assert.equal(textOf(answer), `HTTP 200\n${saved}`);
+});
+
+test("remove_epic_tickets drops the named members that are in the epic and leaves the rest", async () => {
+  const { api, call } = epicApi([{ status: 200, body: "{}" }]);
+
+  await call("remove_epic_tickets", { epic: 3, tickets: [4, 99] });
+
+  assert.deepEqual(JSON.parse(api.calls[1].init.body).content.tickets, [5]);
+});
+
+test("a membership change that changes nothing writes nothing", async () => {
+  for (const [name, tickets, said] of [
+    ["add_epic_tickets", [4, 5], /already holds those tickets/],
+    ["remove_epic_tickets", [99], /holds none of those tickets/],
+  ]) {
+    const { api, call } = epicApi([]);
+
+    const answer = await call(name, { epic: 3, tickets });
+
+    assert.deepEqual(
+      api.calls.map(({ method }) => method),
+      ["GET"],
+      name,
+    );
+    assert.match(textOf(answer), said, name);
+    assert.match(textOf(answer), /stays at revision 5/, name);
+    assert.ok(answer.isError === undefined, name);
+  }
+});
+
+test("a membership write that went stale is read and written once more, from a fresh read", async () => {
+  const stale = {
+    status: 409,
+    body: JSON.stringify({
+      error: { code: "StaleRevision", message: "stale" },
+      current: 6,
+    }),
+  };
+  const saved = JSON.stringify({ epic: 3, revision: 7 });
+  const newer = {
+    ...epicRead,
+    revision: 6,
+    title: "Search v2",
+    tickets: [4, 5, 6],
+  };
+  let posts = 0;
+  const { api, call } = toolsOf({}, (_path, init) => {
+    if ((init?.method ?? "GET") === "GET")
+      return {
+        status: 200,
+        body: JSON.stringify(posts === 0 ? epicRead : newer),
+      };
+    posts += 1;
+    return posts === 1 ? stale : { status: 200, body: saved };
+  });
+
+  const answer = await call("add_epic_tickets", { epic: 3, tickets: [9] });
+
+  assert.deepEqual(
+    api.calls.map(({ method }) => method),
+    ["GET", "POST", "GET", "POST"],
+  );
+  const retried = JSON.parse(api.calls[3].init.body);
+  assert.equal(retried.expected, 6);
+  assert.equal(retried.content.title, "Search v2");
+  assert.deepEqual(retried.content.tickets, [4, 5, 6, 9]);
+  assert.equal(textOf(answer), `HTTP 200\n${saved}`);
+});
+
+test("a second stale membership write and any other refusal are relayed, not asked again", async () => {
+  const stale = {
+    status: 409,
+    body: JSON.stringify({ error: { code: "StaleRevision", message: "s" } }),
+  };
+  const twice = epicApi([stale, stale]);
+
+  const answer = await twice.call("add_epic_tickets", {
+    epic: 3,
+    tickets: [9],
+  });
+
+  assert.equal(twice.api.calls.length, 4);
+  assert.equal(textOf(answer), `HTTP 409\n${stale.body}`);
+  assert.equal(answer.isError, true);
+
+  const unknown = {
+    status: 409,
+    body: JSON.stringify({
+      error: { code: "UnknownTickets", message: "u" },
+      tickets: [9],
+    }),
+  };
+  const once = epicApi([unknown]);
+
+  const refused = await once.call("add_epic_tickets", {
+    epic: 3,
+    tickets: [9],
+  });
+
+  assert.equal(once.api.calls.length, 2);
+  assert.equal(textOf(refused), `HTTP 409\n${unknown.body}`);
+});
+
+test("a membership change reads an epic whose content is at its cap, past an ordinary read's bound", async () => {
+  const content = { ...epicRead, description: "" };
+  const spare =
+    epicContentBytesMax -
+    Buffer.byteLength(
+      JSON.stringify({
+        title: content.title,
+        summary: content.summary,
+        description: "",
+        visibility: content.visibility,
+        tickets: content.tickets,
+      }),
+    );
+  const heaviest = { ...content, description: "d".repeat(spare) };
+  const body = JSON.stringify(heaviest);
+  assert.ok(Buffer.byteLength(body) > chuggyToolResponseBytesMax);
+  assert.ok(Buffer.byteLength(body) <= chuggyToolEpicViewResponseBytesMax);
+  const saved = JSON.stringify({ epic: 3, revision: 6 });
+  const { api, call } = toolsOf({}, (_path, init) =>
+    (init?.method ?? "GET") === "GET"
+      ? { status: 200, body }
+      : { status: 200, body: saved },
+  );
+
+  const answer = await call("remove_epic_tickets", { epic: 3, tickets: [4] });
+
+  assert.equal(textOf(answer), `HTTP 200\n${saved}`);
+  assert.equal(
+    JSON.parse(api.calls[1].init.body).content.description,
+    heaviest.description,
+  );
+});
+
+/**
+ * An epic whose content is at its cap and whose fields beside it are at their
+ * heaviest, escaping included, with a description holding pairs that are one
+ * code point, so its view is more than one answer holds.
+ */
+function epicAtCap() {
+  const heavy = {
+    ...epicRead,
+    title: '"'.repeat(epicTitleCharsMax),
+    summary: "\u0001".repeat(epicSummaryCharsMax),
+    tickets: Array.from(
+      { length: epicTicketsMax },
+      (_, i) => Number.MAX_SAFE_INTEGER - i,
+    ),
+    waitingOnOutside: Array.from(
+      { length: epicTicketsMax },
+      () => Number.MAX_SAFE_INTEGER,
+    ),
+  };
+  const contentBytes = (description) =>
+    Buffer.byteLength(
+      JSON.stringify({
+        title: heavy.title,
+        summary: heavy.summary,
+        description,
+        visibility: heavy.visibility,
+        tickets: heavy.tickets,
+      }),
+    );
+  const line = 'Ship "search" 🙂.\n';
+  let description = line.repeat(
+    Math.floor(
+      (epicContentBytesMax - contentBytes("")) /
+        (contentBytes(line) - contentBytes("")),
+    ),
+  );
+  while (contentBytes(`${description}d`) <= epicContentBytesMax)
+    description += "d";
+  return { ...heavy, description };
+}
+
+test("read_epic answers an epic that fits as the route answered it, and one at its cap as its description in pieces that read on to the whole", async () => {
+  const fits = epicApi([]);
+  assert.equal(
+    textOf(await fits.call("read_epic", { epic: 3 })),
+    `HTTP 200\n${JSON.stringify(epicRead)}`,
+  );
+
+  const heaviest = epicAtCap();
+  const body = JSON.stringify(heaviest);
+  assert.ok(Buffer.byteLength(body) > chuggyToolResponseBytesMax);
+  assert.ok(Buffer.byteLength(body) <= chuggyToolEpicViewResponseBytesMax);
+  const { call } = toolsOf({}, () => ({ status: 200, body }));
+  const { description, ...fields } = heaviest;
+  let read = "";
+  let offset;
+  for (let reads = 1; reads <= description.length; reads += 1) {
+    const answer = await call("read_epic", { epic: 3, offset });
+    assert.equal(answer.isError, undefined, textOf(answer));
+    const text = textOf(answer);
+    assert.ok(chuggyToolAnswerBytes(text) <= chuggyToolAnswerBytesMax);
+    assert.equal(text.slice(0, text.indexOf("\n")), "HTTP 200");
+    const piece = JSON.parse(text.slice(text.indexOf("\n") + 1));
+    for (const [key, value] of Object.entries(fields))
+      assert.deepEqual(piece[key], value, key);
+    assert.equal(piece.descriptionOffset, offset ?? 0);
+    assert.equal(piece.descriptionChars, description.length);
+    read += piece.description;
+    if (piece.descriptionCharsLeft === 0) break;
+    offset = piece.descriptionOffset + piece.description.length;
+    assert.match(piece.note, new RegExp(`offset ${String(offset)} reads on`));
+  }
+  assert.ok(offset !== undefined, "the epic at its cap was answered whole");
+  assert.equal(read, description);
+
+  const past = await call("read_epic", {
+    epic: 3,
+    offset: description.length + 1,
+  });
+  assert.equal(past.isError, true);
+  assert.match(textOf(past), /past the end of this epic's description/);
+});
+
+test("revise_epic sent no description keeps the one the epic holds, at its cap, and writes it against the revision it was given", async () => {
+  const heaviest = epicAtCap();
+  const saved = JSON.stringify({ epic: 3, revision: 6 });
+  const { api, call } = toolsOf({}, (_path, init) =>
+    (init?.method ?? "GET") === "GET"
+      ? { status: 200, body: JSON.stringify(heaviest) }
+      : { status: 200, body: saved },
+  );
+
+  const answer = await call("revise_epic", {
+    epic: 3,
+    expectedRevision: 5,
+    ...epicContentKeptGiven,
+  });
+
+  assert.equal(textOf(answer), `HTTP 200\n${saved}`);
+  assert.deepEqual(
+    api.calls.map(({ method, path }) => [method, path]),
+    [
+      ["GET", `${epicsPath}/3`],
+      ["POST", epicsPath],
+    ],
+  );
+  assert.deepEqual(JSON.parse(api.calls[1].init.body), {
+    kind: "Revise",
+    epic: 3,
+    expected: 5,
+    content: { ...epicContentKeptGiven, description: heaviest.description },
+  });
+});
+
+test("revise_epic sent no description writes nothing where the epic cannot be read", async () => {
+  const body = JSON.stringify({ error: { code: "NotFound", message: "n" } });
+  for (const [status, text, said] of [
+    [404, body, `HTTP 404\n${body}`],
+    [
+      200,
+      JSON.stringify({ number: 3 }),
+      /not an epic as the contract answers one/,
+    ],
+  ]) {
+    const { api, call } = toolsOf({}, () => ({ status, body: text }));
+
+    const answer = await call("revise_epic", {
+      epic: 3,
+      expectedRevision: 5,
+      ...epicContentKeptGiven,
+    });
+
+    assert.deepEqual(
+      api.calls.map(({ method }) => method),
+      ["GET"],
+    );
+    if (typeof said === "string") assert.equal(textOf(answer), said);
+    else assert.match(textOf(answer), said);
+    assert.equal(answer.isError, true);
+  }
+});
+
+test("a membership change on an epic that cannot be read relays the read's refusal and writes nothing", async () => {
+  const body = JSON.stringify({ error: { code: "NotFound", message: "n" } });
+  const { api, call } = toolsOf({}, () => ({ status: 404, body }));
+
+  const answer = await call("remove_epic_tickets", { epic: 3, tickets: [4] });
+
+  assert.equal(api.calls.length, 1);
+  assert.equal(textOf(answer), `HTTP 404\n${body}`);
+  assert.equal(answer.isError, true);
+});
+
+test("create_draft carries its epic, and an epic that is missing or Archived is relayed as the API refused it", async () => {
+  for (const [status, code] of [
+    [409, "MissingEpic"],
+    [409, "ArchivedEpic"],
+    [409, "ManyTickets"],
+    [409, "LargeContent"],
+  ]) {
+    const body = JSON.stringify({ error: { code, message: "m" } });
+    const { api, call } = toolsOf({}, () => ({ status, body }));
+
+    const answer = await call("create_draft", { ...origination, epic: 3 });
+
+    assert.equal(JSON.parse(api.calls[0].init.body).epic, 3);
+    assert.equal(textOf(answer), `HTTP ${String(status)}\n${body}`);
+    assert.equal(answer.isError, true);
+    assert.equal(api.calls.length, 1, "a refused epic was asked again");
+  }
+});
+
+test("the epic tools are described: the writes name their refusals and the ability that admits them", () => {
+  const described = (tool) =>
+    chuggyProjectTools.find(({ name }) => name === tool).description;
+
+  for (const tool of [
+    "create_epic",
+    "revise_epic",
+    "add_epic_tickets",
+    "remove_epic_tickets",
+  ])
+    for (const said of [
+      /StaleRevision/,
+      /UnknownTickets/,
+      /ManyTickets/,
+      /read_abilities/,
+    ])
+      assert.match(described(tool), said, tool);
+  assert.match(described("read_ticket"), /`epics`/);
+  assert.match(described("list_tickets"), /`epics`/);
+  assert.match(
+    parameterDescribed("list_tickets", "epic"),
+    /only the tickets in this epic/,
+  );
+  assert.match(
+    parameterDescribed("create_draft", "epic"),
+    /refused 409 .*MissingEpic, ArchivedEpic, ManyTickets or LargeContent/,
+  );
+});
+
+/** The settings route of the suite's project. */
+const leadSettingsPath =
+  "/api/v1/tenants/vteng/projects/chuggy/selector-settings";
+
+/** The placement route of the suite's project. */
+const placementPath = "/api/v1/tenants/vteng/projects/chuggy/session-placement";
+
+/** The tools with the settings route reading `read` and writing whatever `written` answers, which is a 200 at revision 6 where it is left out. */
+function leadSettingsToolsOf(read, written) {
+  return toolsOf({}, (_path, init) =>
+    (init?.method ?? "GET") === "GET"
+      ? { status: 200, body: JSON.stringify(read) }
+      : (written?.(init) ?? {
+          status: 200,
+          body: JSON.stringify(
+            leadSettingsRead(JSON.parse(init.body).overrides, 6),
+          ),
+        }),
+  );
+}
+
+/** The largest count in `1..2**20` that `admits` admits, which a schema's own bound is found by. */
+function admittedMost(admits) {
+  let low = 1;
+  let high = 2 ** 20;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (admits(middle)) low = middle;
+    else high = middle - 1;
+  }
+  return low;
+}
+
+/**
+ * The heaviest settings the contract admits: every text and allowlist of the
+ * overrides and of the effective settings at the most its schema admits, each
+ * character one JSON escapes into six.
+ */
+function leadSettingsHeaviest() {
+  const { basePrompt, modelAllowlist } = selectorProjectOverridesSchema.shape;
+  const heavy = (chars) => "\u0001".repeat(chars);
+  const text = heavy(
+    admittedMost((chars) => basePrompt.safeParse(heavy(chars)).success),
+  );
+  const nameChars = admittedMost(
+    (chars) => modelAllowlist.safeParse([heavy(chars)]).success,
+  );
+  const allowlist = Array.from(
+    {
+      length: admittedMost(
+        (names) =>
+          modelAllowlist.safeParse(Array(names).fill(heavy(nameChars))).success,
+      ),
+    },
+    (_, index) => `${heavy(nameChars - 1)}${String(index % 10)}`,
+  );
+  const texts = {
+    basePrompt: text,
+    northStar: text,
+    threadStandingRules: text,
+    modelAllowlist: allowlist,
+    toolAllowlist: allowlist,
+  };
+  const settings = leadSettingsRead({
+    ...leadSettingsOverrides,
+    ...texts,
+  });
+  assert.ok(
+    selectorProjectOverridesSchema.safeParse(settings.overrides).success,
+  );
+  return { ...settings, effective: { ...settings.effective, ...texts } };
+}
+
+/** Whether a read_lead_settings answer at `path` is a piece of the value there, rather than the value whole. */
+function leadSettingsPiece(read, path) {
+  return (
+    read !== null &&
+    typeof read === "object" &&
+    typeof read.note === "string" &&
+    JSON.stringify(read.path) === JSON.stringify(path) &&
+    ("outline" in read || "text" in read)
+  );
+}
+
+/**
+ * The value at `path` in the settings, read by `path` and `offset` alone: a
+ * piece read on until nothing is left, and an outline's entry whose child is
+ * not written whole read at its own `path`. `budget.reads` bounds the reads.
+ */
+async function leadSettingsWalked(call, path, budget) {
+  const entries = [];
+  let text = "";
+  let offset;
+  for (;;) {
+    budget.reads -= 1;
+    assert.ok(budget.reads >= 0, "the reads never reached the end");
+    const read = configurationRead(
+      await call("read_lead_settings", { path, offset }),
+    );
+    if (!leadSettingsPiece(read, path)) return read;
+    assert.equal(read.offset, offset ?? 0);
+    if (read.kind === "string") {
+      text += read.text;
+      if (read.charsLeft === 0) return text;
+      offset = read.offset + read.text.length;
+      continue;
+    }
+    for (const entry of read.outline)
+      entries.push([
+        entry.key,
+        "value" in entry
+          ? entry.value
+          : await leadSettingsWalked(call, [...path, entry.key], budget),
+      ]);
+    if (read.entriesLeft === 0)
+      return read.kind === "array"
+        ? entries.map(([, value]) => value)
+        : Object.fromEntries(entries);
+    offset = read.offset + read.outline.length;
+  }
+}
+
+test("read_lead_settings answers the heaviest settings in pieces that fit, which read by path and offset make the whole", async () => {
+  const heaviest = leadSettingsHeaviest();
+  const body = JSON.stringify(heaviest);
+  assert.ok(Buffer.byteLength(body) > chuggyToolResponseBytesMax);
+  assert.ok(Buffer.byteLength(body) <= chuggyToolLeadSettingsResponseBytesMax);
+  const { api, call } = toolsOf({}, () => ({ status: 200, body }));
+
+  const outline = configurationRead(await call("read_lead_settings", {}));
+  assert.ok(leadSettingsPiece(outline, []));
+  assert.deepEqual(
+    outline.outline.map(({ key }) => key),
+    Object.keys(heaviest),
+  );
+  assert.deepEqual(
+    await leadSettingsWalked(call, [], { reads: 10_000 }),
+    heaviest,
+  );
+  assert.ok(api.calls.every(({ path }) => path === leadSettingsPath));
+  assert.ok(api.calls.every(({ method }) => method === "GET"));
+});
+
+test("read_lead_settings answers settings that fit as the route answered them, and a refusal unaltered", async () => {
+  const body = JSON.stringify(leadSettingsRead());
+  const fits = toolsOf({}, () => ({ status: 200, body }));
+  assert.equal(
+    textOf(await fits.call("read_lead_settings", {})),
+    `HTTP 200\n${body}`,
+  );
+  assert.deepEqual(
+    configurationRead(
+      await fits.call("read_lead_settings", { path: ["overrides", "limits"] }),
+    ),
+    leadSettingsOverrides.limits,
+  );
+  const missing = await fits.call("read_lead_settings", {
+    path: ["overrides", "leadModel"],
+  });
+  assert.equal(missing.isError, true);
+  assert.match(textOf(missing), /^the lead settings hold no "leadModel"/u);
+
+  const refusal = JSON.stringify({ error: { code: "NotFound", message: "n" } });
+  const hidden = toolsOf({}, () => ({ status: 404, body: refusal }));
+  const answer = await hidden.call("read_lead_settings", {});
+  assert.equal(textOf(answer), `HTTP 404\n${refusal}`);
+  assert.equal(answer.isError, true);
+});
+
+test("update_lead_settings keeps a field it is not sent, at its longest, drops one it clears and replaces limits whole, under the revision it was given", async () => {
+  const heaviest = leadSettingsHeaviest();
+  const { api, call } = leadSettingsToolsOf(heaviest);
+
+  const answer = await call("update_lead_settings", {
+    expectedRevision: 4,
+    set: { mode: "Paused", limits: { dispatchesPerDecision: 1 } },
+    clear: ["northStar"],
+  });
+
+  assert.equal(textOf(answer), `HTTP 200\n${JSON.stringify({ revision: 6 })}`);
+  assert.equal(answer.isError, undefined);
+  assert.deepEqual(
+    api.calls.map(({ method, path }) => [method, path]),
+    [
+      ["GET", leadSettingsPath],
+      ["PUT", leadSettingsPath],
+    ],
+  );
+  const kept = { ...heaviest.overrides };
+  delete kept.northStar;
+  assert.deepEqual(JSON.parse(api.calls[1].init.body), {
+    expectedRevision: 4,
+    overrides: {
+      ...kept,
+      mode: "Paused",
+      limits: { dispatchesPerDecision: 1 },
+    },
+  });
+});
+
+test("update_lead_settings relays settings that moved as their code and revision, and never writes again", async () => {
+  const conflict = {
+    error: {
+      code: "SettingsRevisionConflict",
+      message: "The selector settings moved under this write.",
+    },
+    settings: leadSettingsRead(leadSettingsOverrides, 7),
+    movedBy: { kind: "User", subject: "u-1" },
+  };
+  const { api, call } = leadSettingsToolsOf(leadSettingsRead(), () => ({
+    status: 409,
+    body: JSON.stringify(conflict),
+  }));
+
+  const answer = await call("update_lead_settings", {
+    expectedRevision: 5,
+    set: { mode: "Paused" },
+  });
+
+  assert.equal(
+    textOf(answer),
+    `HTTP 409\n${JSON.stringify({ code: "SettingsRevisionConflict", revision: 7 })}`,
+  );
+  assert.equal(answer.isError, true);
+  assert.deepEqual(
+    api.calls.map(({ method }) => method),
+    ["GET", "PUT"],
+  );
+});
+
+test("update_lead_settings relays every other answer of its write as the API gave it", async () => {
+  for (const [status, body] of [
+    [
+      409,
+      JSON.stringify({
+        error: { code: "AutomaticDispatchUnavailable", message: "a" },
+      }),
+    ],
+    [
+      503,
+      JSON.stringify({
+        error: {
+          code: "SettingsWriteContended",
+          message: "The request can be retried.",
+        },
+      }),
+    ],
+    [404, JSON.stringify({ error: { code: "NotFound", message: "n" } })],
+    [413, JSON.stringify({ error: { code: "BodyTooLarge", message: "b" } })],
+  ]) {
+    const { api, call } = leadSettingsToolsOf(leadSettingsRead(), () => ({
+      status,
+      body,
+    }));
+
+    const answer = await call("update_lead_settings", {
+      expectedRevision: 5,
+      clear: ["basePrompt"],
+    });
+
+    assert.equal(textOf(answer), `HTTP ${String(status)}\n${body}`);
+    assert.equal(answer.isError, true);
+    assert.equal(api.calls.length, 2, String(status));
+  }
+});
+
+test("a settings read the API refuses is relayed by update_lead_settings, which writes nothing", async () => {
+  const body = JSON.stringify({ error: { code: "NotFound", message: "n" } });
+  const { api, call } = toolsOf({}, () => ({ status: 404, body }));
+
+  const answer = await call("update_lead_settings", {
+    expectedRevision: 5,
+    set: { mode: "Paused" },
+  });
+
+  assert.equal(textOf(answer), `HTTP 404\n${body}`);
+  assert.deepEqual(
+    api.calls.map(({ method }) => method),
+    ["GET"],
+  );
+});
+
+test("each settings and placement tool's refusal sends no request", async () => {
+  const { api, call } = toolsOf();
+
+  for (const [name, args] of [
+    ["read_lead_settings", { path: [{}] }],
+    ["read_lead_settings", { offset: -1 }],
+    ["update_lead_settings", { expectedRevision: 5 }],
+    ["update_lead_settings", { expectedRevision: 5, set: {}, clear: [] }],
+    ["update_lead_settings", { set: { mode: "Paused" } }],
+    ["update_lead_settings", { expectedRevision: 5, set: { mode: "Off" } }],
+    ["update_lead_settings", { expectedRevision: 5, set: { pause: true } }],
+    [
+      "update_lead_settings",
+      { expectedRevision: 5, set: { basePrompt: "b".repeat(2 ** 20) } },
+    ],
+    [
+      "update_lead_settings",
+      { expectedRevision: 5, set: { limits: { dispatchesPerDecision: 0 } } },
+    ],
+    ["update_lead_settings", { expectedRevision: 5, clear: ["pause"] }],
+    [
+      "update_lead_settings",
+      {
+        expectedRevision: 5,
+        set: { northStar: "n", mode: "Paused" },
+        clear: ["mode"],
+      },
+    ],
+    ["update_placement", {}],
+    ["update_placement", { lead: "Elsewhere" }],
+    ["update_placement", { leadOffering: "Free" }],
+  ]) {
+    const answer = await call(name, args);
+    assert.equal(answer.isError, true, `${name} ${JSON.stringify(args)}`);
+  }
+  assert.deepEqual(api.calls, []);
+});
+
+test("read_placement relays the placement as the route answered it", async () => {
+  const body = JSON.stringify(placementRead);
+  const { api, call } = toolsOf({}, () => ({ status: 200, body }));
+
+  assert.equal(textOf(await call("read_placement", {})), `HTTP 200\n${body}`);
+  assert.deepEqual(
+    api.calls.map(({ method, path }) => [method, path]),
+    [["GET", placementPath]],
+  );
+});
+
+test("update_placement writes every route read and always names the offering, a bare Pool lead running on its own", async () => {
+  for (const [args, written] of [
+    [
+      { lead: "Pool" },
+      { thread: "InCluster", lead: "Pool", leadOffering: "Own" },
+    ],
+    [
+      { thread: "Pool" },
+      { thread: "Pool", lead: "InCluster", leadOffering: "Subsidized" },
+    ],
+    [
+      { lead: "InCluster" },
+      { thread: "InCluster", lead: "InCluster", leadOffering: "Subsidized" },
+    ],
+    [
+      { leadOffering: "Own" },
+      { thread: "InCluster", lead: "InCluster", leadOffering: "Own" },
+    ],
+  ]) {
+    const { api, call } = toolsOf({}, () => ({
+      status: 200,
+      body: JSON.stringify(placementRead),
+    }));
+
+    const answer = await call("update_placement", args);
+
+    assert.equal(answer.isError, undefined, textOf(answer));
+    assert.deepEqual(
+      api.calls.map(({ method, path }) => [method, path]),
+      [
+        ["GET", placementPath],
+        ["PUT", placementPath],
+      ],
+    );
+    assert.deepEqual(
+      JSON.parse(api.calls[1].init.body),
+      written,
+      JSON.stringify(args),
+    );
+  }
+});
+
+test("update_placement relays the API's refusal of its write unaltered", async () => {
+  for (const [status, code] of [
+    [403, "HostedRunsNotGranted"],
+    [422, "LeadOfferingNotAdmitted"],
+  ]) {
+    const body = JSON.stringify({ error: { code, message: "m" } });
+    const { api, call } = toolsOf({}, (_path, init) =>
+      (init?.method ?? "GET") === "GET"
+        ? { status: 200, body: JSON.stringify(placementRead) }
+        : { status, body },
+    );
+
+    const answer = await call("update_placement", {
+      lead: "InCluster",
+      leadOffering: "Subsidized",
+    });
+
+    assert.equal(textOf(answer), `HTTP ${String(status)}\n${body}`);
+    assert.equal(answer.isError, true);
+    assert.equal(api.calls.length, 2);
+  }
+});
+
+test("no session's roster allows a settings tool", () => {
+  const settings = chuggyToolCapabilities.ProjectSettings.map(
+    (tool) => `${chuggyToolPrefix}${tool}`,
+  );
+  assert.ok(settings.length > 0);
+  for (let subset = 0; subset < 2 ** sessionCapabilities.length; subset += 1) {
+    const roster = sessionCapabilities.filter(
+      (_, index) => ((subset >> index) & 1) === 1,
+    );
+    const { allowedTools, disallowedTools } = sessionAllowedTools(roster);
+    for (const tool of settings) {
+      assert.ok(!allowedTools.includes(tool), `${roster.join(",")} ${tool}`);
+      assert.ok(disallowedTools.includes(tool), `${roster.join(",")} ${tool}`);
+    }
+  }
 });

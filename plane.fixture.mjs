@@ -40,6 +40,7 @@ import {
   workerPlaneAnswers,
   workerPlaneBytesMediaType,
   workerPlaneRoutes,
+  workerRunContextSchema,
   workerRunEndedSchema,
   workerRunTotalsSchema,
   workerRunTurnsSchema,
@@ -59,6 +60,7 @@ export const planes = {
     answers: workerPlaneAnswers,
     bodies: {
       runTurns: workerRunTurnsSchema,
+      runContext: workerRunContextSchema,
       runTotals: workerRunTotalsSchema,
       runEnded: workerRunEndedSchema,
       report: resultManifestDocumentSchema,

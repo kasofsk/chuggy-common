@@ -13,6 +13,9 @@
  * deadline, counted from whichever is later, the reset or now. A launch that
  * names no deadline is never held, since nothing could say the wait fits.
  *
+ * EXHAUSTED CREDITS ARE NEVER HELD. No reset would let the run carry on, so
+ * it ends at once, its text naming the credential whose credits they were.
+ *
  * A WRITE CREDENTIAL LEFT ON DISK FORBIDS A HOLD. A hold's keep mints one, and
  * a resumed agent can read what that left. Where it could not be removed the
  * run ends.
@@ -21,7 +24,7 @@
  * again, up to `runHoldsMax`.
  */
 
-import { rateLimited } from "./rateLimit.mjs";
+import { creditsExhausted, rateLimited } from "./rateLimit.mjs";
 
 /** How long past a window's reset a held run is resumed. */
 export const runHoldMarginMs = 60_000;
@@ -68,18 +71,22 @@ function runHoldRefusal({
 
 /**
  * What a run that ended without a verdict does about the limit: nothing where
- * no limit stopped it, `{untilMs, window}` where it waits, and otherwise
- * `{refused, reset}`, why it does not and what the frames said.
+ * no limit stopped it, `{exhausted}` where its credits ran out, naming the
+ * credential it ran on where its runner named one, `{untilMs, window}` where
+ * it waits, and otherwise `{refused, reset}`, why it does not and what the
+ * frames said.
  */
 export function runHoldDecided({
   resumable,
   sightings,
+  credential,
   session,
   nowMs,
   deadlineMs,
   holds,
   credentialLeft,
 }) {
+  if (creditsExhausted(sightings)) return { exhausted: { credential } };
   if (!rateLimited(sightings)) return undefined;
   const { reset } = sightings;
   const refused = runHoldRefusal({
@@ -100,13 +107,18 @@ export function runHoldDecided({
  * The error text of a run that ended without a verdict: `stopped`, how its
  * process ended; `sentence`, what the runtime said of it, scrubbed; and for a
  * limit `decided` did not wait out, which window, when it reopens or that
- * that is unknown, and why.
+ * that is unknown, and why, or whose credits ran out.
  */
 export function runEndedText(stopped, sentence, decided) {
-  const reset = decided?.reset;
-  return [
+  const said = [
     stopped,
     ...(typeof sentence === "string" && sentence.length > 0 ? [sentence] : []),
+  ];
+  if (decided !== undefined && "exhausted" in decided)
+    return [...said, runEndedExhaustedText(decided.exhausted)].join("\n");
+  const reset = decided?.reset;
+  return [
+    ...said,
     ...(decided === undefined
       ? []
       : reset === undefined
@@ -118,4 +130,13 @@ export function runEndedText(stopped, sentence, decided) {
       ? []
       : [`The run was not held: ${decided.refused}.`]),
   ].join("\n");
+}
+
+/** What a run whose credits ran out says of them, naming the credential where its runner named one. */
+function runEndedExhaustedText({ credential }) {
+  const whose =
+    credential === undefined
+      ? "this run's credential"
+      : `the credential ${credential}`;
+  return `The credits of ${whose} are exhausted, so the run was not held.`;
 }

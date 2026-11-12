@@ -24,7 +24,9 @@
  * meanwhile.
  *
  * A `Start` IS NEVER LOGGED, NOR WRITTEN ANYWHERE BUT THE SUPERVISOR'S
- * INPUT: it carries the session's bearer. What the supervisor writes on its
+ * INPUT: it carries the session's bearer. It names the credential the host's
+ * selector chose for its session, where the host gives one, and a session it
+ * chose none for is refused. What the supervisor writes on its
  * error stream is its log, and each line of it naming a session this host
  * started, as `chatSessionLabel` writes one, goes to that session's log;
  * every other line, one naming a session this host never started among them,
@@ -70,6 +72,7 @@ import { poolSessionPhase } from "./poolSessionPlane.mjs";
  * @typedef {object} ChatHostBackendSeams
  * @property {(line: string) => void} log the host's own log
  * @property {(assignment: string) => (line: string) => void} logFor the log of the session `assignment`
+ * @property {() => {credential: import("@chuggy/worker-contract/chatHost").ChatHostCredential} | {refused: string}} [credentialChosen] the credential the next session runs on, as its `Start` names it, or why there is none; none, and a `Start` names none
  *
  * @typedef {object} ChatHostSupervisor
  * @property {ChatSupervisorHandle} handle
@@ -395,13 +398,14 @@ function chatHostAttached(state, handle) {
 }
 
 /**
- * The `Start` of the session `assignment` is, as a line, or nothing where it
- * is no frame the supervisor reads.
+ * The `Start` of the session `assignment` is, on `credential` where one is
+ * named, as a line, or nothing where it is no frame the supervisor reads.
  *
  * @param {ChatHostBackendSettings} settings
  * @param {WorkerPoolSessionAssignment} assignment
+ * @param {import("@chuggy/worker-contract/chatHost").ChatHostCredential | undefined} credential
  */
-function chatHostStartLine(settings, assignment) {
+function chatHostStartLine(settings, assignment, credential) {
   try {
     return chatProtocolLine(
       chatHostStartSchema.parse({
@@ -413,6 +417,7 @@ function chatHostStartLine(settings, assignment) {
           timeoutSecsMax: assignment.deadlineSecs,
           outputBytesMax: settings.outputBytesMax,
         },
+        ...(credential === undefined ? {} : { credential }),
       }),
     );
   } catch {
@@ -438,7 +443,14 @@ function chatHostPlaced(state, assignment, kind) {
     state.entries.size >= (supervisor.ready?.sessionsMax ?? 0)
   )
     return { placed: "Unavailable" };
-  const line = chatHostStartLine(state.settings, assignment);
+  const chosen = state.seams.credentialChosen?.();
+  if (chosen !== undefined && "refused" in chosen)
+    return { placed: "Refused", evidence: chosen.refused };
+  const line = chatHostStartLine(
+    state.settings,
+    assignment,
+    chosen?.credential,
+  );
   if (line === undefined)
     return {
       placed: "Refused",

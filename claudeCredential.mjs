@@ -10,8 +10,8 @@
  *
  * THE KIND REACHES THE CORE IN `claudeCredentialVariable`, which carries the
  * kind's settings and no secret. A runner names it; chuggy's own pools name
- * none, and a core told none runs Claude Code as it always has: on the file as
- * a subscription's token, over its environment untouched.
+ * none, and a core told none runs Claude Code on the file as a subscription's
+ * token, the only credential in force as a kind named is.
  *
  * A KIND NAMED IS THE ONLY ONE IN FORCE, AT ITS PROVIDER'S OWN ENDPOINT.
  * Claude Code takes the first credential it finds of a cloud provider's,

@@ -760,6 +760,21 @@ test("a bound that is not a positive whole number is refused too", () => {
   });
 });
 
+test("a launch with no idle bound is taken, and every other bound is still required", () => {
+  const { idleMs, ...rest } = task.bounds;
+  assert.ok(
+    idleMs !== undefined,
+    "the fixture holds no idle bound to leave out",
+  );
+  assert.equal(sessionBoundNames.includes("idleMs"), false);
+  assert.deepEqual(checkedSessionBounds(rest), rest);
+  assert.deepEqual(
+    [...sessionBoundNames].sort(),
+    Object.keys(rest).sort(),
+    "a bound besides idleMs became optional",
+  );
+});
+
 test("a credential that straddles the result's truncation is scrubbed whole", async () => {
   const plane = planeOf([turnOne], facts);
   const straddled = `${"x".repeat(sessionTurnResultCharsMax - 10)}${token}`;
@@ -923,6 +938,48 @@ test("a thread message naming a runtime command reaches the model as text, and i
       ["turn-1", "read /clear as text"],
       ["turn-2", "read /usr/bin is missing as text"],
     ],
+  );
+});
+
+/** Catches a member's answer to an offer reaching the model as anything but the text their console posted. */
+test("a thread's offer reply reaches the model as its text, as a member's message does, and is answered in text", async () => {
+  const input = JSON.stringify({
+    version: 1,
+    offerReply: {
+      call: "toolu_01",
+      decision: "Confirmed",
+      outcome: "Succeeded",
+    },
+  });
+  const plane = planeOf(
+    [{ ...turnOne, inputKind: "OfferReply", input }],
+    threadSessionFacts,
+  );
+  const asked = [];
+  const { query } = queryOf((message) => {
+    asked.push(message);
+    return [
+      { type: "system", subtype: "init", session_id: "runtime-1" },
+      result("success", { result: "it is released" }),
+    ];
+  });
+
+  const code = await run({
+    request: plane.request,
+    requestOnce: plane.requestOnce,
+    query,
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(
+    asked.map((message) => [message.message.content, message.client_composed]),
+    [[input, undefined]],
+  );
+  assert.deepEqual(
+    plane.calls
+      .filter(({ path }) => path === sessionPlaneRoutes.turnAnswer.path)
+      .map(({ body }) => [body.turn, body.result]),
+    [["turn-1", "it is released"]],
   );
 });
 
@@ -1166,6 +1223,63 @@ test("a session whose facts name no compaction window is given no settings", asy
   assert.ok(!("settings" in seen.options), "settings were given");
 });
 
+test("a session whose facts name a model runs on it over the site's", async () => {
+  const plane = planeOf([], { ...leadFacts, model: "claude-sonnet-5-5" });
+  const { seen, query } = queryOf(() => []);
+
+  await run({
+    request: plane.request,
+    query,
+    environment: { ...environment, [sessionModelVariable]: "opus" },
+  });
+
+  assert.equal(seen.options.model, "claude-sonnet-5-5");
+});
+
+test("a session whose facts name no model runs on the site's", async () => {
+  const plane = planeOf([], leadFacts);
+  const { seen, query } = queryOf(() => []);
+
+  await run({
+    request: plane.request,
+    query,
+    environment: { ...environment, [sessionModelVariable]: "opus" },
+  });
+
+  assert.equal(seen.options.model, "opus");
+});
+
+test("a session whose facts name an effort runs at it, unoutranked by the effort variable", async () => {
+  const plane = planeOf([], { ...leadFacts, effort: "medium" });
+  const { seen, query } = queryOf(() => []);
+
+  await run({
+    request: plane.request,
+    query,
+    environment: { ...environment, CLAUDE_CODE_EFFORT_LEVEL: "high" },
+  });
+
+  assert.equal(seen.options.effort, "medium");
+  assert.ok(
+    !("CLAUDE_CODE_EFFORT_LEVEL" in seen.options.env),
+    "the variable that outranks the effort was left in",
+  );
+});
+
+test("a session whose facts name no effort is given none and keeps the effort variable", async () => {
+  const plane = planeOf([], leadFacts);
+  const { seen, query } = queryOf(() => []);
+
+  await run({
+    request: plane.request,
+    query,
+    environment: { ...environment, CLAUDE_CODE_EFFORT_LEVEL: "high" },
+  });
+
+  assert.ok(!("effort" in seen.options), "an effort was given");
+  assert.equal(seen.options.env.CLAUDE_CODE_EFFORT_LEVEL, "high");
+});
+
 test("an observation answered with decision tools posts the document they composed", async () => {
   const plane = planeOf([observationTurn], leadFacts);
   const { query } = queryOf((_asked, _index, options) => [
@@ -1340,8 +1454,9 @@ test("a composed decision is scrubbed of what the pod was handed, exactly as pro
 test("a project tool reaches the API under the session's own bearer", async () => {
   const plane = planeOf([observationTurn], leadFacts);
   const seenApi = [];
-  const { query } = queryOf((_asked, _index, options) => [
+  const { query } = queryOf((_asked, index, options) => [
     async () => {
+      if (index > 0) return;
       await options.mcpServers.chuggy.tools
         .find((tool) => tool.name === "read_ticket")
         .handler({ ticket: 4 });
@@ -1535,8 +1650,8 @@ test("a thread originates through the API under its own session bearer, and answ
           configurationRevision: "r1",
           configurationDigest: "d1",
           expectedProjectSequence: 12,
-          authoring: { dependencies: [] },
-          brief: { title: "the footer" },
+          authoring: { dependencies: [], program: [] },
+          brief: { title: "the footer", intent: "the footer", links: [] },
         });
     },
     result("success", { result: "filed ticket 14" }),

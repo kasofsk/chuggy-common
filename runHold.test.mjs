@@ -1,8 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { observeRateLimit, rateLimitSightings } from "./rateLimit.mjs";
 import {
+  creditsDepletedSnapshot,
+  creditsDepletedTypes,
+  limitReachedTypes,
+  limitSnapshot,
+  weeklyResetsAtSecs,
+} from "./codexRollout.fixture.mjs";
+import {
+  observeCodexRollout,
+  observeRateLimit,
+  rateLimitSightings,
+} from "./rateLimit.mjs";
+import {
+  creditsRefused,
+  creditsResult,
   limitFrames,
   limitRejected,
   limitRefused,
@@ -149,4 +162,84 @@ test("the text of a limit the frames gave no reset for does not make one up", ()
       "The run was not held: the frames gave no reset time.",
     ].join("\n"),
   );
+});
+
+/** A run whose credits ran out while a window also refused it, with every other condition of a hold met. */
+const exhausted = {
+  ...stopped,
+  sightings: seenBy([limitRejected, creditsRefused, creditsResult]),
+  credential: "max-1",
+};
+
+/** Catches a run whose credits ran out held for a reset that cannot bring them back. */
+test("a run whose credits ran out is never held, whatever a window said", () => {
+  assert.deepEqual(runHoldDecided(exhausted), {
+    exhausted: { credential: "max-1" },
+  });
+});
+
+/** Catches the text of exhausted credits naming no credential, or a reset that is not theirs. */
+test("the text of a run whose credits ran out names the credential and that it was not held", () => {
+  assert.equal(
+    runEndedText(
+      "Claude Code exited 1",
+      creditsResult.result,
+      runHoldDecided(exhausted),
+    ),
+    [
+      "Claude Code exited 1",
+      creditsResult.result,
+      "The credits of the credential max-1 are exhausted, so the run was not held.",
+    ].join("\n"),
+  );
+  assert.equal(
+    runEndedText(
+      "Claude Code exited 1",
+      undefined,
+      runHoldDecided({ ...exhausted, credential: undefined }),
+    ),
+    "Claude Code exited 1\nThe credits of this run's credential are exhausted, so the run was not held.",
+  );
+});
+
+/** A run whose Codex rollout declared `snapshot`, with every other condition of a hold met. */
+function stoppedByRollout(snapshot) {
+  const resumesAtMs = weeklyResetsAtSecs * 1_000 + runHoldMarginMs;
+  return {
+    resumable: true,
+    sightings: observeCodexRollout(rateLimitSightings(), {
+      snapshot,
+      errorInfo: "usage_limit_exceeded",
+    }),
+    session: limitSession,
+    nowMs: resumesAtMs - 1,
+    deadlineMs: resumesAtMs + runHoldReserveMs + 1,
+    holds: 0,
+    credential: "codex-1",
+  };
+}
+
+/** Catches a workspace whose credits are depleted held for a reset, or a Codex limit no longer held. */
+test("a Codex run whose workspace credits are depleted is never held, and one its limit stopped is", () => {
+  for (const reached of creditsDepletedTypes)
+    for (const snapshot of [
+      creditsDepletedSnapshot(reached),
+      { ...limitSnapshot, rate_limit_reached_type: reached },
+    ])
+      assert.deepEqual(runHoldDecided(stoppedByRollout(snapshot)), {
+        exhausted: { credential: "codex-1" },
+      });
+  for (const reached of limitReachedTypes)
+    assert.deepEqual(
+      runHoldDecided(
+        stoppedByRollout({
+          ...limitSnapshot,
+          rate_limit_reached_type: reached,
+        }),
+      ),
+      {
+        untilMs: weeklyResetsAtSecs * 1_000 + runHoldMarginMs,
+        window: "seven_day",
+      },
+    );
 });

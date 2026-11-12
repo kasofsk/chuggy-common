@@ -21,8 +21,11 @@
  * workspace, its home, its temporary files and the credentials it mints, as
  * `jobHostPlaces` names them. It inherits the runner's environment, then the
  * owner's and, where it reads Claude's credential, that credential's kind,
- * then the job's own places, and the directory goes when the job does. Any a
- * predecessor left are removed the first time `held` is asked.
+ * then the job's own places. The directory goes when the job does where the
+ * job ended clean, as `keptWorkspace.mjs` says, and is otherwise kept under a
+ * name of `hostKeptPrefix`, or where it is if it cannot be moved, logged and
+ * recorded. Any other a predecessor left is removed the first time `held` is
+ * asked.
  *
  * WHAT ENDED OF ITSELF IS NAMED ONCE, after `held` stopped naming it, with this
  * backend's own reason and never the job's output, which is written to the log
@@ -35,23 +38,42 @@
 
 import { spawn as spawnDefault } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
-import { join } from "node:path";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  readdir,
+  rename,
+  rm,
+} from "node:fs/promises";
+import { basename, isAbsolute, join } from "node:path";
 import { clearTimeout, setTimeout } from "node:timers";
 import { fileURLToPath, URL } from "node:url";
 
 import { workerTaskVariable } from "@chuggy/worker-contract/workerEnvironment";
 
+import { agentCredentialsScrubbedCarried } from "./agentCredentialSet.mjs";
 import { claudeCredentialCarried } from "./claudeCredential.mjs";
 import { hostJobVariable } from "./coreRuntime.mjs";
 import {
-  jobClaudeAgent,
+  jobCapabilitiesWithheld,
   jobCredentialFilesChecked,
   jobCredentialHanded,
   jobEnvelope,
   jobHostPlaces,
   reservedJobVariables,
 } from "./job.mjs";
+import {
+  keptWorkspaceKept,
+  keptWorkspaceRecordName,
+  keptWorkspaceRecordRead,
+  keptWorkspaceRecorded,
+  keptWorkspacesListed,
+  keptWorkspacesRecorded,
+  keptWorkspaceWhy,
+} from "./keptWorkspace.mjs";
 import { runnerMeasures, runnerMeasuredSum } from "./runnerReport.mjs";
 import { savedLogTrimmed } from "./savedLog.mjs";
 
@@ -70,9 +92,10 @@ import { savedLogTrimmed } from "./savedLog.mjs";
  * @property {readonly string[]} platforms the platform tokens this host is
  * @property {string} directory where each job's directory is made, this pool's alone
  * @property {string} logDir where each ended job's output is kept
- * @property {string} tokenFile the Claude credential file, which a job reads where it is unless it requires another agent `agentCredentialFiles` names
+ * @property {string} [tokenFile] the Claude credential file, which a job reads where it is unless it requires another agent `agentCredentialFiles` names; required where no selector is given
  * @property {import("./claudeCredential.mjs").ClaudeCredentialSetting} [claudeCredential] the kind of credential `tokenFile` is; none, and a job's core reads it as a subscription's token
  * @property {Readonly<Record<string, string>>} [agentCredentialFiles] the credential file of each agent but Claude, by the name its `Agent:` capability gives it, which a job requiring that agent reads in place of `tokenFile`; none, and such a job reads `tokenFile`
+ * @property {import("./agentCredentialSet.mjs").AgentCredentialSelector} [credentials] the runner's selector, which chooses the credential each job reads in place of the three above; a job is told where every file of its sets is, since it can read them, and scrubs what they hold
  * @property {number} timeoutSecsMax
  * @property {number} outputBytesMax
  * @property {Readonly<Record<string, string>>} environment the owner's, over the runner's own
@@ -85,7 +108,8 @@ import { savedLogTrimmed } from "./savedLog.mjs";
  * @property {(pid: number, signal: NodeJS.Signals) => void} [kill] signals a process group
  * @property {Readonly<Record<string, string | undefined>>} [environment] the runner's own, which a job inherits
  * @property {(onExit: () => void) => void} [atExit] runs `onExit` as the runner ends, `hostExitWatched` where absent
- * @property {(file: string, agent: string) => Promise<string | undefined>} tokenFileRefusal why a job cannot read the credential file, which is `agent`'s, or nothing
+ * @property {typeof rename} [rename] moves a kept job's directory to its kept name
+ * @property {(file: string, agent: string, credential?: import("./agentCredentialSet.mjs").AgentCredential) => Promise<string | undefined>} tokenFileRefusal why a job cannot read the credential file, which is `agent`'s and the credential the selector chose where it chose one, or nothing
  * @property {(line: string) => void} log
  * @property {() => number} [nowMs]
  *
@@ -434,9 +458,66 @@ async function hostDirectoryWritable(directory) {
       await hostDirectoryWritable(join(directory, entry.name));
 }
 
+/** What a kept job's directory is renamed to begin with, which no sweep removes. */
+export const hostKeptPrefix = "kept-";
+
+/**
+ * Why an ended job's directory is kept whatever its workspace record says, or
+ * nothing where its process exited 0 of itself.
+ *
+ * @param {HostJob} job
+ * @param {number | null} code
+ * @param {NodeJS.Signals | null} signal
+ */
+function hostJobUnclean(job, code, signal) {
+  if (job.expired) return "it ran past its deadline and was killed";
+  if (job.stopped) return "it was stopped";
+  if (signal !== null) return `its process was killed by ${signal}`;
+  if (code !== 0) return `its process exited ${String(code)}`;
+  return undefined;
+}
+
+/**
+ * Removes an ended job's directory where it ended clean, and otherwise keeps
+ * it under a name of `hostKeptPrefix`, or where it is if it cannot be moved,
+ * logged and recorded beside its log.
+ *
+ * @param {State} state
+ * @param {HostJob} job
+ * @param {number | null} code
+ * @param {NodeJS.Signals | null} signal
+ */
+async function hostJobDirectoryRetired(state, job, code, signal) {
+  const read = await keptWorkspaceRecordRead(
+    join(jobHostPlaces(job.directory).workspace, keptWorkspaceRecordName),
+  );
+  const why = keptWorkspaceWhy(hostJobUnclean(job, code, signal), read);
+  if (why === undefined) {
+    await hostDirectoryRemoved(state, job.directory);
+    return;
+  }
+  const kept = join(
+    state.settings.directory,
+    `${hostKeptPrefix}${basename(job.directory).replace(/^job-/u, "")}`,
+  );
+  let workspace = kept;
+  try {
+    await (state.seams.rename ?? rename)(job.directory, kept);
+  } catch (failure) {
+    workspace = job.directory;
+    state.seams.log(
+      `${job.name}: ${job.directory} could not be moved to ${kept}, so it is kept where it is, which its record keeps from the sweep: ${failure instanceof Error ? failure.message : String(failure)}`,
+    );
+  }
+  state.seams.log(
+    `${job.name}: ${await keptWorkspaceKept(state.settings.logDir, workspace, why, read, (state.seams.nowMs ?? Date.now)())}`,
+  );
+}
+
 /**
  * Removes the job directories no job of this run holds, which a predecessor
- * left.
+ * left, and never one it kept: one under a name of `hostKeptPrefix`, or one
+ * a kept record names where it could not be moved there.
  *
  * @param {State} state
  */
@@ -451,7 +532,12 @@ async function hostSwept(state) {
   }
   for (const name of names) {
     const directory = join(state.settings.directory, name);
-    if (!held.has(directory)) await hostDirectoryRemoved(state, directory);
+    if (
+      !held.has(directory) &&
+      !name.startsWith(hostKeptPrefix) &&
+      !(await keptWorkspaceRecorded(state.settings.logDir, directory))
+    )
+      await hostDirectoryRemoved(state, directory);
   }
 }
 
@@ -510,10 +596,10 @@ async function hostJobDirectory(state, assignment, credentialFile) {
  * @param {State} state
  * @param {string} name
  * @param {{directory: string, envelope: string}} made
- * @param {string} agent whose credential file the job reads
+ * @param {Record<string, string>} carried what the job is told of its credential, never its value
  * @returns {Promise<{child: ChildProcess, log: import("node:fs/promises").FileHandle} | undefined>}
  */
-async function hostJobSpawned(state, name, made, agent) {
+async function hostJobSpawned(state, name, made, carried) {
   const log = await open(
     join(state.settings.logDir, `${name}.log`),
     "a",
@@ -527,9 +613,10 @@ async function hostJobSpawned(state, name, made, agent) {
         state.inherited,
         {
           ...state.settings.environment,
-          ...(agent === jobClaudeAgent
-            ? claudeCredentialCarried(state.settings.claudeCredential)
-            : {}),
+          ...carried,
+          ...(state.settings.credentials === undefined
+            ? {}
+            : agentCredentialsScrubbedCarried(state.settings.credentials.sets)),
         },
         made.directory,
         made.envelope,
@@ -551,8 +638,8 @@ async function hostJobSpawned(state, name, made, agent) {
 
 /**
  * Watches a started job: its deadline kills it, and its end kills what is left
- * of its group, removes its directory and, unless this pool stopped it, is
- * named.
+ * of its group, removes or keeps its directory and, unless this pool stopped
+ * it, is named.
  *
  * @param {State} state
  * @param {HostJob} job
@@ -584,7 +671,7 @@ function hostJobWatched(state, job, name, log, deadlineSecs) {
               `${name}: its log could not be cut to its end: ${failure instanceof Error ? failure.message : String(failure)}`,
             ),
           );
-          await hostDirectoryRemoved(state, job.directory);
+          await hostJobDirectoryRetired(state, job, code, signal);
         } finally {
           if (state.jobs.get(job.assignment) === job)
             state.jobs.delete(job.assignment);
@@ -619,13 +706,14 @@ async function hostPlaced(state, assignment, kind) {
     settings,
     assignment.capabilities,
     seams.tokenFileRefusal,
+    assignment.assignment,
   );
   if ("refused" in credential)
     return { placed: "Refused", evidence: credential.refused };
   const made = await hostJobDirectory(state, assignment, credential.file);
   if ("refused" in made) return { placed: "Refused", evidence: made.refused };
   const name = hostJobName(assignment.assignment);
-  const started = await hostJobSpawned(state, name, made, credential.agent);
+  const started = await hostJobSpawned(state, name, made, credential.carried);
   if (started === undefined) return { placed: "Unavailable" };
   const deadlineSecs = hostJobDeadlineSecs(settings, assignment);
   const startedMs = (seams.nowMs ?? Date.now)();
@@ -744,6 +832,9 @@ export function hostBackend(settings, seams) {
     stop: (assignment) => hostStopped(state, assignment),
     held: () => hostHeld(state),
     ended: async () => state.ready.splice(0),
+    credentialOutcomesTaken: (outcomes) =>
+      settings.credentials?.outcomesTaken(outcomes),
+    capabilitiesWithheld: () => jobCapabilitiesWithheld(settings.credentials),
     holds: (assignment) => state.jobs.has(assignment),
     measured: () => state.measures.measured(),
     inFlight: () =>
@@ -792,6 +883,17 @@ export function hostRoutedBackend(container, host, platforms) {
         : container.stop(assignment),
     held: async () => [...(await container.held()), ...(await host.held())],
     ended: async () => [...(await container.ended()), ...(await host.ended())],
+    credentialOutcomesTaken: (outcomes) => {
+      container.credentialOutcomesTaken?.(outcomes);
+      host.credentialOutcomesTaken?.(outcomes);
+    },
+    capabilitiesWithheld: () => [
+      ...new Set(
+        [container, host].flatMap(
+          (backend) => backend.capabilitiesWithheld?.() ?? [],
+        ),
+      ),
+    ],
     inFlight: () => [...container.inFlight(), ...host.inFlight()],
     measured: () =>
       runnerMeasuredSum(
@@ -801,4 +903,52 @@ export function hostRoutedBackend(container, host, platforms) {
       await Promise.all([container.settled(), host.settled()]);
     },
   };
+}
+
+/** The most entries a kept directory's size is counted over, past which it is unknown. */
+export const hostKeptEntriesMax = 1_000_000;
+
+/**
+ * The bytes a directory's files hold, links counted as themselves, or nothing
+ * where it holds more than `hostKeptEntriesMax` entries or cannot be read.
+ *
+ * @param {string} directory
+ */
+async function hostDirectoryBytes(directory) {
+  const pending = [directory];
+  let bytes = 0;
+  let entries = 0;
+  try {
+    while (pending.length > 0) {
+      const path = /** @type {string} */ (pending.pop());
+      const found = await lstat(path);
+      entries += 1;
+      if (found.isDirectory())
+        for (const name of await readdir(path)) pending.push(join(path, name));
+      else bytes += found.size;
+      if (entries + pending.length > hostKeptEntriesMax) return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+  return bytes;
+}
+
+/**
+ * The operator's listing of the job directories a host runner kept, as
+ * `keptWorkspacesListed` lines them, each with the size its files hold.
+ *
+ * @param {string} logDir
+ */
+export async function hostKeptWorkspaces(logDir) {
+  const kept = (await keptWorkspacesRecorded(logDir)).filter(({ workspace }) =>
+    isAbsolute(workspace),
+  );
+  /** @type {Map<string, number>} */
+  const sizes = new Map();
+  for (const { workspace } of kept) {
+    const bytes = await hostDirectoryBytes(workspace);
+    if (bytes !== undefined) sizes.set(workspace, bytes);
+  }
+  return keptWorkspacesListed(kept, sizes);
 }

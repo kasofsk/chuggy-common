@@ -1,7 +1,9 @@
 /**
- * The effective configuration one run was given: the resolved argv, the
- * runtime's own init event, and the instruction, settings and plugin files it
- * named, gathered once and uploaded whole.
+ * The effective configuration one run was given: the resolved argv, the brief
+ * where argv does not carry it, the credential it ran on by its agent, type
+ * and name where its runner named one, the runtime's own init event, and the
+ * instruction, settings and plugin files it named, gathered once and uploaded
+ * whole.
  *
  * THE LIST IS A PRIORITY ORDER, NOT A SEARCH. Memory paths first, then the
  * project's instruction files, then settings, then plugins, then what the
@@ -227,7 +229,7 @@ function frameBytes(value) {
   return Buffer.byteLength(JSON.stringify(value));
 }
 
-function snapshotFrame(argv, init, agent, scrub) {
+function snapshotFrame({ argv, brief, credential }, init, agent, scrub) {
   const scrubbedInit = JSON.parse(scrub(JSON.stringify(init ?? null)));
   const claudeVersion = scrubbedInit?.claude_code_version;
   const codexVersion = scrubbedInit?.codexVersion;
@@ -236,10 +238,12 @@ function snapshotFrame(argv, init, agent, scrub) {
     argv: (Array.isArray(argv) ? argv : []).map((value) =>
       scrub(String(value)),
     ),
+    ...(typeof brief === "string" ? { brief: scrub(brief) } : {}),
     ...(agent === "Claude" || agent === "Codex" ? { agent } : {}),
     ...(typeof claudeVersion === "string" ? { claudeVersion } : {}),
     ...(typeof codexVersion === "string" ? { codexVersion } : {}),
     ...(typeof model === "string" ? { model } : {}),
+    ...(credential === undefined ? {} : { credential }),
     init: scrubbedInit,
     files: [],
     dropped: [],
@@ -248,6 +252,11 @@ function snapshotFrame(argv, init, agent, scrub) {
   if (frameBytes(frame) <= runConfigurationBytesMax) return frame;
   frame.init = truncationMarker(JSON.stringify(scrubbedInit));
   if (frameBytes(frame) <= runConfigurationBytesMax) return frame;
+  if (frame.brief !== undefined) {
+    frame.briefTruncated = truncationMarker(frame.brief);
+    delete frame.brief;
+    if (frameBytes(frame) <= runConfigurationBytesMax) return frame;
+  }
   frame.argvTruncated = truncationMarker(JSON.stringify(frame.argv));
   frame.argv = [];
   return frame;
@@ -273,11 +282,16 @@ function droppedReference(entry) {
  * three figures sum to the files that were found.
  */
 export async function runConfigurationSnapshot(
-  { argv, init, task, cwd, home, scrub },
+  { argv, brief, init, task, cwd, home, scrub, credential },
   services = { readFile, readdir, stat },
 ) {
   const walked = await walkInstructionFiles(cwd, services);
-  const snapshot = snapshotFrame(argv, init, task?.worker?.mode?.agent, scrub);
+  const snapshot = snapshotFrame(
+    { argv, brief, credential },
+    init,
+    task?.worker?.mode?.agent,
+    scrub,
+  );
   let used = frameBytes(snapshot);
   let omitted = 0;
   for (const candidate of configurationCandidates({

@@ -28,6 +28,7 @@ import { z } from "zod";
  * @property {(line: string) => void} log
  * @property {(signal: AbortSignal, made: import("./imageCleanup.mjs").ImageReclaim) => Promise<unknown>} reclaimed
  * @property {(why: string) => Promise<void>} killed stops one running job, which ends with `why`
+ * @property {() => Promise<number>} [kept] how many workspaces its runner keeps, which a floor it goes under says are part of what it holds
  */
 
 /** The longest a pass waits on one measurement, reclaim or ranking of what jobs hold. */
@@ -115,8 +116,9 @@ function diskLine(floor, measured) {
  * @param {DiskFloorPorts} ports
  * @param {DiskFree} measured
  * @param {"Over" | "Under"} [now] whether it is under, where it is known
+ * @param {string} [keptSaid] what a line saying it is under says of the workspaces kept
  */
-function diskSaid(floor, ports, measured, now) {
+function diskSaid(floor, ports, measured, now, keptSaid = "") {
   const was = floor.said;
   if ("unknown" in measured) {
     if (was !== "Unknown")
@@ -132,12 +134,27 @@ function diskSaid(floor, ports, measured, now) {
   if (now === "Under") {
     floor.kept.clear();
     ports.log(
-      `${diskLine(floor, measured)}, under ${min}: it takes no job until it is over`,
+      `${diskLine(floor, measured)}, under ${min}: it takes no job until it is over${keptSaid}`,
     );
   } else
     ports.log(
       `${diskLine(floor, measured)}, over ${min}${was === "Under" ? ": it takes jobs again" : ""}`,
     );
+}
+
+/**
+ * What a line saying the floor is under says of the workspaces its runner
+ * keeps, which are its operator's to clear: nothing where it keeps none or
+ * cannot say.
+ *
+ * @param {DiskFloorPorts} ports
+ */
+async function diskKeptSaid(ports) {
+  const kept = await ports.kept?.().catch(() => undefined);
+  if (kept === undefined || kept === 0) return "";
+  return kept === 1
+    ? "; 1 kept workspace is part of what it holds"
+    : `; ${String(kept)} kept workspaces are part of what it holds`;
 }
 
 /**
@@ -159,7 +176,13 @@ export async function diskFloorHeld(floor, ports) {
     floor.jobsTaken = true;
     return;
   }
-  diskSaid(floor, ports, found, "Under");
+  diskSaid(
+    floor,
+    ports,
+    found,
+    "Under",
+    floor.said === "Under" ? "" : await diskKeptSaid(ports),
+  );
   const hard = Math.floor(floor.bytesMin / 2);
   const underHalf = found.free < hard;
   const target = underHalf ? hard : floor.bytesMin;

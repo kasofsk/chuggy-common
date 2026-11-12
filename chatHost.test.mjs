@@ -25,6 +25,10 @@ import {
 } from "@chuggy/worker-contract/workerContract";
 import { workerRunnerPollWaitHeader } from "@chuggy/worker-contract/workerPool";
 
+import {
+  agentCredentialSelector,
+  agentCredentialSets,
+} from "./agentCredentialSet.mjs";
 import { chatMirrorGroupCount, chatMirrorGroupFirst } from "./chatCheckout.mjs";
 import {
   chatCredentialAloneRefusal,
@@ -32,7 +36,6 @@ import {
   chatHostConfigSchema,
   chatHostConfigured,
   chatHostControl,
-  chatHostIdleSecs,
   chatHostMemoryBytes,
   chatHostRestartBackoffMs,
   chatHostSessionsMaxDefault,
@@ -415,6 +418,18 @@ test("a host polls with no room and for an answer at once until the plane names 
     run.logged.every((line) => !line.includes(bearer)),
     run.logged.join("\n"),
   );
+});
+
+test("a host polls with the idle bound its settings name, and with none where they name none", async (t) => {
+  for (const [given, idleSecs] of [
+    [{ idleSecs: 60 }, "60"],
+    [{ idleSecs: undefined }, null],
+  ]) {
+    const run = await hostOf(t, { answers: [{}, {}], given });
+    await run.host.run();
+    assert.ok(run.seen.polls.length > 0);
+    for (const poll of run.seen.polls) assert.equal(poll.idleSecs, idleSecs);
+  }
 });
 
 test("a supervisor's room is the least of its own and the host's", async (t) => {
@@ -891,6 +906,155 @@ test("a container whose credential a session's user could own or open another wa
     );
 });
 
+/** A runner's selector over two subscription tokens and an API key, the tokens in `order`. */
+function selectorOf(order = "RoundRobin") {
+  return agentCredentialSelector(
+    agentCredentialSets({
+      claudeCredential: {
+        prefer: "PreferOAuth",
+        oauth: {
+          order,
+          credentials: [
+            { name: "team-a", tokenFile: "/home/geoff/.chuggy/a/token" },
+            { name: "team-c", tokenFile: "/home/geoff/.chuggy/c/token" },
+          ],
+        },
+        apiKey: {
+          order: "InOrder",
+          credentials: [{ name: "key-b", apiKeyFile: "/srv/keys/b/key" }],
+        },
+      },
+    }),
+  );
+}
+
+/** What a supervisor's container is given in place of one file, where the runner gives a selector. */
+const selectorPlaces = {
+  volumes: places.volumes,
+  credentialOwner: { uid: 1000, gid: 1001 },
+};
+
+/** Catches a set handed as one file, a credential's secret put in the environment, or a set its supervisor would refuse. */
+test("a supervisor's container under a selector is handed each Claude credential's directory at its name, and each by name, type and file, never its value", () => {
+  const container = chatSupervisorContainer(
+    one,
+    { ...selectorPlaces, credentials: selectorOf() },
+    gib,
+  );
+
+  assert.deepEqual(container.binds, [
+    {
+      source: "/home/geoff/.chuggy/a",
+      target: "/var/run/chuggy/credentials/team-a",
+      readonly: true,
+    },
+    {
+      source: "/home/geoff/.chuggy/c",
+      target: "/var/run/chuggy/credentials/team-c",
+      readonly: true,
+    },
+    {
+      source: "/srv/keys/b",
+      target: "/var/run/chuggy/credentials/key-b",
+      readonly: true,
+    },
+  ]);
+  const handed = [
+    {
+      agent: "Claude",
+      type: "OAuth",
+      name: "team-a",
+      file: "/var/run/chuggy/credentials/team-a/token",
+      setting: { kind: "Subscription" },
+    },
+    {
+      agent: "Claude",
+      type: "OAuth",
+      name: "team-c",
+      file: "/var/run/chuggy/credentials/team-c/token",
+      setting: { kind: "Subscription" },
+    },
+    {
+      agent: "Claude",
+      type: "ApiKey",
+      name: "key-b",
+      file: "/var/run/chuggy/credentials/key-b/key",
+      setting: { kind: "ApiKey" },
+    },
+  ];
+  assert.deepEqual(container.environment, {
+    CHUG_CHAT_PROTOCOL: String(chatProtocolVersion),
+    CHUG_CHAT_CREDENTIALS: JSON.stringify(handed),
+    CHUG_CHAT_CREDENTIAL_UID: "1000",
+    CHUG_CHAT_CREDENTIAL_GID: "1001",
+  });
+  const read = chatSupervisorSettings(container.environment);
+  assert.deepEqual(read.credentials, handed);
+  assert.equal(read.credentialFile, undefined);
+});
+
+/** Catches a host that mounts one credential of two it was given, or one that cannot be chosen by name. */
+test("a supervisor's container is refused a selector beside a file, one holding no Claude credential, or no credential at all", () => {
+  for (const [changed, why] of [
+    [
+      { credentials: selectorOf(), credentialFile: places.credentialFile },
+      /credentialFile names a credential, and so does the runner's selector/u,
+    ],
+    [
+      { credentials: selectorOf(), claudeCredential: { kind: "ApiKey" } },
+      /claudeCredential names a credential/u,
+    ],
+    [
+      {
+        credentials: agentCredentialSelector(
+          agentCredentialSets({
+            codexCredential: { authFile: "/c/auth.json" },
+          }),
+        ),
+      },
+      /holds no Claude credential/u,
+    ],
+    [{}, /handed no credential/u],
+  ])
+    assert.throws(
+      () =>
+        chatSupervisorContainer(one, { ...selectorPlaces, ...changed }, gib),
+      why,
+    );
+});
+
+/** Catches a host whose sessions all run on one credential of the set its runner rotates. */
+test("a host given a RoundRobin selector names each session's credential in its Start, in turn", async (t) => {
+  const run = await hostOf(t, {
+    answers: [
+      {},
+      { chatImage: one },
+      { chatImage: one, sessions: [sessionOf("a"), sessionOf("b")] },
+    ],
+    given: {
+      places: { ...selectorPlaces, credentials: selectorOf() },
+    },
+  });
+  assert.equal((await run.host.run()).passed, "Denied");
+
+  assert.deepEqual(
+    run.supervisors[0].frames
+      .filter(({ frame }) => frame === "Start")
+      .map(({ assignment, credential }) => [assignment, credential?.name]),
+    [
+      ["a", "team-a"],
+      ["b", "team-c"],
+    ],
+  );
+  const files = JSON.parse(
+    run.seen.started[0].environment.CHUG_CHAT_CREDENTIALS,
+  ).map(({ name, file }) => [name, file]);
+  assert.deepEqual(files.slice(0, 2), [
+    ["team-a", "/var/run/chuggy/credentials/team-a/token"],
+    ["team-c", "/var/run/chuggy/credentials/team-c/token"],
+  ]);
+});
+
 /** Catches a supervisor started with no cap, or one that is not room for each session the host runs. */
 test("a host's supervisor is capped at its memory for each session it runs at once", async (t) => {
   const { host, seen } = await hostOf(t, { answers: [{ chatImage: one }, {}] });
@@ -905,7 +1069,6 @@ test("a host's settings from a runner's file are its defaults where the file nam
   assert.deepEqual(chatHostConfigured(undefined, 1_000), {
     sessionsMax: chatHostSessionsMaxDefault,
     sessionMemoryBytes: chatSessionMemoryBytesDefault,
-    idleSecs: chatHostIdleSecs,
     outputBytesMax: 1_000,
   });
   const image = { image: one, pull: "never" };
@@ -1435,7 +1598,7 @@ test("a supervisor's container is asked of the engine: none, its state and wheth
 test("a host's settings and its service's status are said in lines a CLI prints", () => {
   assert.equal(
     chatHostSettingsLine(chatHostConfigured(undefined, 4_096)),
-    "sessionsMax 4, sessionMemoryMib 2048, so the supervisor is capped at 8192 MiB, idleSecs 600, outputBytesMax 4096, image the one chuggy names",
+    "sessionsMax 4, sessionMemoryMib 2048, so the supervisor is capped at 8192 MiB, idleSecs none, outputBytesMax 4096, image the one chuggy names",
   );
   assert.equal(
     chatHostSettingsLine({

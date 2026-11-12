@@ -57,7 +57,7 @@ function runningOf() {
  * `preparations` holds each, `frames` every frame it wrote after `Ready`,
  * `send` writes a frame of the host's.
  */
-function supervisorOf(sessionsMax = 2) {
+function supervisorOf(sessionsMax = 2, protocol = undefined) {
   const input = new PassThrough();
   const written = [];
   const logged = [];
@@ -73,12 +73,13 @@ function supervisorOf(sessionsMax = 2) {
     },
     log: (text) => logged.push(text),
     sessions: {
-      prepared: (assignment, handed, signal) =>
+      prepared: (assignment, handed, signal, credential) =>
         new Promise((resolve, reject) => {
           preparations.push({
             assignment,
             envelope: handed,
             signal,
+            credential,
             resolve,
             reject,
           });
@@ -86,6 +87,7 @@ function supervisorOf(sessionsMax = 2) {
     },
     sessionsMax,
     closed: closed.signal,
+    ...(protocol === undefined ? {} : { protocol }),
   });
   return {
     input,
@@ -113,13 +115,14 @@ const refused = (assignment, reason) => ({
   reason,
 });
 
-test("the supervisor speaks first, naming this protocol, its sessions and its contract", () => {
+test("the supervisor speaks first, naming both protocols of its window, its sessions and its contract", () => {
   const supervisor = supervisorOf(3);
 
+  assert.equal(chatProtocolVersion, 2);
   assert.deepEqual(supervisor.written, [
     {
       frame: "Ready",
-      protocols: [chatProtocolVersion],
+      protocols: [1, 2],
       sessionsMax: 3,
       contractRelease: workerContractRelease,
     },
@@ -144,6 +147,53 @@ test("a session started is answered Started once it is prepared, and Ended once 
     { frame: "Started", assignment: "a" },
     { frame: "Ended", assignment: "a", phase: "Failed" },
   ]);
+});
+
+const credential = { agent: "Claude", type: "OAuth", name: "team-a" };
+
+/** Catches a session run on a credential other than the one its host chose for it. */
+test("a Start naming a credential prepares its session on that credential", async () => {
+  const supervisor = supervisorOf();
+
+  supervisor.send({ ...start("a"), credential });
+  await settled();
+
+  assert.deepEqual(supervisor.preparations[0].credential, credential);
+  supervisor.preparations[0].resolve(runningOf());
+  await settled();
+  assert.deepEqual(supervisor.frames(), [
+    { frame: "Started", assignment: "a" },
+  ]);
+});
+
+/** Catches a supervisor of the window that stops serving a host a release behind it. */
+test("a host speaking only protocol 1 still gets its session, on no credential named", async () => {
+  const supervisor = supervisorOf(2, 1);
+
+  supervisor.send(start("a"));
+  await settled();
+  assert.equal(supervisor.preparations[0].credential, undefined);
+  const running = runningOf();
+  supervisor.preparations[0].resolve(running);
+  await settled();
+  running.end();
+  await settled();
+
+  assert.deepEqual(supervisor.frames(), [
+    { frame: "Started", assignment: "a" },
+    { frame: "Ended", assignment: "a", phase: "Succeeded" },
+  ]);
+});
+
+/** Catches a host of protocol 1 whose `Start` is read in a later protocol's shape. */
+test("a host speaking protocol 1 that names a credential is not followed, and nothing is prepared", async () => {
+  const supervisor = supervisorOf(2, 1);
+
+  supervisor.send({ ...start("a"), credential });
+
+  assert.equal(await supervisor.done, 1);
+  assert.equal(supervisor.preparations.length, 0);
+  assert.match(supervisor.logged.join(""), /speaks protocol 1/u);
 });
 
 /** Catches a second `Start` for one assignment that runs a second session, or answers the first's frames twice. */
@@ -428,14 +478,13 @@ const credentialed = {
  * fails every session it is handed.
  */
 test("a supervisor refuses a host that names no protocol or one it does not speak, saying which side to update", () => {
-  assert.deepEqual(chatSupervisorProtocols, [chatProtocolVersion]);
-  assert.equal(
-    chatSupervisorProtocolRefusal({
-      CHUG_CHAT_PROTOCOL: String(chatProtocolVersion),
-    }),
-    undefined,
-  );
-  const spoken = `this image's supervisor speaks protocol(s) [${String(chatProtocolVersion)}]`;
+  assert.deepEqual(chatSupervisorProtocols, [1, 2]);
+  for (const named of ["1", "2"])
+    assert.equal(
+      chatSupervisorProtocolRefusal({ CHUG_CHAT_PROTOCOL: named }),
+      undefined,
+    );
+  const spoken = "this image's supervisor speaks protocol(s) [1, 2]";
   for (const [named, said, side] of [
     [undefined, "none", "the host's runner"],
     ["", "none", "the host's runner"],
@@ -581,4 +630,61 @@ test("a supervisor is refused users that overlap its mirrors' groups, or that ar
         }),
       /CHUG_CHAT_UID_FIRST/u,
     );
+});
+
+/** What a supervisor handed a set is told of it: Claude's credentials by name, each file in its own directory. */
+const handedSet = [
+  {
+    agent: "Claude",
+    type: "OAuth",
+    name: "team-a",
+    file: "/var/run/chuggy/credentials/team-a/token",
+    setting: { kind: "Subscription" },
+  },
+  {
+    agent: "Claude",
+    type: "ApiKey",
+    name: "key-b",
+    file: "/var/run/chuggy/credentials/key-b/key",
+    setting: { kind: "ApiKey" },
+  },
+];
+
+const setHanded = {
+  [chatSupervisorVariables.credentials]: JSON.stringify(handedSet),
+  [chatSupervisorVariables.credentialUid]: "1000",
+  [chatSupervisorVariables.credentialGid]: "1001",
+};
+
+test("a supervisor handed a set holds each credential by name, and no one file", () => {
+  const settings = chatSupervisorSettings(setHanded);
+
+  assert.deepEqual(settings.credentials, handedSet);
+  assert.equal(settings.credentialFile, undefined);
+  assert.deepEqual(settings.credentialOwner, { uid: 1_000, gid: 1_001 });
+});
+
+/** Catches a set read loosely, which would run a session on a file or kind its host did not name. */
+test("a supervisor is refused a set it cannot read, or one beside the one file", () => {
+  const withSet = (credentials) => ({
+    ...setHanded,
+    [chatSupervisorVariables.credentials]: JSON.stringify(credentials),
+  });
+  for (const [environment, why] of [
+    [{ ...setHanded, ...credentialed }, /each name the provider credential/u],
+    [
+      { ...setHanded, [chatSupervisorVariables.credentials]: "{" },
+      /cannot read/u,
+    ],
+    [withSet([]), /cannot read/u],
+    [withSet([handedSet[0], handedSet[0]]), /cannot read/u],
+    [
+      withSet([{ ...handedSet[0], setting: { kind: "ApiKey" } }]),
+      /cannot read/u,
+    ],
+    [withSet([{ ...handedSet[0], agent: "Codex" }]), /cannot read/u],
+    [withSet([{ ...handedSet[0], file: "token" }]), /cannot read/u],
+    [withSet([{ ...handedSet[0], name: "a b" }]), /cannot read/u],
+  ])
+    assert.throws(() => chatSupervisorSettings(environment), why);
 });

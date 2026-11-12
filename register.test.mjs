@@ -17,6 +17,10 @@ import test from "node:test";
 import { URL } from "node:url";
 
 import {
+  agentCredentialSelector,
+  agentCredentialSets,
+} from "./agentCredentialSet.mjs";
+import {
   registerAdvertised,
   registerAgents,
   registerDeclaredSchema,
@@ -380,6 +384,16 @@ test("a runner declares each agent it holds a credential file for and has an ima
     ),
     ["Agent:Claude"],
   );
+});
+
+/** Catches a runner whose selector holds an agent's set declaring that agent unsaid, or one it holds no set for. */
+test("a runner with a selector declares each agent it holds a set for", () => {
+  const codexOnly = agentCredentialSelector(
+    agentCredentialSets({ codexCredential: { authFile: "/c" } }),
+  );
+  assert.deepEqual(registerAgents({ credentials: codexOnly }, [], true), [
+    "Agent:Codex",
+  ]);
 });
 
 /** What a runner on x64 finds of itself, holding a Codex credential beside Claude's and an image for each. */

@@ -30,6 +30,10 @@ import {
   chatProtocolVersion,
 } from "@chuggy/worker-contract/chatHost";
 
+import {
+  agentCredentialSelector,
+  agentCredentialSets,
+} from "./agentCredentialSet.mjs";
 import { chatSupervisorCommand, chatSupervisorContainer } from "./chatHost.mjs";
 import {
   chatSupervisorProtocolVariable,
@@ -44,10 +48,11 @@ import {
  * release window; then this is written again under the new version.
  */
 const recorded = {
-  protocol: 1,
+  protocol: 2,
   shape: {
     variables: [
       "CHUG_CHAT_CREDENTIAL",
+      "CHUG_CHAT_CREDENTIALS",
       "CHUG_CHAT_CREDENTIAL_GID",
       "CHUG_CHAT_CREDENTIAL_UID",
       "CHUG_CHAT_MINTED",
@@ -99,25 +104,63 @@ const recorded = {
         flags: ["nosuid", "nodev", "noexec"],
       },
     ],
-    binds: [{ target: "/var/run/chuggy/credentials/provider", readonly: true }],
+    binds: {
+      file: [
+        { target: "/var/run/chuggy/credentials/provider", readonly: true },
+      ],
+      set: [{ target: "/var/run/chuggy/credentials/<name>", readonly: true }],
+    },
     volumeTargets: ["/sessions", "/var/lib/chuggy/mirrors"],
   },
 };
 
-/** What a host hands this core's supervisor, given all it can be given. */
-function shapeNow() {
-  const credentialOwner = { uid: 501, gid: 20 };
-  const container = chatSupervisorContainer(
+/** A supervisor's container under a selector whose one credential is `named`. */
+function setContainerOf(places, named) {
+  return chatSupervisorContainer(
     "registry.example/chat",
     {
-      volumes: { sessions: "s", mirrors: "m" },
-      credentialFile: "/home/geoff/.chuggy/claude/claude.json",
-      credentialOwner,
-      claudeCredential: { kind: "Subscription" },
-      repositories: "{}",
+      ...places,
+      credentials: agentCredentialSelector(
+        agentCredentialSets({
+          claudeCredential: {
+            prefer: "PreferOAuth",
+            oauth: {
+              order: "InOrder",
+              credentials: [{ name: named, tokenFile: "/home/geoff/a/t" }],
+            },
+          },
+        }),
+      ),
     },
     2 ** 30,
   );
+}
+
+/** What a host hands this core's supervisor, given all it can be given: one credential's file, or a selector's set. */
+function shapeNow() {
+  const credentialOwner = { uid: 501, gid: 20 };
+  const places = {
+    volumes: { sessions: "s", mirrors: "m" },
+    credentialOwner,
+    repositories: "{}",
+  };
+  const container = chatSupervisorContainer(
+    "registry.example/chat",
+    {
+      ...places,
+      credentialFile: "/home/geoff/.chuggy/claude/claude.json",
+      claudeCredential: { kind: "Subscription" },
+    },
+    2 ** 30,
+  );
+  const named = "only";
+  const set = setContainerOf(places, named);
+  /** @param {readonly {target: string, readonly: true}[]} binds */
+  const bindsOf = (binds) =>
+    binds.map(({ target, readonly }) => ({
+      target: target.replace(`/${named}`, "/<name>"),
+      readonly,
+    }));
   /** @param {{uid: number, gid: number}} owner who it is to the supervisor, not which uid */
   const role = ({ uid, gid }) =>
     uid === 0 && gid === 0
@@ -131,6 +174,7 @@ function shapeNow() {
         chatSupervisorProtocolVariable,
         ...Object.values(chatSupervisorVariables),
         ...Object.keys(container.environment),
+        ...Object.keys(set.environment),
       ]),
     ].sort(),
     command: [...chatSupervisorCommand],
@@ -147,10 +191,7 @@ function shapeNow() {
       owner: role(tmpfs),
       flags: [...tmpfs.flags],
     })),
-    binds: container.binds.map(({ target, readonly }) => ({
-      target,
-      readonly,
-    })),
+    binds: { file: bindsOf(container.binds), set: bindsOf(set.binds) },
     volumeTargets: container.volumes.map(({ target }) => target),
   };
 }

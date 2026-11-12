@@ -117,6 +117,13 @@ import {
 
 import { workerAgent } from "./agent.mjs";
 import {
+  agentCredentialNameVariable,
+  agentCredentialReported,
+  agentCredentialsScrubbedNamed,
+  agentCredentialsScrubbedVariable,
+} from "./agentCredentialSet.mjs";
+import { codexAuthSecrets } from "./codex.mjs";
+import {
   chatChannelOpened,
   chatChannelVariable,
   chatCheckoutRead,
@@ -141,6 +148,7 @@ import { chatAbortable } from "./chatCheckout.mjs";
 import { gitFailureLine, gitRemoteTried } from "./gitRemote.mjs";
 import { heldCredentials } from "./heldCredentials.mjs";
 import { jobHostPlaces, jobRepositoryDirectory } from "./job.mjs";
+import { keptWorkspaceRecordWritten } from "./keptWorkspace.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import {
   planeCredential,
@@ -180,6 +188,7 @@ import {
   commitAndPushSource,
   resultDocument,
   sourceCheckpointRestored,
+  sourceRechecked,
   sourceRestoredBriefed,
   sourceTargetFetched,
 } from "./source.mjs";
@@ -266,6 +275,29 @@ const changeBaseKind = "ChangeBase";
 
 /** A full commit hash, in either of the object formats git names a commit in. */
 const changeBaseCommit = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
+
+/** The input references naming the tree an evaluation must evaluate, and the accepted commit a re-check re-reports. */
+const expectedTreeKind = "ExpectedTree";
+const recheckKind = "Recheck";
+
+/** The one reference of `kind` the bundle carries, or nothing. */
+function optionalReference(input, kind) {
+  const named = input.references.filter((reference) => reference.kind === kind);
+  if (named.length > 1)
+    throw new Error(`input bundle must carry at most one ${kind}`);
+  return named[0]?.reference;
+}
+
+/**
+ * The accepted commit a contained re-check re-reports: what a `Recheck`
+ * reference names, where it is a full hash. Nothing else asks for one.
+ */
+function workerRecheck(input) {
+  const named = optionalReference(input, recheckKind);
+  return named !== undefined && changeBaseCommit.test(named)
+    ? named
+    : undefined;
+}
 
 /**
  * The commit the change started from, as the input bundle pinned it, or
@@ -460,33 +492,37 @@ export async function prepareWorker(task, directory, handed = {}) {
   return setupEnvironment;
 }
 
-async function captureConfiguration(context, argv, init) {
+async function captureConfiguration(context, { argv, brief }, init) {
   const snapshot = await runConfigurationSnapshot({
     argv,
+    ...(brief === undefined ? {} : { brief }),
     init,
     task: context.task,
     cwd: context.directory,
     home: process.env.HOME,
     scrub: context.scrub,
+    credential: context.agentCredential,
   });
   await context.evidence.configuration(snapshot);
 }
 
-async function readAgentStream(context, child, argv, stream) {
+async function readAgentStream(context, child, launch, stream) {
   const lines = createInterface({ input: child.stdout });
   for await (const line of lines) {
-    process.stdout.write(`${line}\n`);
     let event;
     try {
       event = JSON.parse(line);
     } catch {
+      process.stdout.write(`${line}\n`);
       throw new Error(
         `${context.agent.runtime} emitted invalid streaming JSON`,
       );
     }
+    if (stream.channel?.control(event) === true) continue;
+    process.stdout.write(`${line}\n`);
     if (!stream.captured && context.agent.configurationEvent(event)) {
       stream.captured = true;
-      await captureConfiguration(context, argv, event);
+      await captureConfiguration(context, launch, event);
     }
     if (context.agent.resultEvent(event)) stream.result = event;
     if (context.agent.frame !== undefined)
@@ -494,7 +530,10 @@ async function readAgentStream(context, child, argv, stream) {
     const observed = context.agent.observed(event);
     if (observed !== undefined) context.evidence.observed(observed);
     context.evidence.record(line, event);
+    stream.channel?.observed(event);
   }
+  stream.channel?.ended();
+  await stream.channel?.settled();
 }
 
 /**
@@ -515,16 +554,17 @@ async function agentImages(context) {
 
 /**
  * What an agent's own process is started with: the pod's inherited
- * environment less what the agent's credential withholds, the credential's
- * environment and its shell's, and what the agent adds to them once it has
- * seen the whole of it.
+ * environment less what the agent's credential withholds and what names the
+ * credential's name and its set's files, the credential's environment and its
+ * shell's, and what the agent adds to them once it has seen the whole of it.
  */
 async function runAgentEnvironment(context, shell) {
   const environment = {
-    ...workerEnvironmentWithout(
-      workerAgentEnvironment(process.env),
-      context.agentWithheld ?? [],
-    ),
+    ...workerEnvironmentWithout(workerAgentEnvironment(process.env), [
+      ...(context.agentWithheld ?? []),
+      agentCredentialNameVariable,
+      agentCredentialsScrubbedVariable,
+    ]),
     ...context.agentEnvironment,
     ...shell.environment,
   };
@@ -538,15 +578,17 @@ async function runAgentEnvironment(context, shell) {
 
 /**
  * One process of the agent, run to its end: its stream's last result, what the
- * agent folded from its stream, and how it exited. One whose stream cannot be
- * read is killed before the failure is raised. That is the process alone:
- * anything it started can still be writing to the tree.
+ * agent folded from its stream, and how it exited. An agent with a channel is
+ * handed its brief on its stdin, which is otherwise not its to read. One whose
+ * stream cannot be read is killed before the failure is raised. That is the
+ * process alone: anything it started can still be writing to the tree.
  */
-async function runAgentProcess(context, argv, environment, stream) {
-  const child = spawn(context.agent.executable, argv, {
+async function runAgentProcess(context, launch, environment, stream) {
+  const channelled = launch.brief !== undefined;
+  const child = spawn(context.agent.executable, launch.argv, {
     cwd: context.directory,
     env: environment,
-    stdio: ["ignore", "pipe", "inherit"],
+    stdio: [channelled ? "pipe" : "ignore", "pipe", "inherit"],
   });
   const exited = new Promise((resolve, reject) => {
     child.once("error", reject);
@@ -556,13 +598,21 @@ async function runAgentProcess(context, argv, environment, stream) {
   });
   stream.result = undefined;
   stream.frames = undefined;
+  stream.channel = channelled
+    ? context.agent.channel(child.stdin, {
+        evidence: context.evidence,
+        scrub: context.scrub,
+      })
+    : undefined;
+  stream.channel?.brief(launch.brief);
   try {
-    await readAgentStream(context, child, argv, stream);
+    await readAgentStream(context, child, launch, stream);
     const [code, signal] = await exited;
     return { resultEvent: stream.result, frames: stream.frames, code, signal };
   } catch (failure) {
     child.kill("SIGKILL");
     child.stdout.destroy();
+    stream.channel?.ended();
     await exited.catch(() => undefined);
     const { sentence } =
       context.agent.ended?.(stream.result, stream.frames) ?? {};
@@ -636,6 +686,7 @@ function runAgentEnded(
       : runHoldDecided({
           resumable: agent.resumeInvocation !== undefined,
           sightings: context.evidence.sightings(),
+          credential: context.agentCredential?.name,
           session,
           nowMs: (context.clock ?? workerClock).now(),
           deadlineMs: context.runDeadlineMs,
@@ -698,7 +749,10 @@ async function runAgentTurns(context, task, turns, first) {
       credentialLeft,
     });
     await runAgentHeld(context, held, context.clock ?? workerClock);
-    next = context.agent.resumeInvocation(task, session);
+    next = {
+      argv: context.agent.resumeInvocation(task, session),
+      brief: context.agent.brief?.(task, session),
+    };
   }
 }
 
@@ -715,12 +769,10 @@ function runAgentResumable(context, task, turns, { finished, session }) {
     ...finished,
     resume: async (prompt) => {
       context.keepAgain();
-      const resumed = await runAgentTurns(
-        context,
-        task,
-        turns,
-        resumeInvocation(task, conversation, prompt),
-      );
+      const resumed = await runAgentTurns(context, task, turns, {
+        argv: resumeInvocation(task, conversation),
+        brief: context.agent.brief?.(task, conversation, prompt),
+      });
       conversation = resumed.session ?? conversation;
       return resumed.finished;
     },
@@ -753,15 +805,18 @@ async function runAgent(context) {
       git: context.git,
     }),
   );
-  const argv = context.agent.invocation(task, {
-    resultSchema: workerTemporaryFile(agentResultSchemaName),
-    shellArguments: shell.arguments,
-  });
+  const launch = {
+    argv: context.agent.invocation(task, {
+      resultSchema: workerTemporaryFile(agentResultSchemaName),
+      shellArguments: shell.arguments,
+    }),
+    brief: context.agent.brief?.(task),
+  };
   const environment = await runAgentEnvironment(context, shell);
   if (context.agent.configuration !== undefined)
     await captureConfiguration(
       context,
-      argv,
+      launch,
       await context.agent.configuration(task, environment),
     );
   const turns = { environment, stream: { captured: false }, holds: 0 };
@@ -769,7 +824,7 @@ async function runAgent(context) {
     context,
     task,
     turns,
-    await runAgentTurns(context, task, turns, argv),
+    await runAgentTurns(context, task, turns, launch),
   );
 }
 
@@ -811,10 +866,13 @@ async function workSource(context, workspace, verdict) {
     try {
       source = await pushed();
     } catch (failure) {
-      throw await workFailureKept(failure, () =>
-        workCheckpointed(context, workspace),
+      throw await workFailureKept(
+        failure,
+        () => workCheckpointed(context, workspace),
+        workspace,
       );
     }
+    await workspace.workSafe?.();
     return { source };
   }
   try {
@@ -824,6 +882,7 @@ async function workSource(context, workspace, verdict) {
         ? "the failed attempt changed nothing, so nothing is kept\n"
         : `${workSourceKept(kept)}\n`,
     );
+    await workspace.workSafe?.();
     return { kept };
   } catch (failure) {
     process.stderr.write(
@@ -1023,9 +1082,10 @@ async function workAside(context, workspace, push) {
 
 /**
  * What a work run did kept as its ticket's checkpoint: `line`, saying what became
- * of it, which is logged, and `credentialLeft` as `workAside` answers it. Nothing
- * where the run is not work. Whatever goes wrong here is that line, and never
- * reaches the run's own end.
+ * of it, which is logged, `credentialLeft` as `workAside` answers it, and `safe`
+ * where it was kept or there was nothing to keep. Nothing where the run is not
+ * work. Whatever goes wrong here is that line, and never reaches the run's own
+ * end.
  */
 async function workCheckpointed(context, workspace) {
   if (context.task.taskKind !== "Work") return {};
@@ -1048,7 +1108,7 @@ async function workCheckpointed(context, workspace) {
     line = "The run changed nothing, so nothing is kept.";
   else line = `The run's work is kept on ${done.ref} at ${done.commit}.`;
   process.stderr.write(`${line}\n`);
-  return { line, credentialLeft };
+  return { line, credentialLeft, safe: failure === undefined };
 }
 
 /**
@@ -1230,7 +1290,7 @@ async function workTargetMergedAtEnd(
     });
   } catch (failure) {
     if (failure instanceof TargetMergeUnresolved) throw failure;
-    throw await workFailureKept(failure, keep);
+    throw await workFailureKept(failure, keep, workspace);
   }
 }
 
@@ -1251,9 +1311,13 @@ function workKeptOnce(keep) {
   };
 }
 
-/** `failure`, the run's own, told what became of its unfinished work. */
-async function workFailureKept(failure, keep) {
-  const { line } = await keep();
+/**
+ * `failure`, the run's own, told what became of its unfinished work, which
+ * the workspace's record says is safe where it is.
+ */
+async function workFailureKept(failure, keep, workspace) {
+  const { line, safe } = await keep();
+  if (safe === true) await workspace.workSafe?.();
   if (line !== undefined && failure instanceof Error)
     failure.message = `${failure.message}\n${line}`;
   return failure;
@@ -1431,6 +1495,7 @@ export async function workerWorkspace(
   );
   const changeBase = await workerChangeBase(input, directory);
   const images = ticketImageReferences(input);
+  const recheck = workerRecheck(input);
   return {
     repositoryId,
     repository,
@@ -1439,6 +1504,10 @@ export async function workerWorkspace(
     environment,
     ...(refresh === undefined ? {} : { refresh, refreshApart, readApart }),
     ...(changeBase === undefined ? {} : { changeBase }),
+    ...(recheck === undefined ? {} : { recheck }),
+    ...(optionalReference(input, expectedTreeKind) === undefined
+      ? {}
+      : { evaluatesTree: true }),
     ...(images.length === 0 ? {} : { images }),
   };
 }
@@ -1505,16 +1574,53 @@ async function credentialValues(mounted) {
   return values;
 }
 
-/** The agent's credential as its file and the pod's environment prepare it. */
+/**
+ * The agent's credential as its file and the pod's environment prepare it,
+ * and what the run reports of it.
+ */
 async function agentCredential(credentialFiles, agent) {
   const credentialFile = credentialFiles[agent.credential];
   if (typeof credentialFile !== "string")
     throw new Error(`worker credential ${agent.credential} is not mounted`);
   const token = (await readFile(credentialFile, "utf8")).trim();
-  return agent.prepareCredential(token, {
+  const prepared = await agent.prepareCredential(token, {
     path: credentialFile,
     environment: process.env,
   });
+  return {
+    ...prepared,
+    reported: agentCredentialReported(process.env, agent.name),
+  };
+}
+
+/**
+ * Every secret of each file of its runner's credential sets a job is told
+ * of, which a job on its runner's host could read beside the one it runs on.
+ * A file that cannot be read is said and skipped, as a mounted one is.
+ */
+async function agentCredentialsScrubbed(environment) {
+  const secrets = [];
+  for (const { agent, type, file } of agentCredentialsScrubbedNamed(
+    environment,
+  )) {
+    let text;
+    try {
+      text = (await readFile(file, "utf8")).trim();
+    } catch {
+      process.stderr.write(`worker credential ${file} could not be read\n`);
+      continue;
+    }
+    try {
+      secrets.push(
+        ...(agent === "Codex" && type === "OAuth"
+          ? codexAuthSecrets(text)
+          : [text]),
+      );
+    } catch {
+      secrets.push(text);
+    }
+  }
+  return secrets;
 }
 
 /**
@@ -1541,10 +1647,10 @@ export async function workerRun({
   const { scrub, keepSecret, held } = credentialScrubbing([
     ...prepared.secrets.map((value) => ({ kind: agentKind, value })),
     { kind: workerSecretKinds.bearer, value: bearer },
-    ...(await credentialValues(mounted)).map((value) => ({
-      kind: workerSecretKinds.mounted,
-      value,
-    })),
+    ...[
+      ...(await credentialValues(mounted)),
+      ...(await agentCredentialsScrubbed(process.env)),
+    ].map((value) => ({ kind: workerSecretKinds.mounted, value })),
   ]);
   activeScrub = scrub;
   const evidence = runEvidenceRecorder(task, bearer, scrub, {
@@ -1554,6 +1660,7 @@ export async function workerRun({
   return {
     agentEnvironment: prepared.environment,
     agentWithheld: prepared.withheld ?? [],
+    agentCredential: prepared.reported,
     scrub,
     keepSecret,
     held,
@@ -1839,6 +1946,27 @@ export async function workerHeldCredentials({
 }
 
 /**
+ * The git tree the workspace's `HEAD` holds, read once before an evaluator
+ * starts, where the input bundle named a tree to evaluate; nothing otherwise.
+ */
+async function workerEvaluatedTree(workspace) {
+  if (!workspace.evaluatesTree) return undefined;
+  const { stdout } = await command("git", ["rev-parse", "HEAD^{tree}"], {
+    cwd: workspace.directory,
+  });
+  return stdout.trim();
+}
+
+/** The clock and the bounds an attempt's pushes aside are made under. */
+function workerAttemptAside(attempt) {
+  return {
+    clock: attempt.clock,
+    runDeadlineMs: attempt.runDeadlineMs,
+    asideCapMs: attempt.asideCapMs,
+  };
+}
+
+/**
  * What one attempt does in the workspace it cloned, every git it runs handed
  * `git` and every shell told which job it is in and handed its held
  * credentials' files: its setup, what an earlier attempt left put back on top
@@ -1853,22 +1981,20 @@ async function workerAttemptWorked(attempt, workspace, git) {
     job: workerJobEnvironment(task, workspace.repositoryId),
     git,
   };
+  const aside = workerAttemptAside(attempt);
+  if (await workerRecheckPublished(attempt, workspace, git, aside)) return;
   const setupEnvironment = await prepareWorker(
     task,
     workspace.directory,
     handed,
   );
-  const aside = {
-    clock: attempt.clock,
-    runDeadlineMs: attempt.runDeadlineMs,
-    asideCapMs: attempt.asideCapMs,
-  };
   const working = { task, held: attempt.held, scrub, git, ...aside };
   const restored = await workCheckpointRestored(working, workspace);
   const target = await workTargetMergedAtStart(working, workspace, attempt);
   const { keep, keepAgain } = workKeptOnce(() =>
     workCheckpointed(working, workspace),
   );
+  const evaluatedTree = await workerEvaluatedTree(workspace);
   const run = await runWorkerTask(
     {
       task,
@@ -1879,6 +2005,7 @@ async function workerAttemptWorked(attempt, workspace, git) {
       images: workspace.images,
       agentEnvironment: attempt.agentEnvironment,
       agentWithheld: attempt.agentWithheld,
+      agentCredential: attempt.agentCredential,
       scrub,
       evidence,
       agent: attempt.agent,
@@ -1891,7 +2018,7 @@ async function workerAttemptWorked(attempt, workspace, git) {
     },
     attempt.commands,
   ).catch(async (failure) => {
-    throw await workFailureKept(failure, keep);
+    throw await workFailureKept(failure, keep, workspace);
   });
   await workTargetMergedAtEnd(working, workspace, attempt, {
     run,
@@ -1908,11 +2035,61 @@ async function workerAttemptWorked(attempt, workspace, git) {
       git,
       stopLease: attempt.stopLease,
       request: workerRequest,
+      evaluatedTree,
       ...aside,
     },
     workspace,
     run,
   );
+}
+
+/** Where a contained re-check's note is uploaded. */
+const recheckDiagnosticPath = ".chuggy/recheck-output.json";
+
+/**
+ * Whether the attempt was a contained re-check, reported as one: the accepted
+ * commit re-reported as the source, itself or merged with the target, and no
+ * workload run. False where the task is not a work task whose input named a
+ * `Recheck`, and where the workspace could not be put on one, in which case it
+ * is at its base and the workload runs as it would have.
+ */
+async function workerRecheckPublished(attempt, workspace, git, aside) {
+  const { task, bearer, evidence, scrub } = attempt;
+  if (task.taskKind !== "Work" || workspace.recheck === undefined) return false;
+  const made = await sourceRechecked({
+    base: workspace.base,
+    recheck: workspace.recheck,
+    directory: workspace.directory,
+    command,
+    git,
+  });
+  if (made === undefined) return false;
+  await publishWorkerResult(
+    {
+      task,
+      bearer,
+      evidence,
+      scrub,
+      held: attempt.held,
+      git,
+      stopLease: attempt.stopLease,
+      request: workerRequest,
+      ...aside,
+    },
+    workspace,
+    {
+      output: { recheck: made },
+      result: {
+        verdict: "Pass",
+        summary:
+          made === "contained"
+            ? "Re-check: the accepted commit already contained the target, so it is re-reported and no workload ran."
+            : "Re-check: the target was merged into the accepted commit, and no workload ran.",
+      },
+      diagnosticPath: recheckDiagnosticPath,
+    },
+  );
+  return true;
 }
 
 /**
@@ -1927,8 +2104,8 @@ function workerRunDeadlineMs(timeoutSecsMax, clock) {
 
 /**
  * What an attempt holding its lease does: its credentials, its workspace and its
- * project reads taken, and the work done in them. Its evidence stops and its
- * reads close however that ends.
+ * project reads taken, its workspace's record told the repository, and the work
+ * done in them. Its evidence stops and its reads close however that ends.
  */
 async function workerAttemptLeased(
   attempt,
@@ -1945,7 +2122,7 @@ async function workerAttemptLeased(
       keepSecret,
       request: workspaceSeams.request,
     });
-    const workspace = await workerWorkspace(
+    const cloned = await workerWorkspace(
       task,
       repositories,
       credentialFiles,
@@ -1953,6 +2130,8 @@ async function workerAttemptLeased(
       keepSecret,
       { ...workspaceSeams, minted, workspace: into },
     );
+    await attempt.recorder.repository(cloned.repositoryId);
+    const workspace = { ...cloned, workSafe: attempt.recorder.safe };
     reads = await workerProjectReads({
       task,
       bearer,
@@ -1970,6 +2149,49 @@ async function workerAttemptLeased(
     evidence.stop();
     await reads?.close();
   }
+}
+
+/**
+ * What an attempt writes of whose work its workspace holds, as
+ * `keptWorkspace.mjs` says: once it has its task, again with the repository
+ * its input names, and again where its work is safe, which a task that is not
+ * work is from the start. A write that fails is logged and is never the run's
+ * failure, since a workspace whose record says nothing is kept.
+ *
+ * @param {string | undefined} workspace
+ * @param {{ticket: number, attempt: string, stage?: number, taskKind: string}} task
+ * @param {(text: string) => string} scrub
+ */
+function workspaceRecorder(workspace, task, scrub) {
+  /** @type {import("./keptWorkspace.mjs").KeptWorkspaceRecord} */
+  const record = {
+    ticket: task.ticket,
+    attempt: task.attempt,
+    ...(task.stage === undefined ? {} : { stage: task.stage }),
+    safe: task.taskKind !== "Work",
+  };
+  const written = async () => {
+    if (workspace === undefined) return;
+    try {
+      await keptWorkspaceRecordWritten(workspace, record, scrub);
+    } catch (failure) {
+      process.stderr.write(
+        `the workspace's record could not be written: ${scrub(failure instanceof Error ? failure.message : String(failure))}\n`,
+      );
+    }
+  };
+  return {
+    written,
+    /** @param {string} repository */
+    repository: async (repository) => {
+      record.repository = repository;
+      await written();
+    },
+    safe: async () => {
+      record.safe = true;
+      await written();
+    },
+  };
 }
 
 /**
@@ -2012,6 +2234,12 @@ export async function workerAttempt(launch, seams = {}) {
     agent,
     clock,
   });
+  const recorder = workspaceRecorder(
+    into ?? process.env[workerWorkspaceVariable],
+    task,
+    ran.scrub,
+  );
+  await recorder.written();
   await workerMintedWritable(minted);
   const stopLease = keepWorkerLease(task, bearer);
   try {
@@ -2026,6 +2254,7 @@ export async function workerAttempt(launch, seams = {}) {
         clock,
         runDeadlineMs: workerRunDeadlineMs(timeoutSecsMax, clock),
         asideCapMs,
+        recorder,
       },
       { credentialFiles, repositories, minted, into, workspaceSeams },
     );
@@ -2065,6 +2294,9 @@ export async function publishWorkerResult(
       report: reportSummary(result.summary, context.scrub, kept),
       handoffs: [],
       ...(source === undefined ? {} : { source }),
+      ...(context.evaluatedTree === undefined
+        ? {}
+        : { evaluatedTree: context.evaluatedTree }),
       diagnostics,
     });
     await clearing?.clear();

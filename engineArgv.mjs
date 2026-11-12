@@ -75,6 +75,11 @@ export const workspaceLabel = "io.chuggy.workspace";
 /** The label of each of a job's `RuntimeVolumes`, naming the container that fills them. */
 export const fillLabel = "io.chuggy.fill";
 /**
+ * The label of a job's workspace volume alone, which no sweep removes: one no
+ * container uses is a workspace its runner kept.
+ */
+export const workspaceVolumeLabel = "io.chuggy.workspace-volume";
+/**
  * The label of a named volume a runner made for its owner. Such a volume
  * carries no pool's label, so no sweep of a pool's volumes lists it.
  */
@@ -580,14 +585,21 @@ export function chatSupervisorRunArgv(engine, container, naming) {
 /**
  * One of a job's `RuntimeVolumes`, labelled with the pool and the assignment
  * it was made for and the container that fills it, so that what a runner
- * leaves can be found and removed.
+ * leaves can be found and removed, and the workspace labelled as one.
  *
  * @param {string} volume
  * @param {string} pool the pool label's value
  * @param {string} assignment
  * @param {string} fill
+ * @param {boolean} workspace whether it is the job's workspace
  */
-export function runtimeVolumeCreateArgv(volume, pool, assignment, fill) {
+export function runtimeVolumeCreateArgv(
+  volume,
+  pool,
+  assignment,
+  fill,
+  workspace,
+) {
   return [
     "volume",
     "create",
@@ -597,8 +609,35 @@ export function runtimeVolumeCreateArgv(volume, pool, assignment, fill) {
     `${assignmentLabel}=${assignment}`,
     "--label",
     `${fillLabel}=${fill}`,
+    ...(workspace ? ["--label", workspaceVolumeLabel] : []),
     volume,
   ];
+}
+
+/**
+ * The workspace volumes no container uses, by name: the ones kept.
+ */
+export function keptVolumesArgv() {
+  return [
+    "volume",
+    "ls",
+    "--quiet",
+    "--filter",
+    `label=${workspaceVolumeLabel}`,
+    "--filter",
+    "dangling=true",
+  ];
+}
+
+/**
+ * A copy of a file of a container, which may have stopped, to this machine.
+ *
+ * @param {string} container
+ * @param {string} path the file's, in the container
+ * @param {string} destination the file's, on this machine
+ */
+export function copiedOutArgv(container, path, destination) {
+  return ["cp", `${container}:${path}`, destination];
 }
 
 /**
@@ -858,13 +897,14 @@ export function logsArgv(container, linesMax) {
 }
 
 /**
- * A removal, with the container's anonymous volumes: the workspace goes with
- * the workload.
+ * A removal, with the container's anonymous volumes unless they are `kept`:
+ * a job started without chuggy's runtime holds its workspace among them.
  *
  * @param {string} container
+ * @param {boolean} [kept]
  */
-export function removeArgv(container) {
-  return ["rm", "-v", container];
+export function removeArgv(container, kept = false) {
+  return kept ? ["rm", container] : ["rm", "-v", container];
 }
 
 /**
