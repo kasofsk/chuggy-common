@@ -64,7 +64,9 @@
  * ticket's work stands, so `read_ticket_landings` leaves out the oldest whole
  * landings until the rest fit, and says so in `truncated`. The contract bounds
  * what one landing weighs, and the suite holds the heaviest one inside an
- * answer.
+ * answer. `read_landing_queues` answers the route's first whole queues that
+ * fit, in the route's order, by repository and then target, since its route's
+ * bound is likewise its tickets' rather than one answer's.
  *
  * ANOTHER IS A CONFIGURATION, ANSWERED BY `path` where it is larger than one
  * answer. Its route answers the canonical whole, bounded by what a
@@ -190,6 +192,7 @@ import {
   chuggyToolDispatchViewResponseBytesMax,
   chuggyToolEpicViewResponseBytesMax,
   chuggyToolImageResponseBytesMax,
+  chuggyToolLandingQueuesResponseBytesMax,
   chuggyToolLeadSettingsResponseBytesMax,
   chuggyToolNames,
   chuggyToolPrefix,
@@ -208,6 +211,7 @@ import {
   epicTicketsMax,
   epicTitleCharsMax,
   imageMediaTypes,
+  landingQueueTicketsAnsweredMax,
   leadOfferings,
   nativeHttpMediaType,
   nativeHttpPageItemsMax,
@@ -680,6 +684,65 @@ async function readTicketLandings(context, path) {
   return answer === undefined
     ? answerTooLarge(
         "its newest landing is larger alone, so it cannot be answered",
+      )
+    : answered(answer);
+}
+
+/** A landing queues route's body, or nothing where it is not one as the route answers one. */
+function readLandingQueuesBody(text) {
+  let answer;
+  try {
+    answer = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  const queues = answer?.queues;
+  return Array.isArray(queues) &&
+    queues.length <= landingQueueTicketsAnsweredMax &&
+    typeof answer.truncated === "boolean"
+    ? answer
+    : undefined;
+}
+
+/**
+ * A project's landing queues as one answer: the route's first whole queues
+ * that fit, in its order, and `truncated` where the route left tickets out or
+ * this answer left queues out. Nothing is answered where the route's first
+ * queue alone does not fit, because a queue is never cut.
+ */
+function readLandingQueuesAnswer(body) {
+  const { queues } = body;
+  if (queues.length === 0) return JSON.stringify(body);
+  for (let kept = queues.length; kept > 0; kept -= 1) {
+    const answer = JSON.stringify({
+      ...body,
+      queues: queues.slice(0, kept),
+      truncated: body.truncated || kept < queues.length,
+    });
+    if (chuggyToolAnswerFits(answer)) return answer;
+  }
+  return undefined;
+}
+
+/** A project's landing queues, the route's first whole queues kept where they are more than one answer holds. */
+async function readLandingQueues(context, path) {
+  const body = await drawn(
+    context,
+    path,
+    chuggyToolLandingQueuesResponseBytesMax,
+    "this project's landing queues",
+  );
+  if (body.refused !== undefined) return body.refused;
+  const queues = readLandingQueuesBody(body.text);
+  if (queues === undefined)
+    return answered(
+      `the landing queues route answered HTTP ${String(body.status)} with a body that is not a project's landing queues as the contract answers them.`,
+      true,
+    );
+  const answer = readLandingQueuesAnswer(queues);
+  return answer === undefined
+    ? answerTooLarge(
+        "the route's first queue is larger alone, so it cannot be answered",
       )
     : answered(answer);
 }
@@ -1946,6 +2009,14 @@ export const chuggyProjectTools = [
         context,
         projectPath(context, "ticketLandings", { ticket: args.ticket }),
       ),
+  },
+  {
+    name: "read_landing_queues",
+    description:
+      "This project's landing queues, one for each reference a Serialized or Stacked ticket lands on. Call it for why a ticket's landing waits on another ticket's. Answers JSON. Each queue carries its `repository` and its `target`, a queue naming no `target` being its tickets' that name none, which is a different queue from one naming the default branch. Its `holder` is the one ticket that may land on that reference now, and `waiting` the tickets ranked behind it, in rank order, none of which lands there before the holder stops holding it. A ticket alone in a queue is its holder and waits on nobody. It answers the route's first whole queues one answer holds, in the route's order, by repository and then target, `truncated` where it leaves later ones out or the route left tickets out.",
+    shape: () => ({}),
+    call: (context) =>
+      readLandingQueues(context, projectPath(context, "landingQueues")),
   },
   {
     name: "read_lead",
