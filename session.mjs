@@ -238,7 +238,6 @@ export async function sessionSdk() {
  */
 export const sessionBounds = {
   mailboxPollMs: Number.isSafeInteger,
-  idleMs: Number.isSafeInteger,
   resultDrainMs: Number.isSafeInteger,
   loadTimeoutMs: Number.isSafeInteger,
   turnsMax: Number.isSafeInteger,
@@ -247,14 +246,26 @@ export const sessionBounds = {
 export const sessionBoundNames = Object.keys(sessionBounds);
 
 /**
+ * The bounds a launcher may leave out, each one's loop then ending on its other
+ * bounds alone: a session with no `idleMs` is never ended for sitting idle.
+ */
+export const sessionBoundsOptional = { idleMs: Number.isSafeInteger };
+
+/**
  * Every bound the launcher owes this pod, refused by name where one is missing
- * or not positive. There is no default to fall back to: a bound this image
+ * or not positive, and each optional one it names refused where not positive.
+ * There is no default to fall back to: a bound this image
  * invented would be a loop nobody chose the cap of, and an absent one silently
  * makes its loop unbounded rather than short. `carrier` names what carried
  * them.
  */
 export function checkedSessionBounds(bounds, carrier = sessionTaskVariable) {
-  for (const [name, valid] of Object.entries(sessionBounds)) {
+  for (const [name, valid] of [
+    ...Object.entries(sessionBounds),
+    ...Object.entries(sessionBoundsOptional).filter(
+      ([name]) => bounds?.[name] !== undefined,
+    ),
+  ]) {
     const value = bounds?.[name];
     if (!valid(value) || value <= 0)
       throw new Error(

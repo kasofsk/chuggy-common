@@ -36,7 +36,6 @@ import {
   chatHostConfigSchema,
   chatHostConfigured,
   chatHostControl,
-  chatHostIdleSecs,
   chatHostMemoryBytes,
   chatHostRestartBackoffMs,
   chatHostSessionsMaxDefault,
@@ -419,6 +418,18 @@ test("a host polls with no room and for an answer at once until the plane names 
     run.logged.every((line) => !line.includes(bearer)),
     run.logged.join("\n"),
   );
+});
+
+test("a host polls with the idle bound its settings name, and with none where they name none", async (t) => {
+  for (const [given, idleSecs] of [
+    [{ idleSecs: 60 }, "60"],
+    [{ idleSecs: undefined }, null],
+  ]) {
+    const run = await hostOf(t, { answers: [{}, {}], given });
+    await run.host.run();
+    assert.ok(run.seen.polls.length > 0);
+    for (const poll of run.seen.polls) assert.equal(poll.idleSecs, idleSecs);
+  }
 });
 
 test("a supervisor's room is the least of its own and the host's", async (t) => {
@@ -1058,7 +1069,6 @@ test("a host's settings from a runner's file are its defaults where the file nam
   assert.deepEqual(chatHostConfigured(undefined, 1_000), {
     sessionsMax: chatHostSessionsMaxDefault,
     sessionMemoryBytes: chatSessionMemoryBytesDefault,
-    idleSecs: chatHostIdleSecs,
     outputBytesMax: 1_000,
   });
   const image = { image: one, pull: "never" };
@@ -1588,7 +1598,7 @@ test("a supervisor's container is asked of the engine: none, its state and wheth
 test("a host's settings and its service's status are said in lines a CLI prints", () => {
   assert.equal(
     chatHostSettingsLine(chatHostConfigured(undefined, 4_096)),
-    "sessionsMax 4, sessionMemoryMib 2048, so the supervisor is capped at 8192 MiB, idleSecs 600, outputBytesMax 4096, image the one chuggy names",
+    "sessionsMax 4, sessionMemoryMib 2048, so the supervisor is capped at 8192 MiB, idleSecs none, outputBytesMax 4096, image the one chuggy names",
   );
   assert.equal(
     chatHostSettingsLine({
