@@ -1732,9 +1732,9 @@ function workerProjectReads({
 /**
  * The credentials the plane holds of those `task` grants and
  * `credentialFiles` does not hold, each kept among the attempt's secrets and
- * written under `minted`: the variables naming their files, as a job's shells
- * are handed them. One the pod already holds is overridden, which is logged by
- * its name alone.
+ * written under `minted`: the variables they set, as a job's shells are handed
+ * them. One the pod already holds is overridden, which is logged by its name
+ * alone.
  */
 export async function workerHeldCredentials({
   task,
@@ -1760,7 +1760,9 @@ export async function workerHeldCredentials({
       warn(
         `the held credential ${credential} is handed as ${variable}, over the value the job's environment set\n`,
       );
-  return Object.fromEntries(held.map(({ variable, file }) => [variable, file]));
+  return Object.fromEntries(
+    held.map(({ variable, value }) => [variable, value]),
+  );
 }
 
 /**
