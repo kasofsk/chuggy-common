@@ -4,9 +4,9 @@
  * the room left, stops what it is told to and places what it is offered.
  * chuggy's `src/interpreter/workerPoolClient.ts` is the same loop in
  * TypeScript, and a change to one is a change to both, but for a runner's
- * update of itself, which that cluster client never makes, the credential
- * outcomes a member's personal runner is answered with, which a cluster's
- * never is, and a backend
+ * update of itself, which that cluster client never makes, the credentials
+ * a member's personal runner's poll names and the credential outcomes and
+ * pauses it is answered with, which a cluster's never are, and a backend
  * that takes no job while its disk is low or its engine's memory has no
  * room, and claims jobs by that room, which a cluster leaves to its kubelet.
  *
@@ -15,6 +15,9 @@
  * an outcome for, so what that answer offers runs on another. Each poll
  * withholds the capabilities the backend withholds then, which is how an
  * agent none of whose credentials is available stops being offered jobs.
+ * Each poll names too the credentials the backend would run each agent's job
+ * on now, and every answer's credential pauses, none where it names none,
+ * replace the backend's before anything it offers is placed.
  *
  * A JOB AND A SESSION ARE COUNTED APART. Each kind has its own ceiling, its
  * own room on the poll and its own offers, so a session never takes a job's
@@ -65,6 +68,8 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolSessionAssignment} WorkerPoolSessionAssignment
  * @typedef {import("@chuggy/worker-contract/workerPool").AssignmentOutcome} AssignmentOutcome
  * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolCredentialOutcome} WorkerPoolCredentialOutcome
+ * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolCredentialPause} WorkerPoolCredentialPause
+ * @typedef {import("@chuggy/worker-contract/workerPool").WorkerRunnerCredentials} WorkerRunnerCredentials
  * @typedef {import("@chuggy/worker-contract/sessionPlane").SessionContainerEnd} SessionContainerEnd
  * @typedef {import("@chuggy/worker-contract/workerEnvironment").WorkerImageFault} WorkerImageFault
  *
@@ -109,6 +114,8 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @property {() => Promise<readonly WorkerPoolEnded[]>} ended each one once, after `held` stopped naming it; never one this pool stopped
  * @property {(outcomes: readonly WorkerPoolCredentialOutcome[]) => void} [credentialOutcomesTaken] benches the credential each outcome's assignment ran on, where its selector chose it; none for a backend that holds no selector
  * @property {() => readonly string[]} [capabilitiesWithheld] the capabilities a poll leaves out now: each agent's of which its selector has no credential available; none for a backend that holds no selector
+ * @property {() => WorkerRunnerCredentials} [credentialsNamed] the credentials a poll names now, by agent, as its selector names them; none for a backend that holds no selector
+ * @property {(pauses: readonly WorkerPoolCredentialPause[]) => void} [credentialPausesTaken] replaces the pauses its selector holds with an answer's; none for a backend that holds no selector
  * @property {(byRoom: boolean) => boolean} [jobsTaken] whether it takes a job now, as its last `held` found, from a plane that claims by room or one that does not; false while its machine's disk is low or its engine's memory has no room for it, and true for a backend that keeps neither
  * @property {() => WorkerPoolMemoryRoom | undefined} [memoryRoom] its engine's memory as its last `held` found; none for a backend that keeps no budget
  * @property {() => Promise<(() => Promise<void>) | undefined>} [claimed] takes its engine's claim without waiting: what lets it go, or nothing while another pool holds it; none for a backend that keeps no claim lock
@@ -120,13 +127,15 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  *
  * @typedef {{polled: "Reconciled", assignments: readonly WorkerPoolAssignment[],
  *   sessions: readonly WorkerPoolSessionAssignment[], stop: readonly string[], release?: WorkerRunnerRelease,
- *   jobsWaiting?: boolean, chatImage?: string, credentialOutcomes?: readonly WorkerPoolCredentialOutcome[]}
- *   | {polled: "Stale"} | {polled: "Denied", evidence: string} | {polled: "Unavailable", evidence: string}} WorkerPoolPolled `jobsWaiting` where the plane claims by room: whether a job waits that fits what the poll named; `chatImage` the image a chat host's sessions run in, where the plane names one; `credentialOutcomes` how the credential stopped each job of `stop` the plane names one for
+ *   jobsWaiting?: boolean, chatImage?: string, credentialOutcomes?: readonly WorkerPoolCredentialOutcome[],
+ *   credentialPauses?: readonly WorkerPoolCredentialPause[]}
+ *   | {polled: "Stale"} | {polled: "Denied", evidence: string} | {polled: "Unavailable", evidence: string}} WorkerPoolPolled `jobsWaiting` where the plane claims by room: whether a job waits that fits what the poll named; `chatImage` the image a chat host's sessions run in, where the plane names one; `credentialOutcomes` how the credential stopped each job of `stop` the plane names one for; `credentialPauses` each credential the poll named that is paused for the runner's owner
  *
  * @typedef {object} WorkerPoolPollTerms what a poll names beside its query
  * @property {WorkerPoolMemoryRoom} [memory] the room it offers jobs, and its ceiling
  * @property {number} [waitSecs] the longest the plane may wait before it answers; none, and the plane's own
  * @property {readonly string[]} [withheld] the capabilities it leaves out of those its plane client names
+ * @property {WorkerRunnerCredentials} [credentials] the credentials it names, by agent
  *
  * @typedef {"Settled" | "Lost" | "Stale" | "Denied" | "Unavailable"} WorkerPoolSettled
  *
@@ -682,6 +691,25 @@ function workerPoolClientTerms(client, held, jobsTaken) {
 }
 
 /**
+ * `terms` with what the backend's selector has a poll withhold and name now.
+ *
+ * @param {WorkerPoolBackend} backend
+ * @param {WorkerPoolPollTerms} terms
+ * @returns {WorkerPoolPollTerms}
+ */
+function workerPoolClientCredentialTerms(backend, terms) {
+  return {
+    ...terms,
+    ...(backend.capabilitiesWithheld === undefined
+      ? {}
+      : { withheld: backend.capabilitiesWithheld() }),
+    ...(backend.credentialsNamed === undefined
+      ? {}
+      : { credentials: backend.credentialsNamed() }),
+  };
+}
+
+/**
  * One poll and what it is answered with: what it asks for of each kind
  * measured from `held`, every stop delivered, and what was offered placed or
  * settled. A poll that was not reconciled, or a stop that failed, ends the
@@ -703,9 +731,7 @@ async function workerPoolClientReconciled(client, token, held, taking, terms) {
     taking.sessions
       ? workerPoolClientRoom(client.settings, held, "Session")
       : 0,
-    client.backend.capabilitiesWithheld === undefined
-      ? terms
-      : { ...terms, withheld: client.backend.capabilitiesWithheld() },
+    workerPoolClientCredentialTerms(client.backend, terms),
   );
   if (polled.polled === "Stale") {
     client.tokens.invalidate(token);
@@ -715,6 +741,7 @@ async function workerPoolClientReconciled(client, token, held, taking, terms) {
     return { passed: polled.polled, evidence: polled.evidence };
   if (polled.credentialOutcomes !== undefined)
     client.backend.credentialOutcomesTaken?.(polled.credentialOutcomes);
+  client.backend.credentialPausesTaken?.(polled.credentialPauses ?? []);
   const stopped = await workerPoolClientStopped(client, polled.stop);
   if ("passed" in stopped) return stopped;
   const jobs = await workerPoolClientPlaced(

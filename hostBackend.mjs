@@ -53,14 +53,15 @@ import { clearTimeout, setTimeout } from "node:timers";
 import { fileURLToPath, URL } from "node:url";
 
 import { workerTaskVariable } from "@chuggy/worker-contract/workerEnvironment";
+import { workerRunnerCredentialsPerAgentMax } from "@chuggy/worker-contract/workerPool";
 
 import { agentCredentialsScrubbedCarried } from "./agentCredentialSet.mjs";
 import { claudeCredentialCarried } from "./claudeCredential.mjs";
 import { hostJobVariable } from "./coreRuntime.mjs";
 import {
-  jobCapabilitiesWithheld,
   jobCredentialFilesChecked,
   jobCredentialHanded,
+  jobCredentialHooks,
   jobEnvelope,
   jobHostPlaces,
   reservedJobVariables,
@@ -832,9 +833,7 @@ export function hostBackend(settings, seams) {
     stop: (assignment) => hostStopped(state, assignment),
     held: () => hostHeld(state),
     ended: async () => state.ready.splice(0),
-    credentialOutcomesTaken: (outcomes) =>
-      settings.credentials?.outcomesTaken(outcomes),
-    capabilitiesWithheld: () => jobCapabilitiesWithheld(settings.credentials),
+    ...jobCredentialHooks(settings.credentials),
     holds: (assignment) => state.jobs.has(assignment),
     measured: () => state.measures.measured(),
     inFlight: () =>
@@ -850,6 +849,29 @@ export function hostBackend(settings, seams) {
       await Promise.all([...state.jobs.values()].map((job) => job.done));
     },
   };
+}
+
+/**
+ * What either backend names of each agent's credentials, each name once, and
+ * none of an agent whose names together are more than a poll names.
+ *
+ * @param {WorkerPoolBackend} container
+ * @param {WorkerPoolBackend} host
+ * @returns {import("@chuggy/worker-contract/workerPool").WorkerRunnerCredentials}
+ */
+function hostRoutedCredentialsNamed(container, host) {
+  /** @type {Record<string, string[]>} */
+  const named = {};
+  for (const backend of [container, host])
+    for (const [agent, names] of Object.entries(
+      backend.credentialsNamed?.() ?? {},
+    ))
+      named[agent] = [...new Set([...(named[agent] ?? []), ...(names ?? [])])];
+  return Object.fromEntries(
+    Object.entries(named).filter(
+      ([, names]) => names.length <= workerRunnerCredentialsPerAgentMax,
+    ),
+  );
 }
 
 /**
@@ -894,6 +916,11 @@ export function hostRoutedBackend(container, host, platforms) {
         ),
       ),
     ],
+    credentialPausesTaken: (pauses) => {
+      container.credentialPausesTaken?.(pauses);
+      host.credentialPausesTaken?.(pauses);
+    },
+    credentialsNamed: () => hostRoutedCredentialsNamed(container, host),
     inFlight: () => [...container.inFlight(), ...host.inFlight()],
     measured: () =>
       runnerMeasuredSum(

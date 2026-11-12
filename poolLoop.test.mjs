@@ -9,6 +9,8 @@ import {
   assignmentOutcomeSchema,
   workerPoolEvidenceCharsMax,
   workerRunnerCapabilitiesHeader,
+  workerRunnerCredentialsHeader,
+  workerRunnerCredentialsOf,
   workerRunnerCapabilitiesOf,
   workerRunnerMemoryRoomHeader,
   workerRunnerPollWaitHeader,
@@ -26,7 +28,7 @@ import {
   agentCredentialSelector,
   agentCredentialSets,
 } from "./agentCredentialSet.mjs";
-import { jobCapabilitiesWithheld, jobCredential } from "./job.mjs";
+import { jobCredential, jobCredentialHooks } from "./job.mjs";
 
 const settings = { concurrencyMax: 1, outageBackoffMs: 1, passesMax: 1 };
 
@@ -1853,28 +1855,48 @@ function choosing(selector, ended = []) {
         );
         return { placed: "Placed" };
       },
-      credentialOutcomesTaken: (outcomes) => selector.outcomesTaken(outcomes),
-      capabilitiesWithheld: () => jobCapabilitiesWithheld(selector),
+      ...jobCredentialHooks(selector),
     },
   };
 }
 
-/** Catches an outcome read off the wire and dropped, or taken only after the same answer's offers were placed on the credential it benches. */
-test("a poll's credential outcome benches the credential its job ran on before that answer's offers are placed", async () => {
-  const { ran, backend } = choosing(tokensInOrder());
-  const { plane } = planeNaming(workerContractRelease, [
-    reconciled([assignment("job-1")]),
-    {
-      ...reconciled([assignment("job-2")], ["job-1"]),
-      credentialOutcomes: [
-        { assignment: "job-1", outcome: "CreditsExhausted" },
-      ],
-    },
-  ]);
-  const pooled = client({ plane, backend });
-  await workerPoolClientPass(pooled);
-  await workerPoolClientPass(pooled);
-  assert.deepEqual(ran, ["max-1", "max-2"]);
+/**
+ * Catches an outcome or a pause read off the wire and dropped, taken only
+ * after the same answer's offers were placed on the credential it names, or a
+ * pause kept past an answer naming none.
+ */
+test("a poll's credential outcome benches, and its pause passes over, the credential it names before that answer's offers are placed", async () => {
+  const pausedUntil = Math.floor(Date.now() / 1_000) + 3_600;
+  for (const [why, named, ran] of [
+    [
+      "an outcome",
+      {
+        credentialOutcomes: [
+          { assignment: "job-1", outcome: "CreditsExhausted" },
+        ],
+      },
+      ["max-1", "max-2", "max-2"],
+    ],
+    [
+      "a pause",
+      {
+        credentialPauses: [
+          { agent: "Claude", credential: "max-1", pausedUntil },
+        ],
+      },
+      ["max-1", "max-2", "max-1"],
+    ],
+  ]) {
+    const chose = choosing(tokensInOrder());
+    const { plane } = planeNaming(workerContractRelease, [
+      reconciled([assignment("job-1")]),
+      { ...reconciled([assignment("job-2")], ["job-1"]), ...named },
+      reconciled([assignment("job-3")], ["job-2"]),
+    ]);
+    const pooled = client({ plane, backend: chose.backend });
+    for (let pass = 0; pass < 3; pass += 1) await workerPoolClientPass(pooled);
+    assert.deepEqual(chose.ran, ran, why);
+  }
 });
 
 /** Catches a failed, timed-out or stopped run, or an answer naming no outcome, benching the credential it ran on. */
@@ -1927,13 +1949,15 @@ function oneEachSelector() {
 /**
  * A plane client given `capabilities`, as a runner builds one, answering each
  * poll with the next of `answers`; the capabilities each poll names, as the
- * plane reads them, and each settlement are recorded.
+ * plane reads them, the credentials it names, as the plane reads them, and
+ * each settlement are recorded.
  *
  * @param {readonly string[]} capabilities
  * @param {object[]} answers
  */
 function advertisedTo(capabilities, answers) {
   const advertised = [];
+  const credentials = [];
   const settled = [];
   const plane = poolPlaneClient(
     {
@@ -1952,13 +1976,16 @@ function advertisedTo(capabilities, answers) {
         init.headers[workerRunnerCapabilitiesHeader],
       );
       advertised.push(named.named === "Set" ? named.capabilities : named);
+      credentials.push(
+        workerRunnerCredentialsOf(init.headers[workerRunnerCredentialsHeader]),
+      );
       return new globalThis.Response(
         JSON.stringify(answerBody(answers.shift() ?? reconciled())),
         { status: 200, headers },
       );
     },
   );
-  return { plane, advertised, settled };
+  return { plane, advertised, credentials, settled };
 }
 
 /** A job requiring `agent`, as the plane offers it. */
@@ -1969,14 +1996,15 @@ function requiring(named, agent) {
 /**
  * Catches a poll advertising an agent none of whose credentials is
  * available, one leaving out an agent that has one, the agent kept out once
- * its bench has ended, or a job handed back by settling it other than accepted.
+ * its bench has ended, a job handed back by settling it other than accepted,
+ * or a poll naming a benched credential or leaving out one that is not.
  */
-test("a poll leaves out an agent whose every credential is benched, takes another agent's job as before, and names it again once the bench ends", async () => {
+test("a poll leaves out an agent whose every credential is benched, and its credentials, takes another agent's job as before, and names both again once the bench ends", async () => {
   const { selector, clock } = oneEachSelector();
   const { ran, backend } = choosing(selector);
   const resetMs = clock.nowMs + 3_600_000;
   const built = ["Platform:Linux:Amd64", "Agent:Claude", "Agent:Codex"];
-  const { plane, advertised, settled } = advertisedTo(built, [
+  const { plane, advertised, credentials, settled } = advertisedTo(built, [
     reconciled([requiring("job-1", "Claude")]),
     {
       ...reconciled([requiring("job-2", "Codex")], ["job-1"]),
@@ -1994,6 +2022,8 @@ test("a poll leaves out an agent whose every credential is benched, takes anothe
     ["Platform:Linux:Amd64", "Agent:Codex"],
     built,
   ]);
+  const both = { Claude: ["max-1"], Codex: ["openai-1"] };
+  assert.deepEqual(credentials, [both, both, { Codex: ["openai-1"] }, both]);
   assert.deepEqual(
     settled.map(([url]) => url.split("/").slice(-2).join(" ")),
     ["job-1 accepted", "job-2 accepted"],
@@ -2012,7 +2042,8 @@ function usageLimitedAt(assignment, resetsAtMs) {
 /**
  * Catches credits exhausted on every credential counted available again
  * before a restart, an agent the runner was not built advertising added, or a
- * backend without a selector changing what it was built with.
+ * backend without a selector changing what it was built with or naming a
+ * credential.
  */
 test("an agent benched until restart stays out of every poll, none is added, and a backend without a selector advertises what it was built with", async () => {
   const { selector, clock } = oneEachSelector();
@@ -2048,4 +2079,5 @@ test("an agent benched until restart stays out of every poll, none is added, and
   const unselected = advertisedTo(built, []);
   await workerPoolClientPass(client({ plane: unselected.plane }));
   assert.deepEqual(unselected.advertised, [built]);
+  assert.deepEqual(unselected.credentials, [{}]);
 });

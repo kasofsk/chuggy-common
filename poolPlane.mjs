@@ -31,8 +31,12 @@
  * sit idle, where its client is given that, and the answer names it the
  * image its sessions run in, which is passed on.
  *
- * An answer may name how the credential stopped each job it stops, which is
- * passed on.
+ * A member's personal runner names on every poll, whatever version the plane
+ * last answered, the credentials its terms name for each agent, and only as a
+ * header `workerRunnerCredentialsOf` reads back as those names, since the
+ * plane reads one it does not as naming none. An answer may name how the
+ * credential stopped each job it stops, and which credentials the poll named
+ * are paused, each passed on.
  *
  * A runner's report of itself is posted under the token it is given, and is
  * taken only where the plane answers 204; the client keeps the version the
@@ -41,7 +45,7 @@
  * report.
  */
 
-import { TextDecoder } from "node:util";
+import { TextDecoder, isDeepStrictEqual } from "node:util";
 import { URL } from "node:url";
 
 import {
@@ -61,6 +65,8 @@ import {
   workerPoolSettlementPath,
   workerRunnerCapabilitiesHeader,
   workerRunnerCapabilitiesSchema,
+  workerRunnerCredentialsHeader,
+  workerRunnerCredentialsOf,
   workerRunnerHeader,
   workerRunnerMemoryCeilingHeader,
   workerRunnerCountOf,
@@ -239,7 +245,7 @@ function poolPlaneClaimsByRoom(answered) {
 
 /**
  * The headers naming what a poll's terms carry: the room and the ceiling each
- * where the contract reads it, and the wait.
+ * where the contract reads it, the wait, and the credentials.
  *
  * @param {WorkerPoolPollTerms} terms
  * @returns {Record<string, string>}
@@ -257,7 +263,27 @@ function poolPlaneTermHeaders(terms) {
   }
   if (terms.waitSecs !== undefined)
     headers[workerRunnerPollWaitHeader] = String(terms.waitSecs);
-  return headers;
+  return { ...headers, ...poolPlaneCredentialsHeaders(terms.credentials) };
+}
+
+/**
+ * The header naming `credentials`, none where they name none or where
+ * `workerRunnerCredentialsOf` would not read it back as them.
+ *
+ * @param {WorkerPoolPollTerms["credentials"]} credentials
+ * @returns {Record<string, string>}
+ */
+function poolPlaneCredentialsHeaders(credentials) {
+  if (credentials === undefined) return {};
+  const header = Object.entries(credentials)
+    .flatMap(([agent, names]) =>
+      (names ?? []).map((name) => `${agent}:${name}`),
+    )
+    .join(",");
+  return header !== "" &&
+    isDeepStrictEqual(workerRunnerCredentialsOf(header), credentials)
+    ? { [workerRunnerCredentialsHeader]: header }
+    : {};
 }
 
 /**
@@ -317,7 +343,13 @@ async function poolPlaneReconciled(answered) {
       polled: "Unavailable",
       evidence: "the plane answered no reconciliation this pool can read",
     };
-  const { release, jobsWaiting, chatImage, credentialOutcomes } = read.data;
+  const {
+    release,
+    jobsWaiting,
+    chatImage,
+    credentialOutcomes,
+    credentialPauses,
+  } = read.data;
   const waiting = poolPlaneClaimsByRoom(answered) ? jobsWaiting : undefined;
   return {
     polled: "Reconciled",
@@ -328,6 +360,7 @@ async function poolPlaneReconciled(answered) {
     ...(waiting === undefined ? {} : { jobsWaiting: waiting }),
     ...(chatImage === undefined ? {} : { chatImage }),
     ...(credentialOutcomes === undefined ? {} : { credentialOutcomes }),
+    ...(credentialPauses === undefined ? {} : { credentialPauses }),
   };
 }
 

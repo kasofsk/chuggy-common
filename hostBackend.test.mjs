@@ -14,6 +14,8 @@ import { join } from "node:path";
 import test from "node:test";
 import { setTimeout as wait } from "node:timers/promises";
 
+import { workerRunnerCredentialsPerAgentMax } from "@chuggy/worker-contract/workerPool";
+
 import { workerJobVariables } from "./checks.mjs";
 import {
   agentCredentialSelector,
@@ -589,8 +591,12 @@ test("a job reads the credential the runner's selector chooses, told its type an
   ]);
 });
 
-/** Catches a credential outcome a host backend is handed reaching no selector, or benching another than the one its job read. */
-test("a credential outcome handed a host backend benches the credential its job read", async (t) => {
+/**
+ * Catches a credential outcome or pause a host backend is handed reaching no
+ * selector, an outcome benching another than the one its job read, or a poll
+ * naming other credentials than the selector would run on.
+ */
+test("a credential outcome handed a host backend benches the credential its job read, a pause passes one over, and a poll names what the selector names", async (t) => {
   const credentials = agentCredentialSelector(
     agentCredentialSets({
       claudeCredential: {
@@ -609,17 +615,23 @@ test("a credential outcome handed a host backend benches the credential its job 
     tokenFile: undefined,
     credentials,
   });
+  assert.deepEqual(backend.credentialsNamed(), { Claude: ["max-1", "max-2"] });
+  backend.credentialPausesTaken([
+    { agent: "Claude", credential: "max-1", pausedUntil: 4_000_000_000 },
+  ]);
   await backend.place(assignment(), "Job");
   const { env } = await seen();
   backend.credentialOutcomesTaken([
     { assignment: assignment().assignment, outcome: "CreditsExhausted" },
   ]);
-  assert.equal(env.CHUG_WORKER_CREDENTIAL_NAME, "max-1");
-  assert.deepEqual(credentials.benchOf("max-1"), {
+  assert.equal(env.CHUG_WORKER_CREDENTIAL_NAME, "max-2");
+  assert.deepEqual(credentials.benchOf("max-2"), {
     state: "BenchedUntilRestart",
   });
-  assert.deepEqual(credentials.benchOf("max-2"), { state: "Available" });
+  assert.deepEqual(credentials.benchOf("max-1"), { state: "Available" });
   assert.deepEqual(backend.capabilitiesWithheld(), []);
+  assert.deepEqual(backend.credentialsNamed(), { Claude: ["max-1"] });
+  backend.credentialPausesTaken([]);
   await backend.place(assignment({ assignment: "asg-2" }), "Job");
   backend.credentialOutcomesTaken([
     { assignment: "asg-2", outcome: "CreditsExhausted" },
@@ -627,10 +639,14 @@ test("a credential outcome handed a host backend benches the credential its job 
   assert.deepEqual(backend.capabilitiesWithheld(), ["Agent:Claude"]);
 });
 
-/** Catches a host backend without a selector withholding a capability its runner was built with. */
-test("a host backend without a selector withholds nothing", async (t) => {
+/** Catches a host backend without a selector withholding a capability its runner was built with, naming a credential, or failing on a pause. */
+test("a host backend without a selector withholds nothing, names no credential and takes a pause as nothing", async (t) => {
   const { backend } = await harness(t, "sleep");
+  backend.credentialPausesTaken([
+    { agent: "Claude", credential: "claude", pausedUntil: 4_000_000_000 },
+  ]);
   assert.deepEqual(backend.capabilitiesWithheld(), []);
+  assert.deepEqual(backend.credentialsNamed(), {});
 });
 
 /**
@@ -1117,22 +1133,50 @@ test("a host beside a container backend takes its own jobs, and everything else 
   assert.deepEqual(calls, ["container.settled", "host.settled"]);
 });
 
-/** Catches a host beside a container backend dropping either one's withheld capabilities, or naming one twice. */
-test("a host beside a container backend withholds what either withholds, each once", () => {
+/**
+ * Catches a host beside a container backend dropping either one's withheld
+ * capabilities or named credentials, naming either twice, naming more of an
+ * agent than the plane reads, or handing an answer's pauses to one half only.
+ */
+test("a host beside a container backend withholds and names what either does, each once, and hands both its pauses", () => {
+  const pausesTaken = [];
+  const past = Array.from(
+    { length: workerRunnerCredentialsPerAgentMax },
+    (_, index) => `codex-${String(index)}`,
+  );
   const routed = hostRoutedBackend(
     /** @type {never} */ ({
       ...recording([], "container"),
       capabilitiesWithheld: () => ["Agent:Claude"],
+      credentialsNamed: () => ({ Claude: ["max-1", "key-1"], Codex: past }),
+      credentialPausesTaken: (pauses) =>
+        pausesTaken.push(["container", pauses]),
     }),
     /** @type {never} */ ({
       ...recording([], "host"),
       capabilitiesWithheld: () => ["Agent:Codex", "Agent:Claude"],
+      credentialsNamed: () => ({
+        Claude: ["key-1", "max-2"],
+        Codex: ["openai-1"],
+      }),
+      credentialPausesTaken: (pauses) => pausesTaken.push(["host", pauses]),
     }),
     ["Platform:MacOS:Arm64"],
   );
   assert.deepEqual(routed.capabilitiesWithheld?.(), [
     "Agent:Claude",
     "Agent:Codex",
+  ]);
+  assert.deepEqual(routed.credentialsNamed?.(), {
+    Claude: ["max-1", "key-1", "max-2"],
+  });
+  const pauses = [
+    { agent: "Claude", credential: "max-1", pausedUntil: 4_000_000_000 },
+  ];
+  routed.credentialPausesTaken?.(pauses);
+  assert.deepEqual(pausesTaken, [
+    ["container", pauses],
+    ["host", pauses],
   ]);
 });
 

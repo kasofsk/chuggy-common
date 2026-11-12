@@ -197,9 +197,9 @@ import {
   enginePullRefused,
 } from "./engineErrors.mjs";
 import {
-  jobCapabilitiesWithheld,
   jobCredentialFilesChecked,
   jobCredentialHanded,
+  jobCredentialHooks,
   jobEngineSocketEnvironment,
   jobEnvelope,
   jobEnvironmentAttempt,
@@ -3267,9 +3267,7 @@ export function containerBackend(settings, seams) {
     stop: (assignment) => stopped(state, assignment),
     held: () => heldAssignments(state),
     ended: async () => state.ends.ready.splice(0),
-    credentialOutcomesTaken: (outcomes) =>
-      state.settings.credentials?.outcomesTaken(outcomes),
-    capabilitiesWithheld: () => jobCapabilitiesWithheld(checked.credentials),
+    ...jobCredentialHooks(checked.credentials),
     inFlight: () =>
       [...state.placements.values()].map((placement) => ({
         assignment: placement.assignment,
