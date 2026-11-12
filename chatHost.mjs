@@ -146,7 +146,7 @@ import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
  * @typedef {object} ChatHostSettings
  * @property {number} sessionsMax the most sessions the host runs at once, whatever its supervisor's room
  * @property {number} sessionMemoryBytes the memory its supervisor is given for each of those
- * @property {number} idleSecs how long a session it claims may sit idle, which each poll names
+ * @property {number} [idleSecs] how long a session it claims may sit idle, which each poll names; none where absent
  * @property {number} outputBytesMax what a session may write of its output
  * @property {ChatHostImageSetting} [image] the host's own image, run in place of the plane's
  * @property {ChatSupervisorPlaces} places
@@ -164,9 +164,6 @@ import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
  * @property {RunnerIdentity} [runner]
  * @property {WorkerPoolUpdates} [updates]
  */
-
-/** How long a session a host claims may sit idle, where its setting names nothing; the plane caps it. */
-export const chatHostIdleSecs = 600;
 
 /** The most sessions a host runs at once, where its setting names no other. */
 export const chatHostSessionsMaxDefault = 4;
@@ -243,7 +240,7 @@ const chatHostPositiveSchema = z.number().int().positive().safe();
 
 /**
  * A member's chat host's own settings as a runner's file holds them, each
- * absent one a default, as `chatHostConfigured` gives them.
+ * absent one as `chatHostConfigured` gives it.
  */
 export const chatHostConfigSchema = z.strictObject({
   /** The image its supervisor runs in place of the one chuggy names, and when it is pulled. */
@@ -255,7 +252,7 @@ export const chatHostConfigSchema = z.strictObject({
     .min(memoryRoomMibMin)
     .max(Math.floor(Number.MAX_SAFE_INTEGER / 2 ** 20))
     .optional(),
-  /** How long a session it claims may sit idle, which chuggy caps. */
+  /** How long a session it claims may sit idle, which chuggy caps; no idle limit where absent. */
   idleSecs: chatHostPositiveSchema.optional(),
   /** The most output a session may report; the runner's own where absent. */
   outputBytesMax: chatHostPositiveSchema.optional(),
@@ -904,7 +901,7 @@ export function chatHostSettingsLine(settings) {
     settings.image === undefined
       ? "the one chuggy names"
       : `${settings.image.image}, pulled ${chatHostPulls[settings.image.pull]}`;
-  return `sessionsMax ${String(settings.sessionsMax)}, sessionMemoryMib ${mib(settings.sessionMemoryBytes)}, so the supervisor is capped at ${mib(chatHostMemoryBytes(settings))} MiB, idleSecs ${String(settings.idleSecs)}, outputBytesMax ${String(settings.outputBytesMax)}, image ${image}`;
+  return `sessionsMax ${String(settings.sessionsMax)}, sessionMemoryMib ${mib(settings.sessionMemoryBytes)}, so the supervisor is capped at ${mib(chatHostMemoryBytes(settings))} MiB, idleSecs ${settings.idleSecs === undefined ? "none" : String(settings.idleSecs)}, outputBytesMax ${String(settings.outputBytesMax)}, image ${image}`;
 }
 
 /**
@@ -946,7 +943,8 @@ export function chatHostStatusLines(status) {
 
 /**
  * A host's settings from its section of a runner's file, each it does not
- * name its default, and its output bound the runner's where it names none.
+ * name its default, its idle bound none where it names none, and its output
+ * bound the runner's where it names none.
  *
  * @param {ChatHostConfig | undefined} config as `chatHostConfigSchema` parsed it
  * @param {number} outputBytesMax the runner's own
@@ -960,8 +958,8 @@ export function chatHostConfigured(config, outputBytesMax) {
       sessionMemoryMib === undefined
         ? chatSessionMemoryBytesDefault
         : sessionMemoryMib * 2 ** 20,
-    idleSecs: idleSecs ?? chatHostIdleSecs,
     outputBytesMax: config?.outputBytesMax ?? outputBytesMax,
+    ...(idleSecs === undefined ? {} : { idleSecs }),
     ...(image === undefined ? {} : { image }),
   };
 }
@@ -979,8 +977,10 @@ export function checkedChatHostSettings(settings, engineName) {
   for (const [name, bound] of /** @type {const} */ ([
     ["sessionsMax", settings.sessionsMax],
     ["sessionMemoryBytes", settings.sessionMemoryBytes],
-    ["idleSecs", settings.idleSecs],
     ["outputBytesMax", settings.outputBytesMax],
+    ...(settings.idleSecs === undefined
+      ? []
+      : [/** @type {const} */ (["idleSecs", settings.idleSecs])]),
   ]))
     if (!Number.isSafeInteger(bound) || bound < 1)
       throw new RangeError(`chat host ${name} must be a positive integer`);
@@ -1064,7 +1064,7 @@ export function chatHost(credentials, settings, seams) {
         ? {}
         : { fetch: seams.fetch, planeFetch: seams.fetch }),
       ...(seams.runner === undefined ? {} : { runner: seams.runner }),
-      idleSecs: checked.idleSecs,
+      ...(checked.idleSecs === undefined ? {} : { idleSecs: checked.idleSecs }),
     },
   );
   /** @type {ChatHostState} */

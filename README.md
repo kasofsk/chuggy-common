@@ -45,7 +45,7 @@ A member's personal runner is a pool file of kind `Personal`: it names its tenan
 
 ## A chat host
 
-A member's chat host is a pool file of kind `ChatHost`, registered by `register.mjs` when the ask is `chat`, from a token minted at `POST /api/v1/tenants/:tenant/chat-host-registration-tokens`. It takes the member's sessions alone, all in one container running `chatSupervisor.mjs`, in the image chuggy names on each poll unless the host's own setting names one. `chatHost.mjs` is its loop and that container's spec, and `chatHostBackend.mjs` the pool loop's backend over the supervisor's stream; each CLI brings the engine that runs the container.
+A member's chat host is a pool file of kind `ChatHost`, registered by `register.mjs` when the ask is `chat`, from a token minted at `POST /api/v1/tenants/:tenant/chat-host-registration-tokens`. It takes the member's sessions alone, all in one container running `chatSupervisor.mjs`, in the image chuggy names on each poll unless the host's own setting names one. `chatHost.mjs` is its loop and that container's spec, and `chatHostBackend.mjs` the pool loop's backend over the supervisor's stream; each CLI brings the engine that runs the container. Its `idleSecs` setting is optional: unset, its sessions have no idle limit; set, each poll names it and chuggy caps it.
 
 ## A person's own agent
 

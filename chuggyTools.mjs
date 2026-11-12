@@ -64,7 +64,9 @@
  * ticket's work stands, so `read_ticket_landings` leaves out the oldest whole
  * landings until the rest fit, and says so in `truncated`. The contract bounds
  * what one landing weighs, and the suite holds the heaviest one inside an
- * answer.
+ * answer. `read_landing_queues` answers the route's first whole queues that
+ * fit, in the route's order, by repository and then target, since its route's
+ * bound is likewise its tickets' rather than one answer's.
  *
  * ANOTHER IS A CONFIGURATION, ANSWERED BY `path` where it is larger than one
  * answer. Its route answers the canonical whole, bounded by what a
@@ -190,6 +192,7 @@ import {
   chuggyToolDispatchViewResponseBytesMax,
   chuggyToolEpicViewResponseBytesMax,
   chuggyToolImageResponseBytesMax,
+  chuggyToolLandingQueuesResponseBytesMax,
   chuggyToolLeadSettingsResponseBytesMax,
   chuggyToolNames,
   chuggyToolPrefix,
@@ -208,6 +211,7 @@ import {
   epicTicketsMax,
   epicTitleCharsMax,
   imageMediaTypes,
+  landingQueueTicketsAnsweredMax,
   leadOfferings,
   nativeHttpMediaType,
   nativeHttpPageItemsMax,
@@ -680,6 +684,65 @@ async function readTicketLandings(context, path) {
   return answer === undefined
     ? answerTooLarge(
         "its newest landing is larger alone, so it cannot be answered",
+      )
+    : answered(answer);
+}
+
+/** A landing queues route's body, or nothing where it is not one as the route answers one. */
+function readLandingQueuesBody(text) {
+  let answer;
+  try {
+    answer = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  const queues = answer?.queues;
+  return Array.isArray(queues) &&
+    queues.length <= landingQueueTicketsAnsweredMax &&
+    typeof answer.truncated === "boolean"
+    ? answer
+    : undefined;
+}
+
+/**
+ * A project's landing queues as one answer: the route's first whole queues
+ * that fit, in its order, and `truncated` where the route left tickets out or
+ * this answer left queues out. Nothing is answered where the route's first
+ * queue alone does not fit, because a queue is never cut.
+ */
+function readLandingQueuesAnswer(body) {
+  const { queues } = body;
+  if (queues.length === 0) return JSON.stringify(body);
+  for (let kept = queues.length; kept > 0; kept -= 1) {
+    const answer = JSON.stringify({
+      ...body,
+      queues: queues.slice(0, kept),
+      truncated: body.truncated || kept < queues.length,
+    });
+    if (chuggyToolAnswerFits(answer)) return answer;
+  }
+  return undefined;
+}
+
+/** A project's landing queues, the route's first whole queues kept where they are more than one answer holds. */
+async function readLandingQueues(context, path) {
+  const body = await drawn(
+    context,
+    path,
+    chuggyToolLandingQueuesResponseBytesMax,
+    "this project's landing queues",
+  );
+  if (body.refused !== undefined) return body.refused;
+  const queues = readLandingQueuesBody(body.text);
+  if (queues === undefined)
+    return answered(
+      `the landing queues route answered HTTP ${String(body.status)} with a body that is not a project's landing queues as the contract answers them.`,
+      true,
+    );
+  const answer = readLandingQueuesAnswer(queues);
+  return answer === undefined
+    ? answerTooLarge(
+        "the route's first queue is larger alone, so it cannot be answered",
       )
     : answered(answer);
 }
@@ -1939,13 +2002,21 @@ export const chuggyProjectTools = [
   {
     name: "read_ticket_landings",
     description:
-      "One ticket's landings, each a finalization of its work into its repository. Call it for how a ticket's work lands or why it has not. It answers the newest one answer holds, oldest first, `truncated` where it leaves older ones out. A ticket not yet at landing has none. Answers JSON. Each landing carries its `state`, such as Running, Held, AwaitingApproval, AwaitingMerge, Proposed (its pull request opened for a person to merge), Failed, Unavailable (it could not go through and escalated: as the newest, its ticket waits on a person; an older one stays after a resume) or Landed, its `cycle`, `attempts` and newest `attempt` where it made one: its `outcome`, its `failureKind` where it failed, such as MergeConflict or QueueChecksFailed (the merge queue removed its pull request twice for failed checks; its work went back to Work), and the `targetRef` it lands on. A Held landing carries `hold`, and an Unavailable one the `hold` it escalated from where one is recorded: its `kind`, what holds it, and `since`, when a hold of that kind began. `hold.removal`, recorded where its pull request left its base's merge queue, is `reason`, the forge's own word such as `manual`, `failed_checks` or `checks_timed_out`, and `actor`, the login removing it, where named. An AwaitingMerge landing carries `wait`: its `reason`, what the merge waits on (Blocked by the forge's rules, as where the queue will not take it yet; HeadMoved; or Queued, waiting its turn in the queue), and `checkedAt`, when the forge was last heard about its merge. A Landed one carries `landedCommit`. `proposal` is the pull request it opened, where it opened one: its `url`, its `headRef` and `baseRef`, its `status` as chuggy last read it, at opening and, where it merges it, at each merge reading, so a Proposed landing's is the one it opened with, its `mergeability`, and `mergeState`, the forge's own word for that, GitHub's `mergeable_state` such as `blocked`, `behind` or `dirty`. `conflict` is the paths its newest attempt conflicted on, `truncated` where they were cut.",
+      "One ticket's landings, each finalizing its work into its repository. Call it for how a ticket's work lands or why it has not. It answers the newest one answer holds, oldest first, `truncated` where it leaves older ones out; a ticket not yet at landing has none. Answers JSON. Each landing carries its `state`, such as Proposed (its pull request opened for a person to merge) or Unavailable (it could not go through and escalated: as the newest, its ticket waits on a person; an older one stays after a resume), its `cycle`, `attempts` and newest `attempt` where it made one: its `outcome`, `targetRef` and `failureKind` where it failed, such as MergeConflict, QueueChecksFailed (the merge queue removed its pull request twice for failed checks; its work went back to Work) or RecheckRequired, with `recheck` unless recorded before re-checks kept one: its `reason`, TargetMoved (the target moved past the accepted commit), StackTreeDiffers (the merge's tree is not its stack's) or MergedTreeDiffers (its merged pull request left a tree its work was not checked on), and `baseRef`, the base checked against, where present. A Held landing carries `hold`, and an Unavailable one the `hold` it escalated from where one is recorded: its `kind`, what holds it, and `since`, when a hold of that kind began. `hold.removal`, where its pull request left the merge queue, is the forge's `reason`, such as `manual`, and the `actor` removing it, where named. An AwaitingMerge landing carries `wait`: its `reason` (Blocked by the forge's rules, as where the queue will not take it yet; HeadMoved; or Queued, waiting its turn) and `checkedAt`, when the forge was last heard about its merge. A Landed one carries `landedCommit`. `proposal` is the pull request it opened, where it did: its `url`, `headRef`, `baseRef`, its `status` as chuggy last read it, so a Proposed landing's is the one it opened with, its `mergeability`, and `mergeState`, GitHub's `mergeable_state`. `conflict` is the paths its newest attempt conflicted on, `truncated` where they were cut.",
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
       readTicketLandings(
         context,
         projectPath(context, "ticketLandings", { ticket: args.ticket }),
       ),
+  },
+  {
+    name: "read_landing_queues",
+    description:
+      "This project's landing queues, one for each reference a Serialized or Stacked ticket lands on. Call it for why a ticket's landing waits on another ticket's. Answers JSON. Each queue carries its `repository` and its `target`, a queue naming no `target` being its tickets' that name none, which is a different queue from one naming the default branch. Its `holder` is the one ticket that may land on that reference now, and `waiting` the tickets ranked behind it, in rank order, none of which lands there before the holder stops holding it. A ticket alone in a queue is its holder and waits on nobody. It answers the route's first whole queues one answer holds, in the route's order, by repository and then target, `truncated` where it leaves later ones out or the route left tickets out.",
+    shape: () => ({}),
+    call: (context) =>
+      readLandingQueues(context, projectPath(context, "landingQueues")),
   },
   {
     name: "read_lead",
