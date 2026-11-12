@@ -630,13 +630,17 @@ const poolHeldSessionWire = {
  * A pool-held session `launch` started against a plane answering its task and
  * facts, in a directory of its own: one that asked that plane for both under
  * the envelope's bearer and stopped at the credential file it names, which is
- * missing, before any runtime opened.
+ * missing, before any runtime opened. The task answered is `answer`.
  */
-async function poolHeldSessionLaunched(prefix, launch) {
+async function poolHeldSessionLaunched(
+  prefix,
+  launch,
+  answer = poolHeldSessionAnswer,
+) {
   const plane = await servedPlane(
     (route) =>
       route === "task"
-        ? { status: 200, body: poolHeldSessionAnswer }
+        ? { status: 200, body: answer }
         : { status: 200, body: facts },
     poolHeldSessionWire,
   );
@@ -730,6 +734,35 @@ test("a chat supervisor's session reads its envelope off its channel and runs it
     );
     return { ran, providerCredentialFile };
   });
+});
+
+/**
+ * Catches a pod that refuses a session's task for naming no idle bound, where
+ * the plane leaves `idleMs` out for a session with no idle limit: refused, it
+ * would never ask for the session's facts.
+ */
+test("a pool-held session whose task names no idle bound runs that session", async () => {
+  const bounds = Object.fromEntries(
+    Object.entries(poolHeldSessionAnswer.bounds).filter(
+      ([name]) => name !== "idleMs",
+    ),
+  );
+  await poolHeldSessionLaunched(
+    "chuggy-pool-session-idle-",
+    async (url, root) => {
+      const providerCredentialFile = join(root, "claude-code");
+      const ran = await launched({
+        [workerTaskVariable]: JSON.stringify({
+          ...envelope,
+          callbackUrl: url,
+          workspace: root,
+          providerCredentialFile,
+        }),
+      });
+      return { ran, providerCredentialFile };
+    },
+    { ...poolHeldSessionAnswer, bounds },
+  );
 });
 
 test("a chat supervisor's session whose channel carries no envelope asks nothing of any plane", async () => {

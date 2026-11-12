@@ -46,6 +46,7 @@ export const pushed = workTaskDocumentSchema.strict().parse({
     filesystem: "WriteWorkspace",
     mayCompleteTask: false,
   },
+  credentialsListed: ["forge", "registry"],
   worker: {
     mode: { type: "SingleAgent", agent: "Claude", arguments: [] },
     setup: [],
