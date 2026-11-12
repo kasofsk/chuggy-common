@@ -31,6 +31,7 @@ import {
   workerContractCredentialOutcome,
   workerContractHeader,
   workerContractRelease,
+  workerContractRunCredential,
 } from "@chuggy/worker-contract/workerContract";
 
 import { drawnSecrets, drawnText, seeded } from "./credentialText.fixture.mjs";
@@ -113,6 +114,7 @@ function harness(options = {}) {
       clearInterval: () => undefined,
       warn: () => undefined,
       now: options.now ?? (() => observedAtMs),
+      credential: options.credential,
     },
   );
   return { recorder, calls, tick: () => ticked() };
@@ -1744,16 +1746,19 @@ test("a run ended rate-limited carries the limit that stopped it", async () => {
   });
 });
 
+/** A limit whose reset names neither a window nor a time the contract takes. */
+const limitRejectedBare = {
+  type: "rate_limit_event",
+  rate_limit_info: {
+    status: "rejected",
+    resetsAt: 0.5,
+    rateLimitType: "seven_day_opus",
+  },
+};
+
 test("a limit whose reset the contract takes no field of is left out of the end", async () => {
   const { recorder, calls } = harness();
-  framed(recorder, {
-    type: "rate_limit_event",
-    rate_limit_info: {
-      status: "rejected",
-      resetsAt: 0.5,
-      rateLimitType: "seven_day_opus",
-    },
-  });
+  framed(recorder, limitRejectedBare);
 
   assert.deepEqual(await postedEnded(recorder, calls), {
     evidence: "RunRateLimited",
@@ -1768,4 +1773,158 @@ test("a run ended any other way carries no limit, whatever it saw", async () => 
   assert.deepEqual(await postedEnded(recorder, calls, runPushFailed), {
     evidence: "RunPushFailed",
   });
+});
+
+/** The name a run is told its credential has, as a runner with credential sets tells it. */
+const runCredentialName = "work-2";
+
+/** Releases of a plane against the one that takes a run's credential: the first, a later, an earlier, and none named. */
+const runCredentialReleases = {
+  at: `${workerContractRunCredential.major}.${workerContractRunCredential.minor}.0`,
+  later: `${workerContractRunCredential.major}.${workerContractRunCredential.minor + 1}.0`,
+  earlier: `${workerContractRunCredential.major}.${workerContractRunCredential.minor - 1}.0`,
+  none: undefined,
+};
+
+/**
+ * What a recorder told `credential`, answered at `release`, posts once the
+ * plane has answered it: `post` reads the body from the recorder and its calls.
+ */
+async function runCredentialPosted(release, credential, events, post) {
+  const { recorder, calls } = harness({ release, credential });
+  await recorder.configuration(Buffer.from("{}"));
+  for (const event of events) framed(recorder, event);
+  recorder.observed(processResult({ num_turns: 1 }));
+  return post(recorder, calls);
+}
+
+/**
+ * Catches a credential named to a plane whose strict schema refuses it, which
+ * loses a run's totals, and a credential not named where it is taken, which
+ * keeps one credential's usage under another's name.
+ */
+test("a run's totals name its credential beside its usage, only to a plane that takes it", async () => {
+  for (const [release, credential, events, named] of [
+    ["at", runCredentialName, [limitRejected], true],
+    ["later", runCredentialName, [limitRejected], true],
+    ["earlier", runCredentialName, [limitRejected], false],
+    ["none", runCredentialName, [limitRejected], false],
+    ["at", runCredentialName, [], false],
+    ["at", undefined, [limitRejected], false],
+    ["later", undefined, [limitRejected], false],
+    ["earlier", undefined, [limitRejected], false],
+  ]) {
+    const case_ = JSON.stringify({ release, credential, events, named });
+    const answered = runCredentialReleases[release];
+    const posted = await runCredentialPosted(
+      answered,
+      credential,
+      events,
+      postedTotals,
+    );
+    const today = await runCredentialPosted(
+      answered,
+      undefined,
+      events,
+      postedTotals,
+    );
+    assert.ok(workerRunTotalsSchema.safeParse(posted).success, case_);
+    assert.deepEqual(
+      posted,
+      named ? { ...today, credential: runCredentialName } : today,
+      case_,
+    );
+    assert.equal(Object.hasOwn(posted, "credential"), named, case_);
+  }
+});
+
+/**
+ * Catches a limit naming its credential to a plane that refuses it, which
+ * leaves the run's end unreported, and a limit sent beside another label.
+ */
+test("a rate-limited end names its credential inside its limit, only to a plane that takes it", async () => {
+  const resetsAt = limitResetsAtSecs;
+  for (const [release, credential, event, step, limit] of [
+    [
+      "at",
+      runCredentialName,
+      limitRejected,
+      undefined,
+      { window: "five_hour", resetsAt, credential: runCredentialName },
+    ],
+    [
+      "later",
+      runCredentialName,
+      limitRejected,
+      undefined,
+      { window: "five_hour", resetsAt, credential: runCredentialName },
+    ],
+    [
+      "at",
+      runCredentialName,
+      limitRejectedBare,
+      undefined,
+      { credential: runCredentialName },
+    ],
+    [
+      "earlier",
+      runCredentialName,
+      limitRejected,
+      undefined,
+      { window: "five_hour", resetsAt },
+    ],
+    [
+      "none",
+      runCredentialName,
+      limitRejected,
+      undefined,
+      { window: "five_hour", resetsAt },
+    ],
+    ["earlier", runCredentialName, limitRejectedBare, undefined, undefined],
+    ["none", runCredentialName, limitRejectedBare, undefined, undefined],
+    ["at", runCredentialName, limitRejected, runPushFailed, undefined],
+    ["at", undefined, limitRejectedBare, undefined, undefined],
+    [
+      "later",
+      undefined,
+      limitRejected,
+      undefined,
+      { window: "five_hour", resetsAt },
+    ],
+  ]) {
+    const case_ = JSON.stringify({ release, credential, event, step });
+    const posted = await runCredentialPosted(
+      runCredentialReleases[release],
+      credential,
+      [event],
+      (recorder, calls) => postedEnded(recorder, calls, step),
+    );
+    const evidence = step ?? "RunRateLimited";
+    assert.deepEqual(
+      posted,
+      limit === undefined ? { evidence } : { evidence, limit },
+      case_,
+    );
+  }
+});
+
+/** Catches a resumed run that loses the name its readings were read of. */
+test("a resumed run goes on naming the credential it was told", async () => {
+  const { recorder, calls } = harness({
+    release: runCredentialReleases.at,
+    credential: runCredentialName,
+  });
+  await recorder.configuration(Buffer.from("{}"));
+  framed(recorder, limitRejected);
+  recorder.resumed();
+  framed(recorder, limitRejected);
+  recorder.observed(processResult({ num_turns: 1 }));
+
+  const totals = await postedTotals(recorder, calls);
+  assert.deepEqual(totals.usage, limitReadings);
+  assert.equal(totals.credential, runCredentialName);
+  assert.equal(
+    (await postedEnded(recorder, calls)).limit.credential,
+    runCredentialName,
+  );
 });

@@ -40,6 +40,7 @@ import { createHash } from "node:crypto";
 import {
   workerContractCredentialOutcome,
   workerContractRunContext,
+  workerContractRunCredential,
 } from "@chuggy/worker-contract/workerContract";
 import {
   nativeHttpPageItemsMax,
@@ -529,16 +530,30 @@ export function runUsage(readings) {
 
 /**
  * The limit a run's end carries from the reset its sightings hold, each of
- * its fields where the contract takes it, or nothing where it takes neither.
+ * its fields where the contract takes it, and the credential it stopped where
+ * one is named, or nothing where it has none of them.
  */
-export function runLimit(reset) {
+export function runLimit(reset, credential) {
   const resetsAt = rateLimitInstantSecs(reset?.resetsAtSecs);
   const window = runUsageWindows.find((named) => named === reset?.window);
-  if (resetsAt === undefined && window === undefined) return undefined;
+  if (
+    resetsAt === undefined &&
+    window === undefined &&
+    credential === undefined
+  )
+    return undefined;
   return {
     ...(window === undefined ? {} : { window }),
     ...(resetsAt === undefined ? {} : { resetsAt }),
+    ...(credential === undefined ? {} : { credential }),
   };
+}
+
+/** The credential the run was told it runs on, named only to a plane whose answers name the version that takes it. */
+function runCredentialNamed(state) {
+  return versionReaches(state.version, workerContractRunCredential)
+    ? state.credential
+    : undefined;
 }
 
 /** What a run's end posts: its label, and beside `RunRateLimited` the limit that stopped it. */
@@ -551,15 +566,21 @@ function runEndedBody(state, step) {
     state.version,
   );
   const limit =
-    evidence === runRateLimited ? runLimit(state.sightings.reset) : undefined;
+    evidence === runRateLimited
+      ? runLimit(state.sightings.reset, runCredentialNamed(state))
+      : undefined;
   return limit === undefined ? { evidence } : { evidence, limit };
 }
 
-/** What a run's totals post: what it spent, and the account's usage where any was read. */
+/** What a run's totals post: what it spent, and the account's usage and the credential it was read of where any was read. */
 function runTotalsBody(state) {
   const totals = runTotalsSoFar(state);
   const usage = runUsage(state.readings);
-  return usage === undefined ? totals : { ...totals, usage };
+  if (usage === undefined) return totals;
+  const credential = runCredentialNamed(state);
+  return credential === undefined
+    ? { ...totals, usage }
+    : { ...totals, usage, credential };
 }
 
 function transcriptTruncationLine(batches) {
@@ -574,9 +595,10 @@ function runHeldLine({ until, window }) {
   return JSON.stringify({ type: "chuggy_run_held", until, window });
 }
 
-function evidenceState(scrub) {
+function evidenceState(scrub, credential) {
   return {
     scrub,
+    credential,
     lines: [],
     bufferedBytes: 0,
     sealed: [],
@@ -839,7 +861,8 @@ function evidenceUploads(state, call, warn, drain, done) {
 /**
  * The worker's evidence client: it buffers the stream, ships it on the flush
  * interval and posts the run's totals before anything terminalizes the
- * execution. `now` is the clock a reading is dated by.
+ * execution. `now` is the clock a reading is dated by, and `credential` the
+ * name of the credential the run was told it runs on, if it was told one.
  */
 export function runEvidenceRecorder(task, bearer, scrub, services = {}) {
   const {
@@ -848,8 +871,9 @@ export function runEvidenceRecorder(task, bearer, scrub, services = {}) {
     clearInterval: unschedule = globalThis.clearInterval,
     warn = (text) => process.stderr.write(text),
     now = Date.now,
+    credential,
   } = services;
-  const state = evidenceState(scrub);
+  const state = evidenceState(scrub, credential);
   // Every answer names the plane's release, and the latest named is what the
   // optional evidence is offered to.
   const call = async (path, init) => {

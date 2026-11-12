@@ -78,6 +78,7 @@ import {
   claudeControlRefusal,
   claudeControlWaitMs,
 } from "./claudeControl.mjs";
+import { agentCredentialNameVariable } from "./agentCredentialSet.mjs";
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import { codexAgent } from "./codex.mjs";
 import {
@@ -6125,6 +6126,38 @@ async function documentCarried({ root, plane, providerCredentialFile }) {
     [workerWorkspaceVariable]: join(root, "workspace"),
   };
 }
+
+/**
+ * Catches the name a runner told the run left off what the run posts, which
+ * keeps every credential's usage of an agent under one name. Launched for real
+ * from a task document, so the run is not held.
+ */
+test(
+  "a launched run told its credential's name names it beside its usage and its limit",
+  { timeout: 60_000 },
+  async (t) => {
+    await inCheckout(async (checkout) => {
+      await targetPushed(checkout);
+
+      const { ran, plane } = await launchedStandIn(
+        t,
+        checkout,
+        [limitRun()],
+        async (paths) => ({
+          ...(await documentCarried(paths)),
+          [agentCredentialNameVariable]: "work-2",
+        }),
+      );
+
+      assert.equal(ran.code, 1, ran.stderr);
+      const [totals] = planeBodies(plane, "runTotals");
+      assert.equal(totals?.credential, "work-2");
+      assert.ok(totals?.usage?.five_hour !== undefined);
+      const [{ limit }] = planeBodies(plane, "runEnded");
+      assert.equal(limit?.credential, "work-2");
+    });
+  },
+);
 
 /**
  * A pushed pod's document names no time at all, so nothing can say a wait fits.
