@@ -8181,6 +8181,56 @@ test("an end merge that conflicts resumes the agent's conversation, naming the t
   });
 });
 
+/** A verdict frame that passes, having spent `turns` turns and `input` input tokens to `costUsd` in all. */
+function spentFrame(turns, input, costUsd) {
+  return {
+    ...verdictFrame(),
+    num_turns: turns,
+    total_cost_usd: costUsd,
+    usage: { input_tokens: input, output_tokens: turns },
+  };
+}
+
+/** Catches a resumed turn's result replacing the run's totals rather than adding to them. */
+test("an end merge that conflicts reports the totals of its first turn and the resumed one", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+
+    const { failure, plane } = await standInAttempt(t, checkout, [
+      { ...conflictingRun(checkout), frames: [spentFrame(5, 500, 1)] },
+      { work: readmeResolved, frames: [spentFrame(1, 100, 1.25)] },
+    ]);
+
+    passStands(failure, plane);
+    const [totals] = planeBodies(plane, "runTotals");
+    assert.equal(totals.turns, 6);
+    assert.equal(totals.tokensInput, 600);
+    assert.equal(totals.tokensOutput, 6);
+    assert.equal(totals.costUsdMicros, 1_250_000);
+  });
+});
+
+/** Catches a run carrying only the turn before its last resumed one. */
+test("an end conflict resolved on a later nudge reports the totals of every turn", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+
+    const { failure, plane, runtime } = await standInAttempt(t, checkout, [
+      { ...conflictingRun(checkout), frames: [spentFrame(5, 500, 1)] },
+      { frames: [spentFrame(2, 20, 1.5)] },
+      { work: readmeResolved, frames: [spentFrame(1, 100, 1.75)] },
+    ]);
+
+    passStands(failure, plane);
+    assert.equal((await runtime.starts()).length, 3);
+    const [totals] = planeBodies(plane, "runTotals");
+    assert.equal(totals.turns, 8);
+    assert.equal(totals.tokensInput, 620);
+    assert.equal(totals.tokensOutput, 8);
+    assert.equal(totals.costUsdMicros, 1_750_000);
+  });
+});
+
 /** That an attempt ended lost, reported no verdict, and pushed nothing at all. */
 async function lostPushingNothing(failure, plane, remote) {
   assert.ok(failure instanceof Error, String(failure));

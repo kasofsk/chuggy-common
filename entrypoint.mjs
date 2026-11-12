@@ -759,7 +759,8 @@ async function runAgentTurns(context, task, turns, first) {
 /**
  * What a finished run hands on: its account, and `resume`, which runs its
  * conversation on told `prompt` and answers what that finished with, where its
- * runtime resumes and named the conversation.
+ * runtime resumes and named the conversation. A resumed turn counts on top of
+ * what the run had spent, as one resumed after a hold does.
  */
 function runAgentResumable(context, task, turns, { finished, session }) {
   const { resumeInvocation } = context.agent;
@@ -768,6 +769,7 @@ function runAgentResumable(context, task, turns, { finished, session }) {
   return {
     ...finished,
     resume: async (prompt) => {
+      context.evidence.resumed();
       context.keepAgain();
       const resumed = await runAgentTurns(context, task, turns, {
         argv: resumeInvocation(task, conversation),
