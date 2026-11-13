@@ -3478,7 +3478,7 @@ test("release_draft says releasing starts no work, and who starts it", () => {
   );
   assert.match(
     description,
-    /read_lead answers whether a lead is dispatching: one that stands `paused`, or none at all, dispatches nothing, and the ticket then waits for a dispatch, which dispatch_ticket submits on your owner's word\./,
+    /read_lead answers whether a lead will dispatch it: none does where it answers a lead standing `paused`, or no lead for a reason other than `NotNeeded` or `AwaitingSelector`, and the ticket then waits for a dispatch, which dispatch_ticket submits on your owner's word\./,
   );
 });
 
@@ -3495,7 +3495,7 @@ test("read_lead and dispatch_ticket say a standing lead may dispatch nothing", (
   );
   assert.match(
     described("dispatch_ticket"),
-    /starts its work now, whether or not a lead is dispatching\. Their word can be an instruction that reaches tickets not yet ready/,
+    /starts its work now, whether or not a lead is dispatching\./,
   );
 });
 
