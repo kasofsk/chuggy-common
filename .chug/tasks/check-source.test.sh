@@ -131,20 +131,26 @@ seal
 check "a missing precondition exits 2, not 0" 2 "$RC" "would not run against the locked contract release"
 
 # A commit's `git commit -a` hands its hook an absolute GIT_INDEX_FILE, and a
-# suite's scratch repository would write through it into this one.
+# suite's scratch repository would write through it into this one. A
+# `git -c` commit hands it the invoker's configuration, whose `core.hooksPath`
+# would override the hooks a suite's scratch repository sets.
 fixture
 {
 	printf '%s\n' 'import assert from "node:assert/strict";'
 	printf '%s\n' 'import process from "node:process";'
 	printf '%s\n' 'import { test } from "node:test";'
 	printf '%s\n' ''
-	printf '%s\n' 'test("no suite inherits the index of the repository it checks", () => {'
+	printf '%s\n' 'test("no suite inherits the index or the configuration of the commit it checks", () => {'
 	printf '%s\n' '  assert.equal(process.env.GIT_INDEX_FILE, undefined);'
+	printf '%s\n' '  assert.equal(process.env.GIT_CONFIG_PARAMETERS, undefined);'
+	printf '%s\n' '  assert.equal(process.env.GIT_CONFIG_COUNT, undefined);'
 	printf '%s\n' '});'
 } > "$R/index.test.mjs"
 git -C "$R" add -A
-run_in "$R" GIT_INDEX_FILE="$R/.git/index"
-check "a suite runs without the hook's index" 0 "$RC" "unit ran 2 suite(s)"
+run_in "$R" GIT_INDEX_FILE="$R/.git/index" \
+	GIT_CONFIG_PARAMETERS="'core.hookspath'='.githooks'" GIT_CONFIG_COUNT=1 \
+	GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=.githooks
+check "a suite runs without the hook's index or configuration" 0 "$RC" "unit ran 2 suite(s)"
 
 # --- The lint, the format and the suites ---------------------------------------
 
