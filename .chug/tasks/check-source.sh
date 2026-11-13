@@ -15,7 +15,8 @@
 # A SUITE BUILDS ITS OWN REPOSITORIES, so it is run without the variables git
 # hands a hook to select this one. Inherited, `GIT_INDEX_FILE` from
 # `git commit -a` names this checkout's index by absolute path, and a suite's
-# `git add` in a scratch repository would write into it.
+# `git add` in a scratch repository would write into it; `GIT_CONFIG_PARAMETERS`
+# from `git -c core.hooksPath=…` overrides the hooks a suite gives its own.
 #
 # Local binaries win over anything on PATH: a verdict that depends on which
 # version happens to be installed is not a verdict. Each missing one is a
@@ -96,6 +97,7 @@ unset IFS
 set +f
 
 stage "  unit  " env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
+	-u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT \
 	node --test --test-reporter=dot "$@"
 echo "check-source: unit ran $# suite(s) against $(sed 's/^check-contract: installed //; s/ from .*//' "$work/contract")"
 
