@@ -3474,11 +3474,28 @@ test("release_draft says releasing starts no work, and who starts it", () => {
   );
   assert.match(
     description,
-    /Releasing makes the ticket Pending and starts no work: the project's lead dispatches it when its dependencies are Done, or a person who may dispatch does\./,
+    /Releasing makes the ticket Pending and starts no work: once its dependencies are Done it runs when it is dispatched, by the project's lead or by someone who may dispatch\./,
   );
   assert.match(
     description,
-    /A Pending ticket with no open dependencies waits on the lead's dispatch decision or on a dispatch by someone who may, and read_lead answers whether a lead is active and, where none, why\./,
+    /read_lead answers whether a lead is dispatching: one that stands `paused`, or none at all, dispatches nothing, and the ticket then waits for a dispatch, which dispatch_ticket submits on your owner's word\./,
+  );
+});
+
+/**
+ * A paused selector keeps its lead session, so a lead that reads `Open` may
+ * dispatch nothing. The tools that say who starts a ticket say so.
+ */
+test("read_lead and dispatch_ticket say a standing lead may dispatch nothing", () => {
+  const described = (tool) =>
+    chuggyProjectTools.find(({ name }) => name === tool).description;
+  assert.match(
+    described("read_lead"),
+    /A lead that stands with `paused` true dispatches nothing, though its session may read `Open`/,
+  );
+  assert.match(
+    described("dispatch_ticket"),
+    /starts its work now, whether or not a lead is dispatching\. Their word can be an instruction that reaches tickets not yet ready/,
   );
 });
 
