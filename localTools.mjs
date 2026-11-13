@@ -92,7 +92,7 @@ To file a ticket:
 6. read_draft: the draft as filed.
 7. release_draft.
 8. read_operation: every command is submitted, and this is how its outcome is read.
-Releasing starts nothing: once its dependencies are Done the ticket waits Pending until it is dispatched, by the project's lead unless read_lead answers a lead standing \`paused\` or no lead for a reason other than \`NotNeeded\` or \`AwaitingSelector\`, and there by dispatch_ticket on the word of the person you act for, or by another person who may dispatch.
+Releasing starts nothing: once its dependencies are Done the ticket waits Pending until it is dispatched, by the project's lead unless read_lead answers a lead standing with \`held\` or a \`refusal\`, or no lead for a reason other than \`NotNeeded\` or \`AwaitingSelector\`, and there by dispatch_ticket on the word of the person you act for, or by another person who may dispatch.
 To change the lead's prompt: read_docs the page "Writing a project's lead prompt", then read_lead_settings and update_lead_settings.
 To move the lead onto the subsidized lead: read_docs the page "The subsidized lead", then update_placement.`;
 }

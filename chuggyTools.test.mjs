@@ -3478,20 +3478,21 @@ test("release_draft says releasing starts no work, and who starts it", () => {
   );
   assert.match(
     description,
-    /read_lead answers whether a lead will dispatch it: none does where it answers a lead standing `paused`, or no lead for a reason other than `NotNeeded` or `AwaitingSelector`, and the ticket then waits for a dispatch, which dispatch_ticket submits on your owner's word\./,
+    /read_lead answers whether a lead will dispatch it: none does where it answers a lead standing with `held` or a `refusal`, or no lead for a reason other than `NotNeeded` or `AwaitingSelector`, and the ticket then waits for a dispatch, which dispatch_ticket submits on your owner's word\./,
   );
 });
 
 /**
- * A paused selector keeps its lead session, so a lead that reads `Open` may
- * dispatch nothing. The tools that say who starts a ticket say so.
+ * A paused selector, or one that lost its grant, keeps its lead session, so a
+ * lead that reads `Open` may dispatch nothing. The tools that say who starts a
+ * ticket say so.
  */
 test("read_lead and dispatch_ticket say a standing lead may dispatch nothing", () => {
   const described = (tool) =>
     chuggyProjectTools.find(({ name }) => name === tool).description;
   assert.match(
     described("read_lead"),
-    /A lead that stands with `paused` true dispatches nothing, though its session may read `Open`/,
+    /A lead that stands dispatches nothing where it carries `held` or a `refusal`, though its session may read `Open`: `held\.reason` is `Paused`, given below, or `SelectorNotGranted`, where the site's selector may not read the project and so never sweeps it, and a `refusal` is one of the refusals below\./,
   );
   assert.match(
     described("dispatch_ticket"),

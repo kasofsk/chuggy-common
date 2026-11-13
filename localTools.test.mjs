@@ -239,7 +239,7 @@ test("the server's instructions name the filing recipe's tools in order, then wh
   assert.match(instructions, /^2\. list_repositories: [^\n]*`fileable`/mu);
   assert.match(
     instructions,
-    /Releasing starts nothing: [^.]*by the project's lead unless read_lead answers a lead standing `paused` or no lead for a reason other than `NotNeeded` or `AwaitingSelector`, and there by dispatch_ticket[^.]*\.$/mu,
+    /Releasing starts nothing: [^.]*by the project's lead unless read_lead answers a lead standing with `held` or a `refusal`, or no lead for a reason other than `NotNeeded` or `AwaitingSelector`, and there by dispatch_ticket[^.]*\.$/mu,
   );
   assert.match(
     instructions,
