@@ -110,9 +110,10 @@ export function jobCapabilitiesWithheld(selector) {
 }
 
 /**
- * The hooks a backend wires from the runner's selector: what each poll
+ * The hooks a job's backend wires from the runner's selector: what each poll
  * withholds and names, and what each answer's outcomes and pauses tell it;
- * each a no-op, naming nothing, where there is no selector.
+ * each a no-op, naming nothing, where there is no selector. A chat host's
+ * are `chatHostCredentialSeams`.
  *
  * @param {import("./agentCredentialSet.mjs").AgentCredentialSelector | undefined} selector
  * @returns {Required<Pick<import("./poolLoop.mjs").WorkerPoolBackend, "credentialOutcomesTaken" | "credentialPausesTaken" | "capabilitiesWithheld" | "credentialsNamed">>}

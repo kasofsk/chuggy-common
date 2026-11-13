@@ -38,7 +38,9 @@
  * supervisor is told that owner, which it reads the credential as. Where the
  * runner gives a selector, each Claude credential of its set is mounted so,
  * at a directory of its name, and each session's `Start` names the one the
- * selector chose for it, which the supervisor runs it on.
+ * selector chose for it, which the supervisor runs it on. Each poll names
+ * the selector's Claude credentials a session would run on, and the
+ * selector passes over those each answer says are paused.
  *
  * THE CREDENTIAL'S DIRECTORY IS BOUND, NOT ITS FILE. A file bound alone stays
  * the file that was there when the container started, so a credential
@@ -126,7 +128,7 @@ import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
  * @property {string} [credentialFile] the Claude credential's file on this machine, whose directory the supervisor is given whole, and which each session is handed under whatever slot its task names; required where no selector is given
  * @property {{uid: number, gid: number}} credentialOwner who owns that file, or every file of the selector's Claude set, as the engine shows it inside a container, which the supervisor reads it as and no session's user may be
  * @property {ClaudeCredentialSetting} [claudeCredential] the kind of credential `credentialFile` is
- * @property {import("./agentCredentialSet.mjs").AgentCredentialSelector} [credentials] the runner's selector, in place of the two above: the supervisor is given the directory of each file of its Claude set, and each session runs on the one it chooses
+ * @property {import("./agentCredentialSet.mjs").AgentCredentialSelector} [credentials] the runner's selector, in place of the two above: the supervisor is given the directory of each file of its Claude set, each session runs on the one it chooses, and each poll names those it would choose from and each answer's pauses are handed to it
  * @property {string} [repositories] the site's map of the repositories a session may reach, as `CHUG_WORKER_REPOSITORIES` carries it
  * @property {Readonly<Record<string, string>>} [variables] the supervisor's own counts, by the `CHUG_CHAT_` name of each
  *
@@ -423,6 +425,27 @@ export function chatHostCredentialChosen(selector) {
     };
   const { agent, type, name } = credential;
   return { credential: { agent, type, name } };
+}
+
+/**
+ * The seams a host's backend takes from its runner's selector: the
+ * credential each session's `Start` names, and the credentials each poll
+ * names, Claude's alone, which an answer's pauses then replace the
+ * selector's of; none where there is no selector.
+ *
+ * @param {import("./agentCredentialSet.mjs").AgentCredentialSelector | undefined} selector
+ * @returns {Pick<import("./chatHostBackend.mjs").ChatHostBackendSeams, "credentialChosen" | "credentialsNamed" | "credentialPausesTaken">}
+ */
+export function chatHostCredentialSeams(selector) {
+  if (selector === undefined) return {};
+  return {
+    credentialChosen: () => chatHostCredentialChosen(selector),
+    credentialsNamed: () => {
+      const names = selector.named()[jobClaudeAgent];
+      return names === undefined ? {} : { [jobClaudeAgent]: names };
+    },
+    credentialPausesTaken: (pauses) => selector.pausesTaken(pauses),
+  };
 }
 
 /** The supervisor's environment, refused wherever the supervisor would refuse it. */
@@ -1038,7 +1061,6 @@ export function checkedChatHostSettings(settings, engineName) {
  */
 export function chatHost(credentials, settings, seams) {
   const checked = checkedChatHostSettings(settings, seams.site.engine);
-  const selector = checked.places.credentials;
   const backend = chatHostBackend(
     {
       outputBytesMax: checked.outputBytesMax,
@@ -1049,9 +1071,7 @@ export function chatHost(credentials, settings, seams) {
     {
       log: seams.log,
       logFor: seams.logFor,
-      ...(selector === undefined
-        ? {}
-        : { credentialChosen: () => chatHostCredentialChosen(selector) }),
+      ...chatHostCredentialSeams(checked.places.credentials),
     },
   );
   const client = poolRunnerClient(

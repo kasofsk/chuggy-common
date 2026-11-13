@@ -30,11 +30,12 @@
  *
  * A POLL NAMES WHAT A JOB WOULD RUN ON, AND A PAUSED CREDENTIAL IS PASSED
  * OVER. Each poll names, per agent, the credentials its policy allows that
- * are not benched, and none of an agent with more than the plane reads. The
- * plane answers those its owner's thresholds pause, and each answer's pauses
- * replace the last's. A job runs on a credential neither benched nor paused,
- * else on the one free soonest. A pause withholds no capability, since the
- * plane is what holds a claim back.
+ * are not benched, and none of an agent with more than the plane reads; a
+ * chat host's names Claude's alone, which its sessions run on. The plane
+ * answers those its owner's thresholds pause, and each answer's pauses
+ * replace the last's. A job or a chat host's session runs on a credential
+ * neither benched nor paused, else on the one free soonest. A pause
+ * withholds no capability, since the plane is what holds a claim back.
  *
  * A WORKLOAD IS TOLD THE CREDENTIAL'S TYPE AND NAME, never its value: Claude's
  * kind in `claudeCredentialVariable`, Codex's type in

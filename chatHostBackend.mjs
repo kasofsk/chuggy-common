@@ -26,11 +26,12 @@
  * A `Start` IS NEVER LOGGED, NOR WRITTEN ANYWHERE BUT THE SUPERVISOR'S
  * INPUT: it carries the session's bearer. It names the credential the host's
  * selector chose for its session, where the host gives one, and a session it
- * chose none for is refused. What the supervisor writes on its
- * error stream is its log, and each line of it naming a session this host
- * started, as `chatSessionLabel` writes one, goes to that session's log;
- * every other line, one naming a session this host never started among them,
- * goes to the host's.
+ * chose none for is refused. Each poll then names the credentials the
+ * selector would choose from, and each answer's pauses are handed to it.
+ * What the supervisor writes on its error stream is its log, and each line
+ * of it naming a session this host started, as `chatSessionLabel` writes
+ * one, goes to that session's log; every other line, one naming a session
+ * this host never started among them, goes to the host's.
  */
 
 import {
@@ -73,6 +74,8 @@ import { poolSessionPhase } from "./poolSessionPlane.mjs";
  * @property {(line: string) => void} log the host's own log
  * @property {(assignment: string) => (line: string) => void} logFor the log of the session `assignment`
  * @property {() => {credential: import("@chuggy/worker-contract/chatHost").ChatHostCredential} | {refused: string}} [credentialChosen] the credential the next session runs on, as its `Start` names it, or why there is none; none, and a `Start` names none
+ * @property {WorkerPoolBackend["credentialsNamed"]} [credentialsNamed] the credentials a poll names now, those a session would run on; none, and a poll names none
+ * @property {WorkerPoolBackend["credentialPausesTaken"]} [credentialPausesTaken] takes an answer's pauses, which `credentialChosen` then passes over; none, and they are not taken
  *
  * @typedef {object} ChatHostSupervisor
  * @property {ChatSupervisorHandle} handle
@@ -599,5 +602,11 @@ export function chatHostBackend(settings, seams) {
         .map(([assignment]) => assignment),
     drain: () => chatHostDrained(state),
     closed: () => chatHostClosed(state),
+    ...(seams.credentialsNamed === undefined
+      ? {}
+      : { credentialsNamed: seams.credentialsNamed }),
+    ...(seams.credentialPausesTaken === undefined
+      ? {}
+      : { credentialPausesTaken: seams.credentialPausesTaken }),
   };
 }

@@ -23,7 +23,11 @@ import {
   workerContractHeader,
   workerContractRelease,
 } from "@chuggy/worker-contract/workerContract";
-import { workerRunnerPollWaitHeader } from "@chuggy/worker-contract/workerPool";
+import {
+  workerRunnerCredentialsHeader,
+  workerRunnerCredentialsOf,
+  workerRunnerPollWaitHeader,
+} from "@chuggy/worker-contract/workerPool";
 
 import {
   agentCredentialSelector,
@@ -266,6 +270,21 @@ function clockOf(sleeps, hasty, starting) {
   return { now, sleep };
 }
 
+/** What `hostOf`'s fakes record, each a list in the order it happened. */
+function hostSeenOf() {
+  return {
+    polls: [],
+    credentials: [],
+    ended: [],
+    execs: [],
+    started: [],
+    engines: [],
+    startedMs: [],
+    sleeps: [],
+    events: [],
+  };
+}
+
 /**
  * A chat host over fakes: `answers` is each poll's answer in turn, a poll
  * past them denied, and `present` the images the engine holds. A pull waits
@@ -290,16 +309,7 @@ async function hostOf(
 ) {
   const runtimeDir = await mkdtemp(join(tmpdir(), "chuggy-chat-host-"));
   t.after(() => rm(runtimeDir, { recursive: true, force: true }));
-  const seen = {
-    polls: [],
-    ended: [],
-    execs: [],
-    started: [],
-    engines: [],
-    startedMs: [],
-    sleeps: [],
-    events: [],
-  };
+  const seen = hostSeenOf();
   const logged = [];
   const supervisors = [];
   const invalidated = [];
@@ -350,7 +360,8 @@ async function hostOf(
  * A plane answering each poll with the next of `answers`, or what the next,
  * a function of the supervisors started and of the host's clock and status,
  * settles to, and denying the host past them; every settlement and
- * session's end is taken.
+ * session's end is taken, and the credentials each poll names are taken
+ * apart from it.
  */
 function planeOf(seen, answers, supervisors, host) {
   return async (input, init) => {
@@ -369,6 +380,9 @@ function planeOf(seen, answers, supervisors, host) {
       idleSecs: url.searchParams.get("idleSecs"),
       waitSecs: init.headers[workerRunnerPollWaitHeader],
     });
+    seen.credentials.push(
+      workerRunnerCredentialsOf(init.headers[workerRunnerCredentialsHeader]),
+    );
     let next = answers.shift();
     if (typeof next === "function")
       next = await next(supervisors, host.nowMs(), host.status);
@@ -1023,36 +1037,72 @@ test("a supervisor's container is refused a selector beside a file, one holding 
     );
 });
 
-/** Catches a host whose sessions all run on one credential of the set its runner rotates. */
-test("a host given a RoundRobin selector names each session's credential in its Start, in turn", async (t) => {
-  const run = await hostOf(t, {
-    answers: [
-      {},
-      { chatImage: one },
-      { chatImage: one, sessions: [sessionOf("a"), sessionOf("b")] },
-    ],
-    given: {
-      places: { ...selectorPlaces, credentials: selectorOf() },
-    },
-  });
-  assert.equal((await run.host.run()).passed, "Denied");
-
-  assert.deepEqual(
-    run.supervisors[0].frames
-      .filter(({ frame }) => frame === "Start")
-      .map(({ assignment, credential }) => [assignment, credential?.name]),
+/** Catches a host whose sessions all run on one credential of the set its runner rotates, or on one an answer says is paused while another is free. */
+test("a host given a RoundRobin selector names each session's credential in its Start, in turn, passing over one the answer offering it pauses", async (t) => {
+  const pausedUntil = Math.floor(Date.now() / 1_000) + 3_600;
+  for (const [credentialPauses, started] of [
     [
-      ["a", "team-a"],
-      ["b", "team-c"],
+      [],
+      [
+        ["a", "team-a"],
+        ["b", "team-c"],
+      ],
     ],
-  );
-  const files = JSON.parse(
-    run.seen.started[0].environment.CHUG_CHAT_CREDENTIALS,
-  ).map(({ name, file }) => [name, file]);
-  assert.deepEqual(files.slice(0, 2), [
-    ["team-a", "/var/run/chuggy/credentials/team-a/token"],
-    ["team-c", "/var/run/chuggy/credentials/team-c/token"],
-  ]);
+    [
+      [{ agent: "Claude", credential: "team-a", pausedUntil }],
+      [
+        ["a", "team-c"],
+        ["b", "team-c"],
+      ],
+    ],
+  ]) {
+    const run = await hostOf(t, {
+      answers: [
+        {},
+        { chatImage: one },
+        {
+          chatImage: one,
+          sessions: [sessionOf("a"), sessionOf("b")],
+          credentialPauses,
+        },
+      ],
+      given: {
+        places: { ...selectorPlaces, credentials: selectorOf() },
+      },
+    });
+    assert.equal((await run.host.run()).passed, "Denied");
+
+    assert.deepEqual(
+      run.supervisors[0].frames
+        .filter(({ frame }) => frame === "Start")
+        .map(({ assignment, credential }) => [assignment, credential?.name]),
+      started,
+    );
+    const files = JSON.parse(
+      run.seen.started[0].environment.CHUG_CHAT_CREDENTIALS,
+    ).map(({ name, file }) => [name, file]);
+    assert.deepEqual(files.slice(0, 2), [
+      ["team-a", "/var/run/chuggy/credentials/team-a/token"],
+      ["team-c", "/var/run/chuggy/credentials/team-c/token"],
+    ]);
+  }
+});
+
+/** Catches a host whose poll names no credential, so the plane cannot know what its sessions would run on. */
+test("a host given a selector names its Claude credentials on each poll, and one given none names none", async (t) => {
+  const run = await hostOf(t, {
+    answers: [{}],
+    given: { places: { ...selectorPlaces, credentials: selectorOf() } },
+  });
+  await run.host.run();
+  assert.ok(run.seen.credentials.length > 0);
+  for (const named of run.seen.credentials)
+    assert.deepEqual(named, { Claude: ["team-a", "team-c", "key-b"] });
+
+  const bare = await hostOf(t, { answers: [{}] });
+  await bare.host.run();
+  assert.ok(bare.seen.credentials.length > 0);
+  for (const named of bare.seen.credentials) assert.deepEqual(named, {});
 });
 
 /** Catches a supervisor started with no cap, or one that is not room for each session the host runs. */
