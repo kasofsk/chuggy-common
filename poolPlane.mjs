@@ -36,7 +36,9 @@
  * header `workerRunnerCredentialsOf` reads back as those names, since the
  * plane reads one it does not as naming none. An answer may name how the
  * credential stopped each job it stops, and which credentials the poll named
- * are paused, each passed on.
+ * are paused, each passed on. A member's chat host names its credentials the
+ * same way, and is passed on the pauses it is answered, though the plane
+ * answers it none yet.
  *
  * A runner's report of itself is posted under the token it is given, and is
  * taken only where the plane answers 204; the client keeps the version the

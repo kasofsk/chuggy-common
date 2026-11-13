@@ -20,7 +20,10 @@ import {
   agentCredentialSelector,
   agentCredentialSets,
 } from "./agentCredentialSet.mjs";
-import { chatHostCredentialChosen } from "./chatHost.mjs";
+import {
+  chatHostCredentialChosen,
+  chatHostCredentialSeams,
+} from "./chatHost.mjs";
 import {
   chatHostBackend,
   chatHostLogLineBytesMax,
@@ -675,6 +678,62 @@ test("under RoundRobin, two sessions' Starts name the two credentials, each by n
   const printed = JSON.stringify([host.frames(), host.logged]);
   assert.ok(!printed.includes("/secrets/"), printed);
   bearerUnlogged(host);
+});
+
+/** Catches a host whose poll names another agent's credentials, which no session of its runs on. */
+test("a host's poll names its selector's Claude credentials and no other agent's, and with no selector there are none", () => {
+  const selector = agentCredentialSelector(
+    agentCredentialSets({
+      claudeCredential: {
+        prefer: "PreferOAuth",
+        oauth: {
+          order: "InOrder",
+          credentials: [
+            { name: "team-a", tokenFile: "/secrets/a/token" },
+            { name: "team-c", tokenFile: "/secrets/c/token" },
+          ],
+        },
+      },
+      codexCredential: { authFile: "/secrets/codex/auth.json" },
+    }),
+  );
+  assert.ok(Object.hasOwn(selector.named(), "Codex"));
+
+  const { backend } = hostOf(settings, chatHostCredentialSeams(selector));
+  assert.deepEqual(backend.credentialsNamed?.(), {
+    Claude: ["team-a", "team-c"],
+  });
+
+  assert.deepEqual(chatHostCredentialSeams(undefined), {});
+  const bare = hostOf().backend;
+  assert.equal(bare.credentialsNamed, undefined);
+  assert.equal(bare.credentialPausesTaken, undefined);
+});
+
+/** Catches a host that starts a session on a paused credential while another is free, or keeps a pause an answer no longer names. */
+test("an answer's pauses steer the next Start off a paused credential, and an answer naming none clears them", async () => {
+  const host = await readyHost(
+    settings,
+    chatHostCredentialSeams(rotatingSelector("InOrder")),
+  );
+  const pausedUntil = Math.floor(Date.now() / 1_000) + 3_600;
+
+  host.backend.credentialPausesTaken?.([
+    { agent: "Claude", credential: "team-a", pausedUntil },
+  ]);
+  await host.backend.place(sessionOf("a"), "Session");
+  host.backend.credentialPausesTaken?.([]);
+  await host.backend.place(sessionOf("b"), "Session");
+
+  assert.deepEqual(
+    host
+      .frames()
+      .map(({ assignment, credential }) => [assignment, credential?.name]),
+    [
+      ["a", "team-c"],
+      ["b", "team-a"],
+    ],
+  );
 });
 
 /** Catches a host that starts a session on no credential where its selector chose none. */
