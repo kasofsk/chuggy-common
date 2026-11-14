@@ -138,40 +138,102 @@ function heldCredentialsBundleFilled(text, paths) {
 }
 
 /**
- * One bundle's files written to a directory of its own under `directory`,
- * every Secret content handed to `keep` before any is written, and the
- * variables it sets as `{credential, variable, value}`.
+ * Where one served credential is written under `directory`, before anything
+ * is: the secrets it holds, the directory a bundle's files go in, each file's
+ * path and content, and `held`, as `{credential, variable, value}` for each
+ * variable a job's shells are handed. A credential served again is placed at
+ * the same paths, so `held` changes only where what the plane serves does.
  */
-async function heldCredentialsBundleWritten(
-  { credential, files, variables },
-  { directory, keep, write, makeDirectory },
-) {
-  const bundleDirectory = heldCredentialFile(directory, credential);
+export function heldCredentialPlaced(served, directory) {
+  const { credential } = served;
+  const file = heldCredentialFile(directory, credential);
+  if (!Object.hasOwn(served, "files"))
+    return {
+      secrets: [served.secret],
+      files: [{ path: file, content: served.secret }],
+      held: [{ credential, variable: served.variable, value: file }],
+    };
   const paths = new Map(
-    files.map(({ file }) => [file, join(bundleDirectory, file)]),
+    served.files.map((each) => [each.file, join(file, each.file)]),
   );
-  for (const { content } of files)
-    if (content.kind === "Secret") keep(content.secret);
-  await makeDirectory(bundleDirectory, {
-    recursive: true,
-    mode: heldCredentialDirectoryMode,
-  });
-  for (const { file, content } of files)
-    await write(
-      paths.get(file),
-      content.kind === "Secret"
-        ? content.secret
-        : heldCredentialsBundleFilled(content.text, paths),
-      { mode: heldCredentialFileMode },
-    );
-  return variables.map((each) => ({
-    credential,
-    variable: each.variable,
-    value:
-      each.kind === "Path"
-        ? paths.get(each.file)
-        : heldCredentialsBundleFilled(each.value, paths),
-  }));
+  return {
+    secrets: served.files
+      .filter(({ content }) => content.kind === "Secret")
+      .map(({ content }) => content.secret),
+    bundleDirectory: file,
+    files: served.files.map(({ file: name, content }) => ({
+      path: paths.get(name),
+      content:
+        content.kind === "Secret"
+          ? content.secret
+          : heldCredentialsBundleFilled(content.text, paths),
+    })),
+    held: served.variables.map((each) => ({
+      credential,
+      variable: each.variable,
+      value:
+        each.kind === "Path"
+          ? paths.get(each.file)
+          : heldCredentialsBundleFilled(each.value, paths),
+    })),
+  };
+}
+
+/**
+ * What `heldCredentialPlaced` placed, every secret handed to `keep` before any
+ * file is written, and each file written privately through `write`, a bundle's
+ * into a directory `makeDirectory` makes.
+ */
+export async function heldCredentialPlacedWritten(
+  placed,
+  { keep, write = heldCredentialFileWritten, makeDirectory = mkdir },
+) {
+  for (const secret of placed.secrets) keep(secret);
+  if (placed.bundleDirectory !== undefined)
+    await makeDirectory(placed.bundleDirectory, {
+      recursive: true,
+      mode: heldCredentialDirectoryMode,
+    });
+  for (const { path, content } of placed.files)
+    await write(path, content, { mode: heldCredentialFileMode });
+}
+
+/**
+ * The plane's answer to an ask for the names `asked`: the version it answered
+ * under, each credential it serves, and each it names absent. `signal` aborts
+ * the ask and `transport` is handed to `request`.
+ */
+export async function heldCredentialsAsked({
+  task,
+  bearer,
+  asked,
+  request = workerRequest,
+  signal,
+  transport,
+}) {
+  const response = await request(
+    task,
+    bearer,
+    workerHeldCredentialsPath,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(
+        workerHeldCredentialsSchema.parse({ credentials: asked }),
+      ),
+      ...(signal === undefined ? {} : { signal }),
+    },
+    ...(transport === undefined ? [] : [transport]),
+  );
+  const version = answeredVersion(response);
+  return {
+    version,
+    ...heldCredentialsRead(
+      await response.json().catch(() => undefined),
+      asked,
+      version,
+    ),
+  };
 }
 
 /**
@@ -179,11 +241,12 @@ async function heldCredentialsBundleWritten(
  * `credentialFiles` does not, its secrets handed to `keep` and then written
  * under `directory`, and each it names absent handed to `warn` as one line:
  * `{credential, variable, value}` for each variable a job's shells are handed,
- * none where nothing is unmounted, which asks nothing. To a plane that takes
- * `RunCredentialAbsent`, any absence is instead a `RunStepFailure` under it,
- * naming the first, and nothing is written. `request`, `write` and
- * `makeDirectory` are the seams the plane, a file and a bundle's directory are
- * reached through.
+ * none where nothing is unmounted, which asks nothing. Each served with an
+ * expiry is handed to `expiring` as `{credential, expiresAtMs, held}`, `held`
+ * being its own variables. To a plane that takes `RunCredentialAbsent`, any
+ * absence is instead a `RunStepFailure` under it, naming the first, and
+ * nothing is written. `request`, `write` and `makeDirectory` are the seams the
+ * plane, a file and a bundle's directory are reached through.
  */
 export async function heldCredentials({
   task,
@@ -196,22 +259,16 @@ export async function heldCredentials({
   write = heldCredentialFileWritten,
   makeDirectory = mkdir,
   warn = (text) => process.stderr.write(text),
+  expiring = () => undefined,
 }) {
   const asked = heldCredentialsUnmounted(listed, credentialFiles);
   if (asked.length === 0) return [];
-  const response = await request(task, bearer, workerHeldCredentialsPath, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(
-      workerHeldCredentialsSchema.parse({ credentials: asked }),
-    ),
-  });
-  const version = answeredVersion(response);
-  const answered = heldCredentialsRead(
-    await response.json().catch(() => undefined),
+  const answered = await heldCredentialsAsked({
+    task,
+    bearer,
     asked,
-    version,
-  );
+    request,
+  });
   for (const { credential, reason } of answered.absent)
     warn(
       `the worker plane served no held credential ${credential}: ${reason}\n`,
@@ -219,7 +276,7 @@ export async function heldCredentials({
   const [absent] = answered.absent;
   if (
     absent !== undefined &&
-    versionReaches(version, workerContractRunCredentialAbsent)
+    versionReaches(answered.version, workerContractRunCredentialAbsent)
   )
     throw new RunStepFailure(
       runCredentialAbsent,
@@ -228,22 +285,15 @@ export async function heldCredentials({
     );
   const held = [];
   for (const served of answered.credentials) {
-    if (Object.hasOwn(served, "files")) {
-      held.push(
-        ...(await heldCredentialsBundleWritten(served, {
-          directory,
-          keep,
-          write,
-          makeDirectory,
-        })),
-      );
-      continue;
-    }
-    const { credential, variable, secret } = served;
-    keep(secret);
-    const file = heldCredentialFile(directory, credential);
-    await write(file, secret, { mode: heldCredentialFileMode });
-    held.push({ credential, variable, value: file });
+    const placed = heldCredentialPlaced(served, directory);
+    await heldCredentialPlacedWritten(placed, { keep, write, makeDirectory });
+    held.push(...placed.held);
+    if (served.expiresAtMs !== undefined)
+      expiring({
+        credential: served.credential,
+        expiresAtMs: served.expiresAtMs,
+        held: placed.held,
+      });
   }
   return held;
 }

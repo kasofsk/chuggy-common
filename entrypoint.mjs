@@ -147,6 +147,7 @@ import {
 import { hostJobVariable } from "./coreRuntime.mjs";
 import { chatAbortable } from "./chatCheckout.mjs";
 import { gitFailureLine, gitRemoteTried } from "./gitRemote.mjs";
+import { keepHeldCredentialsFresh } from "./heldCredentialRefresh.mjs";
 import { heldCredentials } from "./heldCredentials.mjs";
 import { jobHostPlaces, jobRepositoryDirectory } from "./job.mjs";
 import { keptWorkspaceRecordWritten } from "./keptWorkspace.mjs";
@@ -1915,13 +1916,19 @@ function workerProjectReads({
   });
 }
 
+/** What hands a held credential's secret to `keepSecret` under its kind. */
+function workerHeldCredentialKept(keepSecret) {
+  return (value) => keepSecret({ kind: workerSecretKinds.held, value });
+}
+
 /**
  * The credentials the plane holds of those `task` lists and
  * `credentialFiles` does not hold, each kept among the attempt's secrets and
  * written under `minted`: the variables they set, as a job's shells are handed
  * them. One the pod already holds is overridden, which is logged by its name
  * alone, and each the plane names absent is logged through `warn`, and to a
- * plane that takes it ends the attempt as `heldCredentials` says.
+ * plane that takes it ends the attempt as `heldCredentials` says. Each served
+ * with an expiry is handed to `expiring`.
  */
 export async function workerHeldCredentials({
   task,
@@ -1932,6 +1939,7 @@ export async function workerHeldCredentials({
   request,
   environment = process.env,
   warn = (text) => process.stderr.write(text),
+  expiring,
 }) {
   const held = await heldCredentials({
     task,
@@ -1939,8 +1947,9 @@ export async function workerHeldCredentials({
     listed: workTaskCredentialsListed(task),
     credentialFiles,
     directory: minted,
-    keep: (value) => keepSecret({ kind: workerSecretKinds.held, value }),
+    keep: workerHeldCredentialKept(keepSecret),
     warn,
+    ...(expiring === undefined ? {} : { expiring }),
     ...(request === undefined ? {} : { request }),
   });
   for (const { credential, variable } of held)
@@ -2113,15 +2122,26 @@ function workerRunDeadlineMs(timeoutSecsMax, clock) {
 /**
  * What an attempt holding its lease does: its credentials, its workspace and its
  * project reads taken, its workspace's record told the repository, and the work
- * done in them. Its evidence stops and its reads close however that ends.
+ * done in them, its held credentials refreshed ahead of their expiry from
+ * their first delivery. Its evidence and its refreshing stop and its reads
+ * close however that ends.
  */
 async function workerAttemptLeased(
   attempt,
-  { credentialFiles, repositories, minted, into, workspaceSeams },
+  {
+    credentialFiles,
+    repositories,
+    minted,
+    into,
+    workspaceSeams,
+    heldCredentialRefresh,
+  },
 ) {
   const { task, bearer, keepSecret, evidence } = attempt;
   let reads;
+  let stopRefreshing;
   try {
+    const expiring = [];
     const heldCredentials = await workerHeldCredentials({
       task,
       bearer,
@@ -2129,7 +2149,18 @@ async function workerAttemptLeased(
       minted,
       keepSecret,
       request: workspaceSeams.request,
+      expiring: (each) => expiring.push(each),
     });
+    stopRefreshing = keepHeldCredentialsFresh(
+      expiring,
+      {
+        task,
+        bearer,
+        directory: minted,
+        keep: workerHeldCredentialKept(keepSecret),
+      },
+      { request: workspaceSeams.request, ...heldCredentialRefresh },
+    );
     const cloned = await workerWorkspace(
       task,
       repositories,
@@ -2155,6 +2186,7 @@ async function workerAttemptLeased(
     );
   } finally {
     evidence.stop();
+    await stopRefreshing?.();
     await reads?.close();
   }
 }
@@ -2207,8 +2239,10 @@ function workspaceRecorder(workspace, task, scrub) {
  * `seams` are `workerWorkspace`'s, less the directory, which is the launch's;
  * `minted`, the directory checked, the git credential and the held credentials
  * written to and the reads served under in place of the contract's; `agent`,
- * run in place of the one the task names; and `clock`, what a held run tells
- * the time by, how long this process has run by, and waits on.
+ * run in place of the one the task names; `clock`, what a held run tells
+ * the time by, how long this process has run by, and waits on; and
+ * `heldCredentialRefresh`, the clock and timers held credentials are
+ * refreshed by.
  */
 export async function workerAttempt(launch, seams = {}) {
   const {
@@ -2216,6 +2250,7 @@ export async function workerAttempt(launch, seams = {}) {
     agent: standIn,
     clock = workerClock,
     asideCapMs,
+    heldCredentialRefresh = {},
     ...workspaceSeams
   } = seams;
   const task = await launch.task();
@@ -2264,7 +2299,14 @@ export async function workerAttempt(launch, seams = {}) {
         asideCapMs,
         recorder,
       },
-      { credentialFiles, repositories, minted, into, workspaceSeams },
+      {
+        credentialFiles,
+        repositories,
+        minted,
+        into,
+        workspaceSeams,
+        heldCredentialRefresh,
+      },
     );
   } finally {
     await stopLease();
