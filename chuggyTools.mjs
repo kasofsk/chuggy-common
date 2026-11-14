@@ -8,8 +8,8 @@
  * it through the project membership exactly as it authorizes a human's, and the
  * operation row records which session issued it. The API also confines that
  * bearer to its own session's tenant and project, whatever else the membership
- * reaches, so every project tool's route is one of that project's. A decision
- * tool (`./leadDecision.mjs`) writes nothing at all.
+ * reaches, so every project tool a session holds reaches that project's routes
+ * alone. A decision tool (`./leadDecision.mjs`) writes nothing at all.
  *
  * A MEMBER'S OWN SESSION READS ITS OWNER AND NO PROJECT. It is placed in the
  * partition reserved for its owner, which is no project, and the API refuses
@@ -17,6 +17,11 @@
  * the session's tenant alone (`memberPath`) and names no project, not even the
  * reserved one its task carries. Which tools it holds is its roster, as every
  * session's is: `MemberRead`, which no project's session is opened with.
+ *
+ * AN ACCOUNT TOOL ACTS ON ITS CALLER, AT NO TENANT AND NO PROJECT. The
+ * `AgentAccounts` tools reach the caller's own agent accounts, so their paths
+ * name nothing of the task's (`accountPath`), and no session's roster can hold
+ * them.
  *
  * A ROSTER IS NOT A CONTROL. `allowedTools` and `disallowedTools` are enforced
  * by the agent runtime inside the pod, and the pod is the thing being
@@ -183,6 +188,8 @@ import { TextDecoder } from "node:util";
 
 import { sessionStoreBatchBytesMax } from "@chuggy/worker-contract/sessionPlane";
 import {
+  accountAgents,
+  agentAccountSettingsSchema,
   agenticRefusalsAnsweredMax,
   allChuggyTools,
   authoringSchema,
@@ -228,6 +235,7 @@ import {
   threadTurnsAnsweredMax,
   ticketLandingsAnsweredMax,
 } from "@chuggy/worker-contract/sessionTools";
+import { workerRunCredentialSchema } from "@chuggy/worker-contract/workerPlane";
 
 import { boundedResponseBytes } from "./boundedResponse.mjs";
 import { chuggyBoundedBody, chuggyRequest } from "./chuggyApi.mjs";
@@ -511,6 +519,11 @@ function memberPath(context, route, values = {}) {
     tenant: context.task.tenant,
     ...values,
   });
+}
+
+/** One of the tools' routes of the caller's own account, `values` filling its pattern; a pattern naming a tenant or a project is refused rather than filled. */
+function accountPath(route, values = {}) {
+  return routeFilled(chuggyToolRoutes[route], values);
 }
 
 /** A query string built from the fields a caller actually gave, or nothing. */
@@ -1773,6 +1786,12 @@ async function updatePlacement(context, args) {
   });
 }
 
+/** Where an agent-account tool acts, which each of them says. */
+const chuggyAgentAccountDescription = `It acts on your owner's own account, at no tenant and no project, whichever project this server is bound to.`;
+
+/** How an agent-account write is answered, which each of them says. */
+const chuggyAgentAccountWriteDescription = `A write is answered as its status and what the API answered, a refusal unaltered:`;
+
 /**
  * The parameters several tools share, each describing itself, so every tool
  * that takes one publishes the sentence; a tool where one means something
@@ -1784,6 +1803,10 @@ const ticket = (z) =>
     .int()
     .min(1)
     .describe("A ticket's number, as list_tickets answers it.");
+const accountAgent = (z) =>
+  z
+    .enum(accountAgents)
+    .describe("The agent, as read_usage answers its `agent`.");
 const limit = (z, max) =>
   z
     .number()
@@ -2732,6 +2755,57 @@ export const chuggyProjectTools = [
         .optional(),
     }),
     call: updatePlacement,
+  },
+  {
+    name: "read_usage",
+    description: `Your owner's own agent accounts: each agent's usage, its pause and its credentials. ${chuggyAgentAccountDescription} Call it for why an agent is paused, and before update_usage_settings, retry_paused_agent or retire_credential. Answers JSON: \`accounts\`, one per agent, each its \`agent\`; its \`settings\`, \`fiveHourPercent\` and \`sevenDayPercent\` being the share of each window a reading at or over pauses it at and \`pausesThreads\` whether your owner's threads and inquiries pause with it; \`readings\`, each window's newest across its credentials; \`limit\`, the newest a provider stopped it at; \`pause\`, absent where none holds, with the \`credentials\` holding it; and \`credentials\`, each by its \`name\` with its own \`readings\` and \`pause\`.`,
+    shape: () => ({}),
+    call: (context) => read(context, accountPath("agentAccounts")),
+  },
+  {
+    name: "update_usage_settings",
+    description: `Changes how your owner's own account pauses one agent, on your owner's word only. ${chuggyAgentAccountDescription} It writes the agent's settings whole, so send every field, changed or not, from what read_usage answers as its \`settings\`. The lead of a pool your owner registered always pauses with the agent, whatever \`pausesThreads\` says. ${chuggyAgentAccountWriteDescription} 204 is the settings written.`,
+    shape: (z) => ({
+      agent: accountAgent(z),
+      settings: described(agentAccountSettingsSchema, {
+        fiveHourPercent:
+          "The share of the five-hour window, a whole percentage, a reading at or over which pauses the agent.",
+        sevenDayPercent:
+          "The share of the seven-day window, a whole percentage, a reading at or over which pauses the agent.",
+        pausesThreads:
+          "Whether your owner's threads and inquiries pause with the agent.",
+      }).describe("The agent's settings, written whole."),
+    }),
+    call: (context, { agent, settings }) =>
+      write(
+        context,
+        accountPath("agentAccountSettings", { agent }),
+        "PUT",
+        settings,
+      ),
+  },
+  {
+    name: "retry_paused_agent",
+    description: `Lets one claim of one paused agent through the limit a provider stopped it at, on your owner's word only. ${chuggyAgentAccountDescription} It is a press, and lets no claim through a threshold your owner's settings pause the agent at. ${chuggyAgentAccountWriteDescription} 204 is the press recorded, and 409 with the \`code\` NotHardPaused is an agent no limit holds paused.`,
+    shape: (z) => ({ agent: accountAgent(z) }),
+    call: (context, { agent }) =>
+      write(context, accountPath("agentAccountPresses", { agent }), "POST"),
+  },
+  {
+    name: "retire_credential",
+    description: `Retires one credential of one agent of your owner's own account, by its name, on your owner's word only. ${chuggyAgentAccountDescription} Its readings and its limit are dropped, so the account reads it no more until a run reports it again. ${chuggyAgentAccountWriteDescription} 204 is Retired, 404 is NotHeld, no credential held under that name, and 409 with the \`code\` CredentialInUse is one a live runner of your owner's still names.`,
+    shape: (z) => ({
+      agent: accountAgent(z),
+      credential: workerRunCredentialSchema.describe(
+        "The credential's `name`, as read_usage answers it under the agent's `credentials`.",
+      ),
+    }),
+    call: (context, { agent, credential }) =>
+      write(
+        context,
+        accountPath("agentAccountCredential", { agent, credential }),
+        "DELETE",
+      ),
   },
 ];
 

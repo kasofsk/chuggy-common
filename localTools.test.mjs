@@ -127,7 +127,7 @@ test("a person's agent is given every project tool and no decision tool, under o
   assert.notEqual(context.turn(), first);
 });
 
-test("a person's agent is given every lead settings and placement tool", () => {
+test("a person's agent is given every lead settings, placement and agent-account tool", () => {
   const context = localToolContext({
     site: "https://chuggy.test",
     tenant: "vteng",
@@ -139,9 +139,11 @@ test("a person's agent is given every lead settings and placement tool", () => {
   localToolServer(context, sdk);
   const served = new Set(registered.map(({ name }) => name));
 
-  assert.ok(chuggyToolCapabilities.ProjectSettings.length > 0);
-  for (const tool of chuggyToolCapabilities.ProjectSettings)
-    assert.ok(served.has(tool), tool);
+  for (const capability of ["ProjectSettings", "AgentAccounts"]) {
+    assert.ok(chuggyToolCapabilities[capability].length > 0, capability);
+    for (const tool of chuggyToolCapabilities[capability])
+      assert.ok(served.has(tool), tool);
+  }
 });
 
 test("the server's instructions say how to change the lead's prompt and move it onto the subsidized lead", () => {

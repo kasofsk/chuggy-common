@@ -1240,6 +1240,9 @@ const everyToolArgument = {
   visibility: "Active",
   tickets: [7],
   clear: ["northStar"],
+  agent: "Claude",
+  settings: { fiveHourPercent: 90, sevenDayPercent: 90, pausesThreads: true },
+  credential: "default",
 };
 
 /** What a tool whose parameter shares a name with another tool's takes in place of `everyToolArgument`'s. */
@@ -1374,14 +1377,18 @@ test("every built-in a capability admits is one the pod names, and the runtime n
 });
 
 test("every tool a session may be offered fits one measured turn's tool list", () => {
+  const offered = [
+    ...sessionBuiltInTools,
+    ...chuggyToolNames(sessionCapabilities),
+  ];
   const names = [
     ...sessionBuiltInTools,
     ...allChuggyTools.map((tool) => `${chuggyToolPrefix}${tool}`),
   ];
 
   assert.ok(
-    names.length <= sessionTurnToolsMax,
-    `a session may report ${String(names.length)} tools and a turn records ${String(sessionTurnToolsMax)}`,
+    offered.length <= sessionTurnToolsMax,
+    `a session may report ${String(offered.length)} tools and a turn records ${String(sessionTurnToolsMax)}`,
   );
   for (const name of names)
     assert.ok(
