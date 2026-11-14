@@ -106,6 +106,7 @@ import {
   chatSessionClearWaitMs,
   chatSessionEntrypoint,
   chatSessionFreeBytesMin,
+  chatSessionGit,
   chatSessionStopGraceMs,
   chatSessionUidCount,
   chatSessionUidFirst,
@@ -606,14 +607,15 @@ export function chatSupervised({
 
 /**
  * The tree a session reads, checked out by the supervisor as root under a
- * credential the plane mints for the session's own attempt; it is handed no
- * repository's credential file of its own.
+ * credential the plane mints for the session's own attempt, and one its
+ * thread's workspace keeps fetched into as the session's user; it is handed
+ * no repository's credential file of its own.
  */
 export function chatSupervisorCheckout(environment, mirrors) {
   const named = environment[workerRepositoriesVariable];
   const repositories =
     named === undefined || named.length === 0 ? {} : workerRepositories(named);
-  return (task, bearer, workspace, { signal, uid, minted, log }) =>
+  return (task, bearer, workspace, { signal, uid, kept, minted, log }) =>
     chatCheckout(task, bearer, workspace, {
       mint: (repository) =>
         planeCredential({
@@ -629,6 +631,12 @@ export function chatSupervisorCheckout(environment, mirrors) {
       credentialFiles: {},
       environment,
       user: { uid, gid: uid },
+      kept,
+      userRun: (args, { group, ...options }) =>
+        chatSessionGit({ uid, gid: uid }, [group], args, {
+          ...options,
+          path: environment["PATH"] ?? "/usr/bin:/bin",
+        }),
       signal,
       log,
     });

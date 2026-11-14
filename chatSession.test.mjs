@@ -1241,10 +1241,11 @@ const otherThread = { project: "project-1", session: "thread-2" };
 
 /**
  * Catches a thread's session handed a workspace of its own rather than its
- * thread's, or its thread's emptied at its end, or left its user's, which a
- * session of another thread run as that user would then enter.
+ * thread's, or its thread's or its tree emptied at either end, or left its
+ * user's, which a session of another thread run as that user would then
+ * enter.
  */
-test("a thread's session works in the workspace kept for it, handed it whole, and at its end its tree is removed and the workspace is root's again", async () => {
+test("a thread's session works in the workspace kept for it, handed it whole with its tree, and at its end the workspace is root's again, nothing in it removed", async () => {
   const system = systemOf();
   const { sessions, checkouts } = await sessionsOf(system);
   const kept = chatSessionThreadDirectory("/sessions", thread);
@@ -1264,11 +1265,11 @@ test("a thread's session works in the workspace kept for it, handed it whole, an
   assert.equal(options.env.HOME, "/sessions/session-20000/home");
   assert.equal(options.env.TMPDIR, "/sessions/session-20000/tmp");
   assert.equal(checkouts[0].workspace, kept);
-  assert.deepEqual(since(system, before).slice(0, 6), [
+  assert.equal(checkouts[0].asked.kept, true);
+  assert.deepEqual(since(system, before).slice(0, 5), [
     ["made", "/sessions/session-20000", 20_000],
     ["made", "/sessions/session-20000/home", 20_000],
     ["made", "/sessions/session-20000/tmp", 20_000],
-    ["removed", `${kept}/repository`],
     ["threadHanded", kept, 20_000],
     ["made", "/minted/session-20000", 20_000],
   ]);
@@ -1279,7 +1280,6 @@ test("a thread's session works in the workspace kept for it, handed it whole, an
     ["swept", 20_000],
     ["emptied", "/sessions/session-20000", 20_000],
     ["emptied", "/minted/session-20000", 20_000],
-    ["emptied", `${kept}/repository`, 20_000],
     ["threadKept", kept],
     ["removed", "/supervisor/session-20000"],
     ["scattered", 20_000],
@@ -1288,10 +1288,11 @@ test("a thread's session works in the workspace kept for it, handed it whole, an
 
 test("a thread's workspace is named for its thread alone, and a session naming none is given none", async () => {
   const system = systemOf();
-  const { sessions } = await sessionsOf(system);
+  const { sessions, checkouts } = await sessionsOf(system);
 
   await sessions.prepared(assignment, envelope, live());
 
+  assert.equal(checkouts[0].asked.kept, false);
   assert.notEqual(
     chatSessionThreadDirectory("/sessions", thread),
     chatSessionThreadDirectory("/sessions", otherThread),
@@ -1355,7 +1356,10 @@ function systemOnDisk(root) {
   return system;
 }
 
-/** Sessions opened on `system` under `root`, each checkout a tree with a file in it. */
+/**
+ * Sessions opened on `system` under `root`, each checkout a tree with a file
+ * in it, made only where a kept workspace holds none yet.
+ */
 async function sessionsOnDisk(system, root) {
   return sessionsOf(
     system,
@@ -1365,9 +1369,15 @@ async function sessionsOnDisk(system, root) {
       supervisorMinted: join(root, "supervisor"),
     },
     {
-      checkout: async (task, handed, workspace) => {
-        await mkdir(join(workspace, "repository"));
-        await writeFile(join(workspace, "repository", "README"), "tree");
+      checkout: async (task, handed, workspace, { kept }) => {
+        const tree = join(workspace, "repository");
+        if (
+          !kept ||
+          (await readdir(workspace)).every((name) => name !== "repository")
+        ) {
+          await mkdir(tree);
+          await writeFile(join(tree, "README"), "tree");
+        }
         return {
           checkout: { directory: join(workspace, "repository"), commit: "abc" },
         };
@@ -1376,7 +1386,7 @@ async function sessionsOnDisk(system, root) {
   );
 }
 
-/** One session of `named` run to its end on `sessions`, having left `note` in its workspace and its home. */
+/** One session of `named` run to its end on `sessions`, having left `note` in its workspace, its checkout and its home. */
 async function sessionLeaving(system, sessions, named, note) {
   const running = await sessions.prepared(
     assignment,
@@ -1387,17 +1397,20 @@ async function sessionLeaving(system, sessions, named, note) {
   );
   const { options, child } = system.children.at(-1);
   const found = await readdir(options.cwd);
+  const tree = join(options.cwd, "repository");
+  const foundInTree = await readdir(tree);
   await writeFile(join(options.cwd, "notes"), note);
+  await writeFile(join(tree, "notes"), note);
   await writeFile(join(options.env.HOME, "notes"), note);
   child.emit("exit", 0, null);
   await running.ended;
-  return { workspace: options.cwd, found };
+  return { workspace: options.cwd, found, foundInTree };
 }
 
 /**
- * Catches a thread's workspace emptied at its session's end, removed by the
- * next supervisor's clear of what a predecessor left, or handed to a session
- * of another thread.
+ * Catches a thread's workspace, or the tree checked out in it, emptied at its
+ * session's end, removed by the next supervisor's clear of what a
+ * predecessor left, or handed to a session of another thread.
  */
 test("a thread's second session finds what its first left in its workspace, across a supervisor's start, and a session of another thread is given another", async () => {
   const root = await mkdtemp(join(tmpdir(), "chat-thread-"));
@@ -1417,13 +1430,18 @@ test("a thread's second session finds what its first left in its workspace, acro
 
     assert.equal(again.workspace, left.workspace);
     assert.deepEqual(again.found.sort(), ["notes", "repository"]);
+    assert.deepEqual(again.foundInTree.sort(), ["README", "notes"]);
     assert.equal(
       await readFile(join(left.workspace, "notes"), "utf8"),
       "three",
     );
     assert.notEqual(other.workspace, left.workspace);
     assert.deepEqual(other.found, ["repository"]);
-    assert.deepEqual(await readdir(left.workspace), ["notes"]);
+    assert.deepEqual(other.foundInTree, ["README"]);
+    assert.deepEqual((await readdir(left.workspace)).sort(), [
+      "notes",
+      "repository",
+    ]);
     assert.deepEqual(await readdir(join(root, "sessions")), ["threads"]);
     assert.equal(await sessions.holding(), false);
 

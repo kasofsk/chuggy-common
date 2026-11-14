@@ -36,9 +36,9 @@
  * that ends it `Failed`.
  *
  * A THREAD'S SESSIONS KEEP ONE WORKSPACE, a directory named for the thread
- * in `chatSessionThreads` of `sessionsRoot`. A session of it is handed that
- * directory, and everything in it, as its user; once the session has ended
- * the tree checked out in it is removed and the directory is root's again,
+ * in `chatSessionThreads` of `sessionsRoot`, the tree checked out in it
+ * included. A session of it is handed that directory, and everything in it,
+ * as its user; once the session has ended the directory is root's again,
  * entered by no session's user until the next session of the thread is
  * handed it. It is removed only by `forgotten`, and nothing else here looks
  * through it: neither a supervisor starting, which makes each such directory
@@ -126,7 +126,7 @@ import {
   workerImageSteeringVariables,
   workerImageVariable,
 } from "./checks.mjs";
-import { jobPidsMax, jobRepositoryDirectory, jobRunDirectory } from "./job.mjs";
+import { jobPidsMax, jobRunDirectory } from "./job.mjs";
 import { poolSessionPhase } from "./poolSessionPlane.mjs";
 import { credentialScrub } from "./runEvidence.mjs";
 
@@ -284,6 +284,15 @@ export function chatSessionAsUser(user, groups, command) {
     "--",
     ...command,
   ];
+}
+
+/**
+ * `git` run with `args` as `user`, with `groups` beside it, on an environment
+ * holding nothing but the `PATH` it is given.
+ */
+export function chatSessionGit(user, groups, args, { path, ...options }) {
+  const [program, ...rest] = chatSessionAsUser(user, groups, ["git", ...args]);
+  return executeFile(program, rest, { ...options, env: { PATH: path } });
 }
 
 /**
@@ -858,7 +867,10 @@ async function chatSessionCleared(state, place) {
           system.emptied(path, place.uid, signal),
         )) && cleared;
   if (place.kept !== undefined && place.made.includes(place.kept))
-    cleared = (await chatSessionThreadKept(state, place, signal)) && cleared;
+    cleared =
+      (await attempt(`the keeping of ${place.kept}`, () =>
+        system.threadKept(place.kept),
+      )) && cleared;
   cleared =
     (await attempt(`the removal of ${place.checkoutMinted}`, () =>
       system.removed(place.checkoutMinted),
@@ -873,34 +885,10 @@ async function chatSessionCleared(state, place) {
 }
 
 /**
- * A thread's workspace kept once its session has ended, its user's processes
- * swept: the tree checked out in it removed as that user, since it borrows
- * from a mirror and the next session's is checked out afresh, and the
- * directory root's again; whether both went.
- */
-async function chatSessionThreadKept(state, place, signal) {
-  const { system } = state;
-  const checkout = jobRepositoryDirectory(place.workspace);
-  const removed = await chatSessionAttempted(
-    state,
-    place.label,
-    `the removal of ${checkout}`,
-    () => system.emptied(checkout, place.uid, signal),
-  );
-  const kept = await chatSessionAttempted(
-    state,
-    place.label,
-    `the keeping of ${place.workspace}`,
-    () => system.threadKept(place.workspace),
-  );
-  return removed && kept;
-}
-
-/**
  * The directories a session is prepared in, made as its user's, and its
- * thread's workspace handed to it whole, a tree a session before it left
- * there removed first; each named among what the session made before it is
- * made or handed, so one left half-made is cleared with the rest.
+ * thread's workspace handed to it whole; each named among what the session
+ * made before it is made or handed, so one left half-made is cleared with
+ * the rest.
  */
 async function chatSessionDirectories(state, place) {
   const { system } = state;
@@ -910,7 +898,6 @@ async function chatSessionDirectories(state, place) {
   }
   if (place.kept !== undefined) {
     place.made.push(place.kept);
-    await system.removed(jobRepositoryDirectory(place.kept));
     await system.threadHanded(place.kept, place.uid);
   }
   place.made.push(place.minted);
@@ -1105,6 +1092,7 @@ async function chatSessionMade(state, place, held, envelope, signal) {
     {
       signal,
       uid: place.uid,
+      kept: place.kept !== undefined,
       minted: place.checkoutMinted,
       log: chatSessionLogged(state, place),
     },

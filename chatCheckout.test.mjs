@@ -195,6 +195,92 @@ test("a later session's tree is made from the same mirror, fetched to what the r
   });
 });
 
+/** The services a kept workspace's checkout is made with, each git `userRun` runs, and the group, in `asUser`. */
+function keptServicesOf(mirrors, url, asUser, extra = {}) {
+  return servicesOf(mirrors, url, {
+    kept: true,
+    userRun: (args, { group, ...options }) => {
+      asUser.push({ args, group });
+      return sessionCheckoutGit(args, options);
+    },
+    ...extra,
+  });
+}
+
+/**
+ * Catches a thread's tree that borrows from a mirror a prune can empty, one
+ * cloned over or reset at its thread's next session, or one whose fetch runs
+ * as the supervisor in a tree a session wrote.
+ */
+test("a kept workspace's tree is cloned once borrowing nothing, and its thread's next session finds it as it was left, fetched from the mirror as its user", async () => {
+  await scratch(async ({ root, mirrors }) => {
+    const { url } = await remoteOf(root);
+    const workspace = join(root, "threads", "one");
+    const asUser = [];
+    const first = await chatCheckout(
+      task,
+      bearer,
+      workspace,
+      keptServicesOf(mirrors, url, asUser),
+    );
+    const directory = join(workspace, "repository");
+    await assert.rejects(
+      stat(join(directory, ".git", "objects", "info", "alternates")),
+    );
+    assert.equal(first.group, undefined);
+    assert.deepEqual(asUser, []);
+    const left = await committed(directory, "# the thread's own\n");
+    await writeFile(join(directory, "queue.json"), "[]");
+    const later = await committed(url, "# the tree, later\n");
+    await mirrors.pruned(() => assert.fail("a mirror was not pruned"));
+    const logged = [];
+
+    const again = await chatCheckout(
+      task,
+      bearer,
+      workspace,
+      keptServicesOf(mirrors, url, asUser, {
+        log: (text) => logged.push(text),
+      }),
+    );
+
+    assert.deepEqual(again, { checkout: { directory, commit: left } });
+    assert.deepEqual(logged, [`session checkout chuggy kept at ${left}\n`]);
+    assert.equal(await readFile(join(directory, "queue.json"), "utf8"), "[]");
+    assert.equal(await gitOut(["rev-parse", "origin/trunk"], directory), later);
+    await run("git", ["fsck", "--connectivity-only", "--no-dangling"], {
+      cwd: directory,
+    });
+    assert.deepEqual(
+      asUser.map(({ group }) => group),
+      [chatMirrorGroupFirst, chatMirrorGroupFirst],
+    );
+  });
+});
+
+/** Catches a thread's tree removed, or cloned over, where git cannot read it. */
+test("a kept tree git cannot read is told as none and left as it is", async () => {
+  await scratch(async ({ root, mirrors }) => {
+    const { url } = await remoteOf(root);
+    const workspace = join(root, "threads", "one");
+    const directory = join(workspace, "repository");
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "notes"), "kept");
+    const logged = [];
+
+    const made = await chatCheckout(
+      task,
+      bearer,
+      workspace,
+      keptServicesOf(mirrors, url, [], { log: (text) => logged.push(text) }),
+    );
+
+    assert.deepEqual(made, { checkout: undefined });
+    assert.match(logged.join(""), /kept at .* could not be read/u);
+    assert.deepEqual(await readdir(directory), ["notes"]);
+  });
+});
+
 test("a second repository is mirrored apart, under a group of its own", async () => {
   await scratch(async ({ root, mirrors }) => {
     const first = await remoteOf(root, "first");
