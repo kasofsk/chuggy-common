@@ -191,6 +191,9 @@ const agentSdkModule = "@anthropic-ai/claude-agent-sdk";
 const zodModule = "zod";
 const readStatus = 200;
 const acceptedStatus = 204;
+const unreadStatus = 400;
+const conflictStatus = 409;
+const notChatHostThread = "NotChatHostThread";
 /** Claude Code's effort variable, which it ranks above the query's `effort`. */
 const sessionEffortVariable = "CLAUDE_CODE_EFFORT_LEVEL";
 const executeFile = promisify(execFile);
@@ -794,6 +797,33 @@ async function post(context, path, body) {
     throw new Error(
       `the worker plane answered ${String(response.status)} for ${path}`,
     );
+}
+
+/**
+ * A chat host's thread reporting it is not standing: nothing of a session
+ * outlives its attempt (`./chatSession.mjs`), so no job of it is one its host
+ * restarts. The report is advisory, so a body or a thread the plane refuses is
+ * warned of and the session carries on; a stop on the session ends it.
+ */
+export async function sessionStandingReported(task, bearer, { request, warn }) {
+  const { path } = sessionPlaneRoutes.standing;
+  const response = await request(task, bearer, path, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ standing: false }),
+  });
+  if (response.status === acceptedStatus) return;
+  const body = await response.json().catch(() => undefined);
+  const refused =
+    response.status === unreadStatus ||
+    (response.status === conflictStatus && body?.reason === notChatHostThread);
+  if (!refused)
+    throw new Error(
+      `the worker plane answered ${String(response.status)} for ${path}`,
+    );
+  warn(
+    `the worker plane answered ${String(response.status)} for ${path}, and the session carries on\n`,
+  );
 }
 
 /**
@@ -1577,6 +1607,15 @@ function sessionMainContext(task, bearer, { request, ...held }) {
   return context;
 }
 
+/** The standing a session reports where it is a chat host's thread, and nowhere else. */
+async function sessionMainStanding(context, facts, services, warn) {
+  if (services.chatHost !== true || facts.kind !== "Thread") return;
+  await sessionStandingReported(context.task, context.bearer, {
+    request: context.request,
+    warn,
+  });
+}
+
 export async function sessionMain(services = {}) {
   const {
     environment = process.env,
@@ -1603,6 +1642,7 @@ export async function sessionMain(services = {}) {
       scrub,
     });
     const facts = await sessionFacts(context);
+    await sessionMainStanding(context, facts, services, warn);
     const held = await sessionHeld(context, environment, read, write, facts);
     const { credentialFiles, credential, scrubHead, keepSecret } = held;
     scrub = held.scrub;
