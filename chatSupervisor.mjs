@@ -421,9 +421,11 @@ function chatSupervisorStart(state, start) {
   });
   if (thread !== undefined) {
     entry.after = state.threadLast.get(thread) ?? Promise.resolve();
-    state.threadLast.set(thread, entry.done);
-    void entry.done.then(() => {
-      if (state.threadLast.get(thread) === entry.done)
+    // A cancelled entry finishes before the one it queued behind has ended.
+    const ended = Promise.all([entry.after, entry.done]);
+    state.threadLast.set(thread, ended);
+    void ended.then(() => {
+      if (state.threadLast.get(thread) === ended)
         state.threadLast.delete(thread);
     });
   }

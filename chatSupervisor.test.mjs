@@ -470,6 +470,39 @@ test("a Start naming a thread is prepared in it, and one more of that thread onl
   assert.deepEqual(supervisor.preparations[2].thread, thread);
 });
 
+/** Catches a Start queued behind a stopped one prepared while the session before both still runs. */
+test("a Start of a thread queued behind one that is stopped is prepared only once the thread's running session has ended", async () => {
+  const supervisor = supervisorOf(3);
+  supervisor.send(
+    { ...start("a"), thread },
+    { ...start("b"), thread },
+    { ...start("c"), thread },
+  );
+  await settled();
+  const running = runningOf();
+  supervisor.preparations[0].resolve(running);
+  await settled();
+
+  supervisor.send(stop("b"));
+  await settled();
+  assert.deepEqual(
+    supervisor.preparations.map(({ assignment }) => assignment),
+    ["a"],
+  );
+
+  running.end();
+  await settled();
+  assert.deepEqual(
+    supervisor.preparations.map(({ assignment }) => assignment),
+    ["a", "c"],
+  );
+  assert.deepEqual(supervisor.frames(), [
+    { frame: "Started", assignment: "a" },
+    refused("b", "Stopped"),
+    { frame: "Ended", assignment: "a", phase: "Succeeded" },
+  ]);
+});
+
 /**
  * Catches a closed thread's workspace removed under a session still running
  * in it, or a Start of it prepared once its Forget is read, or a Forget
