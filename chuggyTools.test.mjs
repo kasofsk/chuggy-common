@@ -4036,6 +4036,17 @@ const projectToolArguments = {
   update_lead_settings: { expectedRevision: 5, set: { mode: "Paused" } },
   read_placement: {},
   update_placement: { lead: "Pool" },
+  read_usage: {},
+  update_usage_settings: {
+    agent: "Codex",
+    settings: {
+      fiveHourPercent: 80,
+      sevenDayPercent: 95,
+      pausesThreads: false,
+    },
+  },
+  retry_paused_agent: { agent: "Claude" },
+  retire_credential: { agent: "Claude", credential: "work" },
 };
 
 /** What every member tool is driven with where a suite drives them all. */
@@ -4054,10 +4065,12 @@ const toolArguments = { ...projectToolArguments, ...memberToolArguments };
 /**
  * Catches a tool built on a route outside its session's own project, which the
  * API refuses a session bearer however the membership reads: an inventory of
- * every project the principal sees is one.
+ * every project the principal sees is one. An account tool, which no session
+ * holds, reaches its caller's own account and names no tenant.
  */
-test("every project tool reaches its own session's project and nothing outside it", async () => {
-  const partition = "/api/v1/tenants/vteng/projects/chuggy";
+test("every project tool reaches its own session's project, an account tool its caller's own account, and nothing outside them", async () => {
+  const project = "/api/v1/tenants/vteng/projects/chuggy";
+  const account = "/api/v1/agent-accounts";
   assert.deepEqual(
     chuggyProjectTools.map(({ name }) => name).sort(),
     Object.keys(projectToolArguments).sort(),
@@ -4080,6 +4093,11 @@ test("every project tool reaches its own session's project and nothing outside i
     }
     assert.equal(api.calls.length, 1, definition.name);
     const { pathname } = new URL(api.calls[0].path, task.api.url);
+    const partition = chuggyToolCapabilities.AgentAccounts.includes(
+      definition.name,
+    )
+      ? account
+      : project;
     assert.ok(
       pathname === partition || pathname.startsWith(`${partition}/`),
       `${definition.name} reached ${pathname}`,
@@ -5609,5 +5627,157 @@ test("no session's roster allows a settings tool", () => {
       assert.ok(!allowedTools.includes(tool), `${roster.join(",")} ${tool}`);
       assert.ok(disallowedTools.includes(tool), `${roster.join(",")} ${tool}`);
     }
+  }
+});
+
+/** The agent-account routes, which name no tenant and no project. */
+const agentAccountsPath = "/api/v1/agent-accounts";
+
+test("every agent-account tool asks its own account's route, whichever project the session is bound to", async () => {
+  for (const [name, args, method, path, body] of [
+    ["read_usage", {}, "GET", agentAccountsPath, undefined],
+    [
+      "update_usage_settings",
+      projectToolArguments.update_usage_settings,
+      "PUT",
+      `${agentAccountsPath}/Codex/settings`,
+      projectToolArguments.update_usage_settings.settings,
+    ],
+    [
+      "retry_paused_agent",
+      { agent: "Claude" },
+      "POST",
+      `${agentAccountsPath}/Claude/presses`,
+      undefined,
+    ],
+    [
+      "retire_credential",
+      { agent: "Codex", credential: "work-2" },
+      "DELETE",
+      `${agentAccountsPath}/Codex/credentials/work-2`,
+      undefined,
+    ],
+  ]) {
+    const { api, call } = toolsOf({}, () => ({ status: 204 }));
+
+    const answer = await call(name, args);
+
+    assert.equal(answer.isError, undefined, textOf(answer));
+    assert.deepEqual(
+      api.calls.map((asked) => [asked.method, asked.path]),
+      [[method, path]],
+      name,
+    );
+    const sent = api.calls[0].init.body;
+    assert.deepEqual(sent === undefined ? undefined : JSON.parse(sent), body);
+  }
+});
+
+test("read_usage relays the account as the route answered it", async () => {
+  const body = JSON.stringify({ accounts: [] });
+  const { call } = toolsOf({}, () => ({ status: 200, body }));
+
+  assert.equal(textOf(await call("read_usage", {})), `HTTP 200\n${body}`);
+});
+
+test("every agent-account write relays its status and what the API answered, a refusal unaltered", async () => {
+  for (const [name, args, status, code] of [
+    ["update_usage_settings", projectToolArguments.update_usage_settings, 204],
+    ["retry_paused_agent", { agent: "Claude" }, 204],
+    ["retry_paused_agent", { agent: "Claude" }, 409, "NotHardPaused"],
+    ["retire_credential", { agent: "Claude", credential: "work" }, 204],
+    ["retire_credential", { agent: "Claude", credential: "work" }, 404],
+    [
+      "retire_credential",
+      { agent: "Claude", credential: "work" },
+      409,
+      "CredentialInUse",
+    ],
+  ]) {
+    const body =
+      status === 204
+        ? ""
+        : JSON.stringify({ error: { code: code ?? "NotFound", message: "m" } });
+    const { api, call } = toolsOf({}, () => ({ status, body }));
+
+    const answer = await call(name, args);
+
+    assert.equal(textOf(answer), `HTTP ${String(status)}\n${body}`);
+    assert.equal(answer.isError, status >= 400 ? true : undefined, name);
+    assert.equal(api.calls.length, 1, name);
+  }
+});
+
+test("an agent-account tool refuses arguments the contract does not admit and asks nothing", async () => {
+  const { settings } = projectToolArguments.update_usage_settings;
+  for (const [name, args] of [
+    ["update_usage_settings", { agent: "Gemini", settings }],
+    ["update_usage_settings", { agent: "Claude" }],
+    [
+      "update_usage_settings",
+      { agent: "Claude", settings: { ...settings, fiveHourPercent: 0 } },
+    ],
+    [
+      "update_usage_settings",
+      { agent: "Claude", settings: { ...settings, sevenDayPercent: 101 } },
+    ],
+    [
+      "update_usage_settings",
+      { agent: "Claude", settings: { ...settings, fiveHourPercent: 50.5 } },
+    ],
+    [
+      "update_usage_settings",
+      {
+        agent: "Claude",
+        settings: { fiveHourPercent: 50, sevenDayPercent: 50 },
+      },
+    ],
+    [
+      "update_usage_settings",
+      { agent: "Claude", settings: { ...settings, extra: 1 } },
+    ],
+    ["retry_paused_agent", {}],
+    ["retry_paused_agent", { agent: "claude" }],
+    ["retire_credential", { agent: "Claude" }],
+    ["retire_credential", { agent: "Claude", credential: "" }],
+    ["retire_credential", { agent: "Claude", credential: "a/b" }],
+    ["retire_credential", { agent: "Claude", credential: "x".repeat(65) }],
+  ]) {
+    const { api, call } = toolsOf();
+
+    const answer = await call(name, args);
+
+    assert.equal(answer.isError, true, `${name} ${JSON.stringify(args)}`);
+    assert.deepEqual(api.calls, [], `${name} ${JSON.stringify(args)}`);
+  }
+});
+
+test("no session's roster allows an agent-account tool", () => {
+  const accounts = chuggyToolCapabilities.AgentAccounts.map(
+    (tool) => `${chuggyToolPrefix}${tool}`,
+  );
+  assert.ok(accounts.length > 0);
+  for (let subset = 0; subset < 2 ** sessionCapabilities.length; subset += 1) {
+    const roster = sessionCapabilities.filter(
+      (_, index) => ((subset >> index) & 1) === 1,
+    );
+    const { allowedTools, disallowedTools } = sessionAllowedTools(roster);
+    for (const tool of accounts) {
+      assert.ok(!allowedTools.includes(tool), `${roster.join(",")} ${tool}`);
+      assert.ok(disallowedTools.includes(tool), `${roster.join(",")} ${tool}`);
+    }
+  }
+});
+
+test("every agent-account tool says it acts on the caller's own account at no tenant and no project", () => {
+  for (const name of chuggyToolCapabilities.AgentAccounts) {
+    const { description } = chuggyProjectTools.find(
+      (tool) => tool.name === name,
+    );
+    assert.match(
+      description,
+      /your owner's own account, at no tenant and no project, whichever project this server is bound to\./u,
+      name,
+    );
   }
 });

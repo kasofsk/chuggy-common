@@ -73,6 +73,7 @@ export const localToolCapabilities = [
   "DraftOriginate",
   "TicketDispatch",
   "ProjectSettings",
+  "AgentAccounts",
 ];
 
 /** What a submitted command made again answers here, where every call is a turn of its own. */

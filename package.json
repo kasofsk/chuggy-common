@@ -7,7 +7,7 @@
   },
   "private": true,
   "dependencies": {
-    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.98.0/chuggy-worker-contract-1.98.0.tgz"
+    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.102.0/chuggy-worker-contract-1.102.0.tgz"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
