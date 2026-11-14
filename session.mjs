@@ -97,6 +97,8 @@ import { workerContractSessionContext } from "@chuggy/worker-contract/workerCont
 import { leadDecisionDocumentSchema } from "@chuggy/worker-contract/workerDocuments";
 import {
   mintedCredentialDirectory,
+  sessionApiOriginVariable,
+  sessionBearerVariable,
   sessionConfigDirectoryVariable,
   sessionModelVariable,
   sessionTaskVariable,
@@ -704,6 +706,12 @@ function sessionTakesStops(facts) {
  * the site's. `CLAUDE_CODE_EFFORT_LEVEL` outranks `effort`, so the runtime's
  * environment leaves it out wherever the facts name an effort.
  *
+ * THE SHELL IS HANDED THE API'S ORIGIN AND `bearer` ONLY WHERE THE FACTS SAY
+ * `shellCredentialHanded`, under `sessionApiOriginVariable` and
+ * `sessionBearerVariable`, and neither otherwise, whatever the pod inherited.
+ * The bearer is the attempt's own, the one its chuggy tools present, so it
+ * ends with the attempt as theirs does.
+ *
  * `git` is the configuration every git the runtime starts is handed, which is
  * nothing where the session serves no reads, and `credential` is the runtime's
  * as `claudeCredentialPrepared` makes it.
@@ -714,7 +722,7 @@ export function sessionQueryOptions(
   store,
   environment,
   credential,
-  { servers = {}, checkout, git = [] } = {},
+  { servers = {}, checkout, git = [], bearer } = {},
 ) {
   const workspace =
     environment[workerWorkspaceVariable] ?? workerWorkspaceDirectory;
@@ -735,8 +743,11 @@ export function sessionQueryOptions(
       ...workerEnvironmentWithout(environment, [
         ...credential.withheld,
         ...(facts.effort === undefined ? [] : [sessionEffortVariable]),
+        sessionApiOriginVariable,
+        sessionBearerVariable,
       ]),
       ...credential.environment,
+      ...sessionShellCredential(task, facts, bearer),
       [sessionConfigDirectoryVariable]: sessionConfigDirectory(
         environment,
         workspace,
@@ -773,6 +784,23 @@ export function sessionQueryOptions(
       ? { settings: { autoCompactWindow: facts.autoCompactWindow } }
       : {}),
     ...(sessionReportsLive(facts) ? { includePartialMessages: true } : {}),
+  };
+}
+
+/**
+ * What the session's shell is handed of the API: its origin and the bearer,
+ * where the facts say `shellCredentialHanded`, and nothing otherwise.
+ */
+function sessionShellCredential(task, facts, bearer) {
+  if (facts.shellCredentialHanded !== true) return {};
+  const origin = task.api?.url;
+  if (typeof origin !== "string" || origin.length === 0)
+    throw new Error("the session's shell is to be handed no API origin");
+  if (typeof bearer !== "string" || bearer.length === 0)
+    throw new Error("the session's shell is to be handed no bearer");
+  return {
+    [sessionApiOriginVariable]: origin,
+    [sessionBearerVariable]: bearer,
   };
 }
 
@@ -1376,6 +1404,7 @@ async function sessionRuntime(
         servers: sessionToolServers(context, facts, environment, services, sdk),
         ...(checkout === undefined ? {} : { checkout }),
         git,
+        bearer: context.bearer,
       },
     ),
   });

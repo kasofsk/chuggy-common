@@ -24,6 +24,7 @@ import {
   workerContractRelease,
 } from "@chuggy/worker-contract/workerContract";
 import {
+  workerPoolPollSessionCapabilitiesText,
   workerRunnerCredentialsHeader,
   workerRunnerCredentialsOf,
   workerRunnerPollWaitHeader,
@@ -274,6 +275,7 @@ function clockOf(sleeps, hasty, starting) {
 function hostSeenOf() {
   return {
     polls: [],
+    sessionCapabilities: [],
     credentials: [],
     ended: [],
     execs: [],
@@ -380,6 +382,7 @@ function planeOf(seen, answers, supervisors, host) {
       idleSecs: url.searchParams.get("idleSecs"),
       waitSecs: init.headers[workerRunnerPollWaitHeader],
     });
+    seen.sessionCapabilities.push(url.searchParams.get("sessionCapabilities"));
     seen.credentials.push(
       workerRunnerCredentialsOf(init.headers[workerRunnerCredentialsHeader]),
     );
@@ -443,6 +446,24 @@ test("a host polls with the idle bound its settings name, and with none where th
     await run.host.run();
     assert.ok(run.seen.polls.length > 0);
     for (const poll of run.seen.polls) assert.equal(poll.idleSecs, idleSecs);
+  }
+});
+
+test("a host names its threads' capabilities on each poll once the plane has answered a release that reads them, and one naming none names none", async (t) => {
+  for (const [given, named] of [
+    [
+      { sessionCapabilities: ["ProjectRead", "RunCommands"] },
+      workerPoolPollSessionCapabilitiesText(["ProjectRead", "RunCommands"]),
+    ],
+    [{}, null],
+  ]) {
+    const run = await hostOf(t, {
+      answers: [{ chatImage: one }, { chatImage: one }, { chatImage: one }],
+      given,
+    });
+    await run.host.run();
+    assert.deepEqual(run.seen.sessionCapabilities, [null, named, named, named]);
+    assert.equal(run.seen.polls[1].wantedSessions, "2");
   }
 });
 
@@ -1144,6 +1165,14 @@ test("a host's settings from a runner's file are its defaults where the file nam
   assert.deepEqual(chatHostConfigSchema.parse({ image: { image: one } }), {
     image: { image: one, pull: "missing" },
   });
+  for (const sessionCapabilities of [[], ["RepositoryRead", "RunCommands"]])
+    assert.deepEqual(
+      chatHostConfigured(
+        chatHostConfigSchema.parse({ sessionCapabilities }),
+        1_000,
+      ).sessionCapabilities,
+      sessionCapabilities,
+    );
 });
 
 /** Catches a setting that would cap a supervisor below what a session is claimed into, or a key misspelled into silence. */
@@ -1153,6 +1182,8 @@ test("a host's settings refuse too little memory a session, and keys they do not
     { sessionsMax: 0 },
     { sessionMemory: 2048 },
     { image: { image: one, pull: "sometimes" } },
+    { sessionCapabilities: ["Root"] },
+    { sessionCapabilities: ["RunCommands", "RunCommands"] },
   ])
     assert.equal(chatHostConfigSchema.safeParse(config).success, false);
   assert.throws(
