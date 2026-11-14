@@ -143,8 +143,15 @@ const imagePinned = {
 /** A credential the plane holds, as the held credentials route serves it. */
 const heldCredential = {
   credential: "track-record",
-  variable: "TRACK_RECORD_TOKEN_FILE",
-  secret: "track-record-secret",
+  files: [
+    {
+      file: "token",
+      content: { kind: "Secret", secret: "track-record-secret" },
+    },
+  ],
+  variables: [
+    { kind: "Path", variable: "TRACK_RECORD_TOKEN_FILE", file: "token" },
+  ],
 };
 
 /** What each job route answers when it is not the one a case is about. */
@@ -312,6 +319,7 @@ const jobCallers = {
       keep: () => undefined,
       request,
       write: async () => undefined,
+      makeDirectory: async () => undefined,
     }),
 };
 
