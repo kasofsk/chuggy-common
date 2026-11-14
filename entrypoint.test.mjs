@@ -157,6 +157,7 @@ import {
   forgeServed,
   forgeServices,
 } from "./gitForge.fixture.mjs";
+import { heldCredentialRefreshDelayMs } from "./heldCredentialRefresh.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import { overPlane, planeFetch, planes } from "./plane.fixture.mjs";
 import { agentResultSchema } from "./result.mjs";
@@ -4669,6 +4670,74 @@ test("a job's shells are handed a held credential's file over the pod's own valu
       );
       assert.ok(!report.includes(trackRecord.secret), report);
       assert.match(report, /\[redacted credential\]/u);
+    } finally {
+      await plane.close();
+    }
+  });
+});
+
+/**
+ * Catches a credential served with an expiry never being refreshed, its
+ * refresh set before it is delivered, or a refresh timer outliving the
+ * attempt.
+ */
+test("an attempt sets a held credential's refresh once it is delivered, and clears it when the attempt ends", async (t) => {
+  const mintedDirectory = await suiteDirectory(t, "chuggy-minted-");
+  const expiresAtMs = 1_900_000_000_000;
+  const nowMs = 1_800_000_000_000;
+  const timers = [];
+  const cleared = [];
+  await inCheckout(async ({ directory, base }) => {
+    const plane = await servedPlane(
+      (route) => {
+        switch (route) {
+          case "task":
+            return trackRecordTask(["true"]);
+          case "input":
+            return inputAnswer("repository-1", base);
+          case "credential":
+            return {
+              status: 200,
+              body: { ...minted, expiresAtMs: 1_900_000_000_000 },
+            };
+          case "report":
+            return { status: 202, body: { action: "stop" } };
+          default:
+            return { status: 204 };
+        }
+      },
+      planes.job,
+      {
+        ...trackRecordHeld,
+        body: { credentials: [{ ...trackRecord, expiresAtMs }] },
+      },
+    );
+    try {
+      const served = { ...envelope, callbackUrl: plane.url };
+      const { task: answered } = await envelopeTask(served);
+      await workerAttempt(envelopeLaunch(served, answered), {
+        minted: mintedDirectory,
+        write: async () => undefined,
+        clone: async () => directory,
+        heldCredentialRefresh: {
+          now: () => nowMs,
+          setTimeout: (callback, delayMs) => {
+            assert.equal(
+              plane.requests.filter(({ route }) => route === "heldCredentials")
+                .length,
+              1,
+              "the refresh is set after the first delivery",
+            );
+            timers.push(delayMs);
+            return timers.length;
+          },
+          clearTimeout: (handle) => cleared.push(handle),
+        },
+      });
+      assert.deepEqual(timers, [
+        heldCredentialRefreshDelayMs(expiresAtMs, nowMs),
+      ]);
+      assert.deepEqual(cleared, [1], "no refresh timer outlives the attempt");
     } finally {
       await plane.close();
     }
