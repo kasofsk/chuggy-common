@@ -15,6 +15,7 @@ import {
   parseChatHostFrame,
 } from "@chuggy/worker-contract/chatHost";
 import { workerContractRelease } from "@chuggy/worker-contract/workerContract";
+import { workerPoolThreadsClosedMax } from "@chuggy/worker-contract/workerPool";
 
 import {
   agentCredentialSelector,
@@ -555,6 +556,7 @@ function supervisedHost(seams = {}) {
   const host = hostOf(settings, seams);
   const toSupervisor = host.handle.input;
   const preparations = [];
+  const removals = [];
   const input = new PassThrough();
   toSupervisor.pipe(input);
   const exited = chatSupervised({
@@ -562,13 +564,22 @@ function supervisedHost(seams = {}) {
     output: { write: (line) => host.handle.output.write(line) },
     log: (text) => host.handle.errors.write(text),
     sessions: {
-      prepared: (assignment, envelope, signal, credential) =>
+      prepared: (assignment, envelope, signal, credential, thread) =>
         new Promise((resolve, reject) => {
-          preparations.push({ assignment, envelope, credential, resolve });
+          preparations.push({
+            assignment,
+            envelope,
+            credential,
+            thread,
+            resolve,
+          });
           signal.addEventListener("abort", () => reject(signal.reason), {
             once: true,
           });
         }),
+      forgotten: async (thread) => {
+        removals.push(thread);
+      },
     },
     sessionsMax: 2,
   });
@@ -579,19 +590,24 @@ function supervisedHost(seams = {}) {
     },
     () => host.exit(),
   );
-  return { ...host, preparations, exited };
+  return { ...host, preparations, removals, exited };
 }
 
-/** A running session a suite ends by hand. */
+/** A running session a suite ends by hand, which `drains` counts the drains of. */
 function runningOf() {
   let end;
-  return {
+  const running = {
+    drains: 0,
     stop: () => end("Failed"),
+    drain: () => {
+      running.drains += 1;
+    },
     ended: new Promise((resolve) => {
       end = resolve;
     }),
     end: (phase) => end(phase),
   };
+  return running;
 }
 
 test("against this core's supervisor, a session is started, stopped and drained as the protocol says", async () => {
@@ -620,6 +636,7 @@ test("against this core's supervisor, a session is started, stopped and drained 
   );
   host.backend.drain();
   await settled();
+  assert.equal(a.drains, 1);
   a.end("Succeeded");
   await settled();
   assert.deepEqual(
@@ -633,6 +650,96 @@ test("against this core's supervisor, a session is started, stopped and drained 
   await host.backend.closed();
   assert.equal(host.backend.phase(), "Ended");
   bearerUnlogged(host);
+});
+
+const thread = { project: "project-1", session: "thread-1" };
+const otherThread = { project: "project-1", session: "thread-2" };
+const forget = (named) => ({ frame: "Forget", thread: named });
+
+/** Catches a thread's session started in a workspace of its own, which loses what the thread's earlier sessions left. */
+test("a session's Start names the thread its assignment names, and one naming none names none", async () => {
+  const host = await readyHost();
+
+  await host.backend.place({ ...sessionOf("a"), thread }, "Session");
+  await host.backend.place(sessionOf("b"), "Session");
+
+  assert.deepEqual(
+    host.frames().map((frame) => frame.frame === "Start" && frame.thread),
+    [thread, undefined],
+  );
+});
+
+/**
+ * Catches a closed thread's workspace never removed, or a Forget written on
+ * every answer that names the thread, which the plane does while it is
+ * among the most recently closed.
+ */
+test("each thread an answer names as closed is forgotten once, and again only of a supervisor that ended without answering", async () => {
+  const host = await readyHost();
+
+  host.backend.threadsClosedTaken?.([thread, otherThread]);
+  host.backend.threadsClosedTaken?.([thread, otherThread]);
+  host.say({ frame: "Forgotten", thread });
+  await settled();
+  host.backend.threadsClosedTaken?.([thread, otherThread]);
+
+  assert.deepEqual(host.frames(), [forget(thread), forget(otherThread)]);
+  host.exit();
+  host.handle.output.end();
+  await settled();
+  const next = hostOf();
+  const attached = host.backend.attached(next.handle);
+  next.say(ready);
+  await attached;
+  host.backend.threadsClosedTaken?.([thread, otherThread]);
+  assert.deepEqual(next.frames(), [forget(otherThread)]);
+});
+
+test("a supervisor not yet ready is named no closed thread, and no more Forgets are unanswered at once than an answer names", async () => {
+  const host = hostOf();
+  void host.backend.attached(host.handle);
+  host.backend.threadsClosedTaken?.([thread]);
+  assert.deepEqual(host.frames(), []);
+  host.say(ready);
+  await settled();
+
+  const many = Array.from(
+    { length: workerPoolThreadsClosedMax + 1 },
+    (_, index) => ({
+      project: "project-1",
+      session: `thread-${String(index)}`,
+    }),
+  );
+  host.backend.threadsClosedTaken?.(many);
+
+  assert.equal(host.frames().length, workerPoolThreadsClosedMax);
+});
+
+/** Catches a host and supervisor of this core that disagree on Forget, so a closed thread's workspace is kept for good. */
+test("against this core's supervisor, a closed thread's workspace is removed once its session has ended, and answered once", async () => {
+  const host = supervisedHost();
+  assert.ok("ready" in (await host.backend.attached(host.handle)));
+  await host.backend.place({ ...sessionOf("a"), thread }, "Session");
+  await settled();
+  assert.deepEqual(host.preparations[0].thread, thread);
+  const a = runningOf();
+  host.preparations[0].resolve(a);
+  await settled();
+
+  host.backend.threadsClosedTaken?.([thread]);
+  await settled();
+  assert.deepEqual(host.removals, []);
+  a.end("Succeeded");
+  await settled();
+
+  assert.deepEqual(host.removals, [thread]);
+  assert.match(
+    host.logged.map(([, line]) => line).join("\n"),
+    /removed the workspace of closed thread "thread-1"/u,
+  );
+  host.backend.threadsClosedTaken?.([thread]);
+  await settled();
+  assert.deepEqual(host.removals, [thread]);
 });
 
 /** A selector over two subscription tokens in `order`, and the secret each file would hold, which no frame or log may carry. */

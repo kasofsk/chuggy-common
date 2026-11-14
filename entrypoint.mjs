@@ -2535,14 +2535,14 @@ async function main() {
  * off the channel the supervisor names, its task fetched as a pool's session
  * fetches one, and the session run as a pool's runs, in the workspace, the
  * minted directory and the checkout the supervisor made for it. The channel's
- * end stops it.
+ * end stops it, and the session says on it whether it holds a claimed turn.
  */
 async function chatSessionMain(environment = process.env) {
   const channel = chatChannelOpened(
     new Socket({
       fd: Number(environment[chatChannelVariable]),
       readable: true,
-      writable: false,
+      writable: true,
     }),
   );
   try {
@@ -2564,6 +2564,7 @@ async function chatSessionMain(environment = process.env) {
       minted: required(chatMintedVariable),
       checkout: async () => checkout,
       stopped: channel.stopped,
+      turnHeld: channel.turnHeld,
     });
   } finally {
     channel.close();

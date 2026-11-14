@@ -47,6 +47,17 @@ A member's personal runner is a pool file of kind `Personal`: it names its tenan
 
 A member's chat host is a pool file of kind `ChatHost`, registered by `register.mjs` when the ask is `chat`, from a token minted at `POST /api/v1/tenants/:tenant/chat-host-registration-tokens`. It takes the member's sessions alone, all in one container running `chatSupervisor.mjs`, in the image chuggy names on each poll unless the host's own setting names one. `chatHost.mjs` is its loop and that container's spec, and `chatHostBackend.mjs` the pool loop's backend over the supervisor's stream; each CLI brings the engine that runs the container. Its `idleSecs` setting is optional: unset, its sessions have no idle limit; set, each poll names it and chuggy caps it.
 
+A thread's sessions keep one workspace, `threads/<name>` in the host's sessions volume, `chuggy-chat-<digest>-sessions`, as `chatSession.mjs` says: what one session leaves there the next finds, but for the checkout, which each is given afresh. Its supervisor removes it once chuggy names the thread as closed and no session of it runs. Nothing else bounds the volume: each workspace grows with what its thread's sessions write, and a session is not prepared once the volume has less free than `chatSessionFreeBytesMin`. chuggy names a closed thread only while it is among the most recently closed, so a thread that closed while its host was not polling keeps its workspace until a member removes it, while no session of the thread runs:
+
+```sh
+# Each thread's kept workspace and its size (podman takes the same commands).
+docker run --rm -v chuggy-chat-<digest>-sessions:/sessions <image> du -sh /sessions/threads/*
+# The name of one thread's, where neither identity holds a quote or a backslash.
+printf '["%s","%s"]' <project> <session> | sha256sum
+# Remove it.
+docker run --rm -v chuggy-chat-<digest>-sessions:/sessions <image> rm -rf /sessions/threads/<name>
+```
+
 ## A person's own agent
 
 `localTools.mjs` serves the `chuggy` tools a session pod has to a coding agent on a person's own machine, over stdio, for one site's one project: every project tool, no decision tool, each call under that person's own token. `localSignIn.mjs` signs them in as the setup program's client, through a page on the machine's loopback address that a call answers with when there is no sign-in, and renews the token ahead of its expiry; `localTokenStore.mjs` keeps the renewal token in a file of the person's alone and renews under a lock every server on the machine shares. `localToolServed` is the whole of it for a companion, which supplies the MCP SDK and the directory each site's sign-in is kept in.

@@ -2081,3 +2081,24 @@ test("an agent benched until restart stays out of every poll, none is added, and
   assert.deepEqual(unselected.advertised, [built]);
   assert.deepEqual(unselected.credentials, [{}]);
 });
+
+/** Catches a chat host's closed threads read off the wire and never handed to what keeps their workspaces. */
+test("each answer's closed threads are handed to the backend, and none where it names none", async () => {
+  const threads = [{ project: "project-1", session: "thread-1" }];
+  const taken = [];
+  const { plane } = planeNaming(workerContractRelease, [
+    { ...reconciled(), threadsClosed: threads },
+    reconciled(),
+  ]);
+  const pooled = client({
+    plane,
+    backend: {
+      ...idle,
+      threadsClosedTaken: (named) => taken.push(named),
+    },
+  });
+
+  for (let pass = 0; pass < 2; pass += 1) await workerPoolClientPass(pooled);
+
+  assert.deepEqual(taken, [threads, []]);
+});

@@ -5,9 +5,10 @@
  * A SESSION IS ITS USER. Each is given the next user of the supervisor's
  * range, in turn, that no other session holds, so a user is given out again
  * as late as it can be, as its group too, and everything it is handed
- * is that user's alone: a directory under `sessionsRoot` its workspace, home
- * and temporary files are in, a directory under `mintedRoot` its credentials
- * are written to, and the tree the supervisor checked out for it. The one
+ * is that user's alone: a directory under `sessionsRoot` its home and
+ * temporary files are in, and its workspace too unless it is a thread's, a
+ * directory under `mintedRoot` its credentials are written to, and the tree
+ * the supervisor checked out for it in its workspace. The one
  * other group it is given is the mirror's its tree borrows from
  * (`./chatCheckout.mjs`). It is started without capabilities, unable to gain
  * any, under a bound on its processes, with a umask that keeps what it makes
@@ -34,7 +35,17 @@
  * the background and nothing of any other session's. Its deadline is a stop
  * that ends it `Failed`.
  *
- * NOTHING OF A SESSION OUTLIVES IT. Once its process has exited its user's
+ * A THREAD'S SESSIONS KEEP ONE WORKSPACE, a directory named for the thread
+ * in `chatSessionThreads` of `sessionsRoot`. A session of it is handed that
+ * directory, and everything in it, as its user; once the session has ended
+ * the tree checked out in it is removed and the directory is root's again,
+ * entered by no session's user until the next session of the thread is
+ * handed it. It is removed only by `forgotten`, and nothing else here looks
+ * through it: neither a supervisor starting, which makes each such directory
+ * root's again and removes none, nor a look for or through the places every
+ * user may write.
+ *
+ * NOTHING ELSE OF A SESSION OUTLIVES IT. Once its process has exited its user's
  * processes are killed, its directories emptied as that user and removed, and
  * once no process of its user is left, everything it owns in the places every
  * user may write is removed as that user and every System V IPC object it
@@ -49,8 +60,8 @@
  * The places every user may write are found when the supervisor starts,
  * once no session user's process is left: every directory any user may
  * write on each filesystem the container
- * mounts writable, outside what a session's user owns and what another user
- * owns that no other user may enter. A user's clear never enters a directory
+ * mounts writable, outside the threads' workspaces, what a session's user
+ * owns and what another user owns that no other user may enter. A user's clear never enters a directory
  * another user owns: that is its owner's to empty, with what anyone left in
  * it, so no user's tree can fail another's clear. A user that makes its own
  * such directory one it cannot empty is held, and only that user, and what
@@ -86,6 +97,7 @@ import {
   statfs,
   writeFile,
 } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { basename, join } from "node:path";
 import { URL, fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -98,6 +110,8 @@ import {
 import {
   chatChannelDescriptor,
   chatChannelLine,
+  chatChannelTurnBytesMax,
+  chatChannelTurnHeld,
   chatChannelVariable,
   chatCheckoutCarried,
   chatCheckoutVariable,
@@ -105,14 +119,14 @@ import {
   chatMintedVariable,
 } from "./chatChannel.mjs";
 import { agentCredentialCarried } from "./agentCredentialSet.mjs";
-import { chatAbortable } from "./chatCheckout.mjs";
+import { chatAbortable, chatCheckoutHandedOver } from "./chatCheckout.mjs";
 import { claudeCredentialPrepared } from "./claude.mjs";
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import {
   workerImageSteeringVariables,
   workerImageVariable,
 } from "./checks.mjs";
-import { jobPidsMax, jobRunDirectory } from "./job.mjs";
+import { jobPidsMax, jobRepositoryDirectory, jobRunDirectory } from "./job.mjs";
 import { poolSessionPhase } from "./poolSessionPlane.mjs";
 import { credentialScrub } from "./runEvidence.mjs";
 
@@ -126,6 +140,9 @@ export const chatSessionUidCount = 32;
 
 /** Where each session's own directory is made. */
 export const chatSessionsDirectory = "/sessions";
+
+/** The name, in the sessions' directory, of the one each thread's workspace is kept in. */
+export const chatSessionThreads = "threads";
 
 /** Where each session's own minted directory is made. */
 export const chatSessionsMintedDirectory = join(jobRunDirectory, "sessions");
@@ -335,6 +352,7 @@ export function chatSystem({ spawn = spawnDefault, scratch } = {}) {
       await chown(path, uid, uid);
       await chmod(path, chatSessionDirectoryMode);
     },
+    ...chatSystemThreads(),
     listed: async (path) =>
       Promise.all(
         (await readdir(path)).map(async (name) => ({
@@ -361,9 +379,9 @@ export function chatSystem({ spawn = spawnDefault, scratch } = {}) {
     removed: (path) => rm(path, { recursive: true, force: true }),
     named: chatUsersNamed,
     scratchFound: async (settings) => scratch ?? chatScratchFound(settings),
-    scattered: async (uid, roots, signal) => {
+    scattered: async (uid, scratch, signal) => {
       const cleared = await Promise.allSettled([
-        chatScratchCleared(uid, roots, asUser, signal),
+        chatScratchCleared(uid, scratch, asUser, signal),
         chatSessionIpcCleared(uid, {
           read: (table) => readFile(table, "utf8").catch(() => undefined),
           remove: (flag, id) => asUser(uid, ["ipcrm", flag, id], { signal }),
@@ -371,6 +389,24 @@ export function chatSystem({ spawn = spawnDefault, scratch } = {}) {
       ]);
       const failed = cleared.find(({ status }) => status === "rejected");
       if (failed !== undefined) throw failed.reason;
+    },
+  };
+}
+
+/**
+ * How a thread's workspace is handed to a session's user, everything in it
+ * that user's, and kept once it is not: root's, and entered by no one else.
+ */
+function chatSystemThreads() {
+  return {
+    threadHanded: async (path, uid) => {
+      await mkdir(path, { recursive: true, mode: chatSessionDirectoryMode });
+      await chatCheckoutHandedOver(path, { uid, gid: uid });
+      await chmod(path, chatSessionDirectoryMode);
+    },
+    threadKept: async (path) => {
+      await chown(path, 0, 0);
+      await chmod(path, chatSessionDirectoryMode);
     },
   };
 }
@@ -447,9 +483,26 @@ export async function chatSessionScratchListed(starts, expression, signal) {
  */
 async function chatScratchFound(settings) {
   const mounts = await readFile("/proc/self/mounts", "utf8");
-  return chatSessionScratchListed(chatSessionMountsWalked(mounts), [
+  return chatSessionScratchListed(
+    chatSessionMountsWalked(mounts),
+    chatSessionScratchPlaces(settings),
+  );
+}
+
+/**
+ * What `find` is handed to print each place every user may write, as
+ * `chatScratchFound` says, passing over the threads' workspaces whole.
+ */
+export function chatSessionScratchPlaces(settings) {
+  return [
     "-xdev",
     "-ignore_readdir_race",
+    "(",
+    "-path",
+    chatSessionThreadsRoot(settings.sessionsRoot),
+    "-prune",
+    ")",
+    "-o",
     "(",
     "-type",
     "d",
@@ -479,7 +532,7 @@ async function chatScratchFound(settings) {
     "-0002",
     "-print0",
     ")",
-  ]);
+  ];
 }
 
 /**
@@ -532,13 +585,14 @@ async function chatSystemExists(path) {
 }
 
 /**
- * Everything `uid` owns under `roots`, found by root without following a
- * link, leaving a root's filesystem or entering a directory another user
- * owns, and removed as `uid`, so a link the user or another planted reaches
- * nothing `uid` could not remove itself. A directory it owns goes whole.
- * Anything left fails the clear, as does `signal` cutting it short.
+ * Everything `uid` owns under the scratch places' `roots`, found by root
+ * without following a link, leaving a root's filesystem, entering a directory
+ * another user owns or entering `kept`, and removed as `uid`, so a link the
+ * user or another planted reaches nothing `uid` could not remove itself. A
+ * directory it owns goes whole. Anything left fails the clear, as does
+ * `signal` cutting it short.
  */
-async function chatScratchCleared(uid, roots, asUser, signal) {
+async function chatScratchCleared(uid, { roots, kept }, asUser, signal) {
   const present = [];
   for (const root of new Set(roots))
     if (await chatSystemExists(root)) present.push(root);
@@ -546,27 +600,7 @@ async function chatScratchCleared(uid, roots, asUser, signal) {
   const found = () =>
     chatSessionScratchListed(
       present,
-      [
-        "-xdev",
-        "-ignore_readdir_race",
-        "-mindepth",
-        "1",
-        "(",
-        "-user",
-        String(uid),
-        "-prune",
-        "-print0",
-        ")",
-        "-o",
-        "(",
-        "-type",
-        "d",
-        "!",
-        "-user",
-        "0",
-        "-prune",
-        ")",
-      ],
+      chatSessionScratchOwned(uid, kept),
       signal,
     );
   const paths = await found();
@@ -586,6 +620,40 @@ async function chatScratchCleared(uid, roots, asUser, signal) {
     throw new Error(
       `what user ${String(uid)} left in ${present.join(", ")} outlived its removal`,
     );
+}
+
+/**
+ * What `find` is handed to print everything `uid` owns, as
+ * `chatScratchCleared` says, passing over `kept` whole.
+ */
+export function chatSessionScratchOwned(uid, kept) {
+  return [
+    "-xdev",
+    "-ignore_readdir_race",
+    "-mindepth",
+    "1",
+    "(",
+    "-path",
+    kept,
+    "-prune",
+    ")",
+    "-o",
+    "(",
+    "-user",
+    String(uid),
+    "-prune",
+    "-print0",
+    ")",
+    "-o",
+    "(",
+    "-type",
+    "d",
+    "!",
+    "-user",
+    "0",
+    "-prune",
+    ")",
+  ];
 }
 
 /** Each object of a System V IPC table `text` is, made by `uid`: its flag for `ipcrm` beside its id. */
@@ -637,20 +705,46 @@ export function chatSessionHome(sessionsRoot, uid) {
   return join(sessionsRoot, `session-${String(uid)}`, "home");
 }
 
+/** The directory each thread's workspace is kept in. */
+function chatSessionThreadsRoot(sessionsRoot) {
+  return join(sessionsRoot, chatSessionThreads);
+}
+
 /**
- * A session's places: its user, its directory and the ones in it, its minted
- * directory, and the supervisor's for its checkout.
+ * The workspace kept for `thread`, named for its project and session hashed,
+ * so no identity is a path.
+ *
+ * @param {string} sessionsRoot
+ * @param {import("@chuggy/worker-contract/workerPool").WorkerPoolThreadClosed} thread
  */
-function chatSessionPlace(settings, uid, assignment) {
+export function chatSessionThreadDirectory(sessionsRoot, thread) {
+  const name = createHash("sha256")
+    .update(JSON.stringify([thread.project, thread.session]))
+    .digest("hex");
+  return join(chatSessionThreadsRoot(sessionsRoot), name);
+}
+
+/**
+ * A session's places: its user, its directory and the ones in it, its
+ * workspace, which is its thread's where it has one and its directory
+ * otherwise, its minted directory, and the supervisor's for its checkout.
+ */
+function chatSessionPlace(settings, uid, assignment, thread) {
   const id = `session-${String(uid)}`;
-  const workspace = join(settings.sessionsRoot, id);
+  const directory = join(settings.sessionsRoot, id);
+  const kept =
+    thread === undefined
+      ? undefined
+      : chatSessionThreadDirectory(settings.sessionsRoot, thread);
   return {
     id,
     label: chatSessionLabel(assignment, uid),
     uid,
-    workspace,
+    directory,
+    kept,
+    workspace: kept ?? directory,
     home: chatSessionHome(settings.sessionsRoot, uid),
-    temporary: join(workspace, "tmp"),
+    temporary: join(directory, "tmp"),
     minted: join(settings.mintedRoot, id),
     checkoutMinted: join(settings.supervisorMinted, id),
     made: [],
@@ -728,7 +822,10 @@ async function chatSessionsUsersCleared(state) {
       ))
     )
       hold(uid);
-  state.scratch = await system.scratchFound(settings);
+  state.scratch = {
+    roots: await system.scratchFound(settings),
+    kept: chatSessionThreadsRoot(settings.sessionsRoot),
+  };
   for (const uid of uids)
     if (
       !state.held.has(uid) &&
@@ -754,12 +851,14 @@ async function chatSessionCleared(state, place) {
   let cleared = await attempt("the sweep of its processes", () =>
     system.swept(place.uid, signal),
   );
-  for (const path of [place.workspace, place.minted])
+  for (const path of [place.directory, place.minted])
     if (place.made.includes(path))
       cleared =
         (await attempt(`the removal of ${path}`, () =>
           system.emptied(path, place.uid, signal),
         )) && cleared;
+  if (place.kept !== undefined && place.made.includes(place.kept))
+    cleared = (await chatSessionThreadKept(state, place, signal)) && cleared;
   cleared =
     (await attempt(`the removal of ${place.checkoutMinted}`, () =>
       system.removed(place.checkoutMinted),
@@ -774,15 +873,45 @@ async function chatSessionCleared(state, place) {
 }
 
 /**
- * The directories a session is prepared in, made as its user's, each named
- * among what the session made before it is made, so one left half-made is
- * cleared with the rest.
+ * A thread's workspace kept once its session has ended, its user's processes
+ * swept: the tree checked out in it removed as that user, since it borrows
+ * from a mirror and the next session's is checked out afresh, and the
+ * directory root's again; whether both went.
+ */
+async function chatSessionThreadKept(state, place, signal) {
+  const { system } = state;
+  const checkout = jobRepositoryDirectory(place.workspace);
+  const removed = await chatSessionAttempted(
+    state,
+    place.label,
+    `the removal of ${checkout}`,
+    () => system.emptied(checkout, place.uid, signal),
+  );
+  const kept = await chatSessionAttempted(
+    state,
+    place.label,
+    `the keeping of ${place.workspace}`,
+    () => system.threadKept(place.workspace),
+  );
+  return removed && kept;
+}
+
+/**
+ * The directories a session is prepared in, made as its user's, and its
+ * thread's workspace handed to it whole, a tree a session before it left
+ * there removed first; each named among what the session made before it is
+ * made or handed, so one left half-made is cleared with the rest.
  */
 async function chatSessionDirectories(state, place) {
   const { system } = state;
-  for (const path of [place.workspace, place.home, place.temporary]) {
+  for (const path of [place.directory, place.home, place.temporary]) {
     place.made.push(path);
     await system.made(path, place.uid);
+  }
+  if (place.kept !== undefined) {
+    place.made.push(place.kept);
+    await system.removed(jobRepositoryDirectory(place.kept));
+    await system.threadHanded(place.kept, place.uid);
   }
   place.made.push(place.minted);
   await system.made(place.minted, place.uid);
@@ -879,8 +1008,9 @@ function chatSessionOutput(state, place, stream, scrub) {
 }
 
 /**
- * The session's process, once it has started: `stop` asks it to end, and
- * `ended` is the phase it ended in, once nothing of it is left.
+ * The session's process, once it has started: `stop` asks it to end, `drain`
+ * asks it to end once it holds no claimed turn, as it says on its channel,
+ * and `ended` is the phase it ended in, once nothing of it is left.
  */
 function chatSessionRunning(state, place, child, launch) {
   const channel = child.stdio[chatChannelDescriptor];
@@ -891,6 +1021,8 @@ function chatSessionRunning(state, place, child, launch) {
   chatSessionOutput(state, place, child.stderr, launch.scrub);
   let stopping = false;
   let expired = false;
+  let draining = false;
+  let holding = false;
   let grace;
   const stop = () => {
     if (stopping) return;
@@ -899,6 +1031,18 @@ function chatSessionRunning(state, place, child, launch) {
     grace = globalThis.setTimeout(() => {
       state.system.swept(place.uid).catch(() => undefined);
     }, state.settings.stopGraceMs);
+  };
+  const said = chatLineReader(chatChannelTurnBytesMax, {
+    line: (bytes) => {
+      holding = chatChannelTurnHeld(bytes) ?? holding;
+      if (draining && !holding) stop();
+    },
+    overlong: () => undefined,
+  });
+  channel.on("data", (chunk) => said.push(chunk));
+  const drain = () => {
+    draining = true;
+    if (!holding) stop();
   };
   const deadline = globalThis.setTimeout(
     () => {
@@ -918,7 +1062,7 @@ function chatSessionRunning(state, place, child, launch) {
     await chatSessionCleared(state, place);
     return phase;
   });
-  return { stop, ended };
+  return { stop, drain, ended };
 }
 
 /** The session's process started, or the reason it could not be. */
@@ -978,12 +1122,20 @@ async function chatSessionMade(state, place, held, envelope, signal) {
 
 /**
  * The session `envelope` stands for, prepared and started as a user of its
- * own on the credential `named` names, or the reason it was not, with
- * everything made for it gone; one naming a credential the supervisor holds
- * no file for is refused before anything is. `signal` cancels the
- * preparation, whose refusal is then its reason.
+ * own on the credential `named` names, in the workspace kept for `thread`
+ * where it names one, or the reason it was not, with everything made for it
+ * gone and its thread's workspace kept; one naming a credential the
+ * supervisor holds no file for is refused before anything is. `signal`
+ * cancels the preparation, whose refusal is then its reason.
  */
-async function chatSessionPrepared(state, assignment, envelope, signal, named) {
+async function chatSessionPrepared(
+  state,
+  assignment,
+  envelope,
+  signal,
+  named,
+  thread,
+) {
   let held;
   try {
     held = chatSessionCredentialHeld(state.settings, named);
@@ -997,6 +1149,7 @@ async function chatSessionPrepared(state, assignment, envelope, signal, named) {
     state.settings,
     chatSessionUid(state),
     assignment,
+    thread,
   );
   try {
     return await chatSessionMade(state, place, held, envelope, signal);
@@ -1028,7 +1181,9 @@ function chatSessionUser(settings, uid) {
  */
 async function chatSessionsLeftCleared(state, root) {
   const { settings, system, log } = state;
+  const kept = chatSessionThreadsRoot(settings.sessionsRoot);
   for (const { path, uid } of await system.listed(root)) {
+    if (path === kept) continue;
     const session = chatSessionUser(settings, uid);
     try {
       if (session) await system.emptied(path, uid);
@@ -1042,6 +1197,27 @@ async function chatSessionsLeftCleared(state, root) {
       );
     }
   }
+}
+
+/**
+ * Each thread's workspace a predecessor left made root's again, and none
+ * removed, so no session's user that a predecessor handed one to enters it
+ * as another thread's. A session's user one cannot be made root's again
+ * while it owns is held.
+ */
+async function chatSessionsThreadsKept(state) {
+  const { settings, system, log } = state;
+  for (const { path, uid } of await system.listed(
+    chatSessionThreadsRoot(settings.sessionsRoot),
+  ))
+    try {
+      await system.threadKept(path);
+    } catch (failure) {
+      if (chatSessionUser(settings, uid)) state.held.add(uid);
+      log(
+        `the thread's workspace at ${path} could not be kept: ${failure instanceof Error ? failure.message : String(failure)}\n`,
+      );
+    }
 }
 
 /**
@@ -1071,8 +1247,10 @@ async function chatSessionsUsersNamed(settings, system) {
  * The sessions a supervisor runs on `system`: refused unless its image names
  * every user of its range, then its roots made, every session user's
  * processes a predecessor left killed, the places every user writes found,
- * and what it left removed. `prepared` starts one for an assignment, on the
- * credential its `Start` names where it names one; `holding`
+ * what it left removed, and each thread's workspace it left kept.
+ * `prepared` starts one for an assignment, on the credential and in the
+ * thread's workspace its `Start` names where it names them; `forgotten`
+ * removes a thread's workspace, which no session of it is to hold; `holding`
  * is whether any session's directory is there, which a mirror's prune waits
  * on.
  *
@@ -1090,19 +1268,36 @@ export async function chatSessionsOpened(settings, seams) {
     checkout,
     held: new Set(),
     turn: 0,
-    scratch: [],
+    scratch: { roots: [], kept: chatSessionThreadsRoot(settings.sessionsRoot) },
   };
   await system.rootMade(settings.sessionsRoot, chatSessionsRootMode);
+  await system.rootMade(
+    chatSessionThreadsRoot(settings.sessionsRoot),
+    chatSessionsRootMode,
+  );
   await system.rootMade(settings.mintedRoot, chatSessionsRootMode);
   await system.rootMade(settings.supervisorMinted, chatSessionDirectoryMode);
   await chatSessionsUsersCleared(state);
   await chatSessionsLeftCleared(state, settings.sessionsRoot);
   await chatSessionsLeftCleared(state, settings.mintedRoot);
   await chatSessionsLeftCleared(state, settings.supervisorMinted);
+  await chatSessionsThreadsKept(state);
+  const kept = chatSessionThreadsRoot(settings.sessionsRoot);
   return {
-    prepared: (assignment, envelope, signal, credential) =>
-      chatSessionPrepared(state, assignment, envelope, signal, credential),
+    prepared: (assignment, envelope, signal, credential, thread) =>
+      chatSessionPrepared(
+        state,
+        assignment,
+        envelope,
+        signal,
+        credential,
+        thread,
+      ),
+    forgotten: (thread) =>
+      system.removed(chatSessionThreadDirectory(settings.sessionsRoot, thread)),
     holding: async () =>
-      (await system.listed(settings.sessionsRoot)).length > 0,
+      (await system.listed(settings.sessionsRoot)).some(
+        ({ path }) => path !== kept,
+      ),
   };
 }

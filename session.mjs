@@ -1330,9 +1330,14 @@ function sessionToolServers(context, facts, environment, services, sdk) {
  * The mailbox and the buffer its claims reset, hung on the context as one thing
  * rather than two: the reset is bound to the claim, so a turn that fails leaves
  * nothing for the next one to inherit. A claim is also where the watch for a
- * member's stop of the turn begins, in a session that holds one.
+ * member's stop of the turn begins, in a session that holds one, and a claim
+ * and a settlement are what `turnHeld` is told of, which a chat supervisor's
+ * drain waits on.
  */
-function sessionStagedMailbox(context, { request, wait: pause, now }) {
+function sessionStagedMailbox(
+  context,
+  { request, wait: pause, now, turnHeld = () => undefined },
+) {
   const staging = leadDecisionStaging();
   context.staging = staging;
   context.mailbox = sessionMailbox(context.task, context.bearer, {
@@ -1340,9 +1345,11 @@ function sessionStagedMailbox(context, { request, wait: pause, now }) {
     wait: pause,
     now,
     claim: (turn) => {
+      turnHeld(true);
       staging.reset(turn.input);
       context.stops?.watching(turn.turn);
     },
+    settle: () => turnHeld(false),
   });
 }
 
@@ -1505,6 +1512,7 @@ async function sessionRun(context, facts, opened) {
     request: context.request,
     wait: pause,
     now: context.now,
+    turnHeld: opened.services.turnHeld,
   });
   sessionStopHeard(context, opened.services.stopped);
   if (context.inquiry && sessionForkFrom(facts) === undefined)

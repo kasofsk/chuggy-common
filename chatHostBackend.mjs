@@ -26,14 +26,24 @@
  * A `Start` IS NEVER LOGGED, NOR WRITTEN ANYWHERE BUT THE SUPERVISOR'S
  * INPUT: it carries the session's bearer. It names the credential the host's
  * selector chose for its session, where the host gives one, and a session it
- * chose none for is refused. Each poll then names the credentials the
+ * chose none for is refused, and the thread its assignment names, where it
+ * names one. Each poll then names the credentials the
  * selector would choose from, and each answer's pauses are handed to it.
  * What the supervisor writes on its error stream is its log, and each line
  * of it naming a session this host started, as `chatSessionLabel` writes
  * one, goes to that session's log; every other line, one naming a session
  * this host never started among them, goes to the host's.
+ *
+ * A CLOSED THREAD IS FORGOTTEN ONCE. Each thread an answer names as closed is
+ * named to a ready or draining supervisor in a `Forget`, unless one is already
+ * unanswered for it or its `Forgotten` is among the most recent this host
+ * read, and no more are left unanswered at once than an answer names. A
+ * `Forget` a supervisor ended without answering is named again to the next,
+ * as each answer names the thread again while it is among the most recently
+ * closed.
  */
 
+import { workerPoolThreadsClosedMax } from "@chuggy/worker-contract/workerPool";
 import {
   chatHostStartSchema,
   chatProtocolFrameBytesMax,
@@ -51,6 +61,7 @@ import { poolSessionPhase } from "./poolSessionPlane.mjs";
  * @typedef {import("@chuggy/worker-contract/chatHost").ChatSupervisorReady} ChatSupervisorReady
  * @typedef {import("@chuggy/worker-contract/chatHost").ChatSupervisorFrame} ChatSupervisorFrame
  * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolSessionAssignment} WorkerPoolSessionAssignment
+ * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolThreadClosed} WorkerPoolThreadClosed
  * @typedef {import("./poolLoop.mjs").WorkerPoolAttempt} WorkerPoolAttempt
  * @typedef {import("./poolLoop.mjs").WorkerPoolBackend} WorkerPoolBackend
  * @typedef {import("./poolLoop.mjs").WorkerPoolSessionEnd} WorkerPoolSessionEnd
@@ -204,6 +215,7 @@ function chatHostSupervisorEnded(state, supervisor, why) {
         poolSessionPhase(false),
         `the supervisor ended: ${why}`,
       );
+  state.forgetting.clear();
   state.seams.log(`the supervisor ended: ${why}`);
   supervisor.handle.input.end();
   supervisor.finished();
@@ -267,6 +279,54 @@ function chatHostRefused(state, supervisor, frame) {
   );
 }
 
+/** The key a thread is held under, which no two threads share. */
+function chatHostThreadKey(thread) {
+  return JSON.stringify([thread.project, thread.session]);
+}
+
+/** A `Forgotten`: its thread's `Forget` answered, and kept among the most recent. */
+function chatHostForgotten(state, thread) {
+  const key = chatHostThreadKey(thread);
+  if (!state.forgetting.delete(key)) {
+    state.seams.log(
+      "the supervisor answered a Forget this host did not write, which is ignored",
+    );
+    return;
+  }
+  state.forgotten = [
+    ...state.forgotten.filter((kept) => kept !== key),
+    key,
+  ].slice(-workerPoolThreadsClosedMax);
+  state.seams.log(
+    `the supervisor removed the workspace of closed thread ${JSON.stringify(thread.session)}`,
+  );
+}
+
+/**
+ * Each thread `threads` names as closed named to the supervisor in a
+ * `Forget`, as the module says.
+ *
+ * @param {readonly WorkerPoolThreadClosed[]} threads
+ */
+function chatHostThreadsClosed(state, threads) {
+  const { supervisor } = state;
+  if (
+    supervisor === undefined ||
+    supervisor.exited ||
+    (supervisor.phase !== "Ready" && supervisor.phase !== "Draining")
+  )
+    return;
+  for (const thread of threads) {
+    const key = chatHostThreadKey(thread);
+    if (state.forgotten.includes(key) || state.forgetting.has(key)) continue;
+    if (state.forgetting.size >= workerPoolThreadsClosedMax) return;
+    state.forgetting.set(key, thread);
+    supervisor.handle.input.write(
+      chatProtocolLine({ frame: "Forget", thread }),
+    );
+  }
+}
+
 /**
  * One frame of the supervisor's, acted on as the frame it is.
  *
@@ -283,6 +343,8 @@ function chatHostFrame(state, supervisor, frame) {
     );
   if (frame.frame === "Drained")
     return state.seams.log("the supervisor has drained");
+  if (frame.frame === "Forgotten")
+    return chatHostForgotten(state, frame.thread);
   if (frame.frame === "Refused")
     return chatHostRefused(state, supervisor, frame);
   const entry = chatHostAnswered(state, supervisor, frame.assignment);
@@ -421,6 +483,9 @@ function chatHostStartLine(settings, assignment, credential) {
           outputBytesMax: settings.outputBytesMax,
         },
         ...(credential === undefined ? {} : { credential }),
+        ...(assignment.thread === undefined
+          ? {}
+          : { thread: assignment.thread }),
       }),
     );
   } catch {
@@ -501,7 +566,7 @@ function chatHostStopped(state, assignment) {
   return { stopped: "Stopped" };
 }
 
-/** Tells a ready supervisor to start nothing more and exit once its sessions end of themselves. */
+/** Tells a ready supervisor to start nothing more, and to end each session once it holds no claimed turn and then exit. */
 function chatHostDrained(state) {
   const { supervisor } = state;
   if (supervisor?.phase !== "Ready") return;
@@ -575,6 +640,10 @@ export function chatHostBackend(settings, seams) {
     recent: [],
     /** @type {ChatHostSupervisor | undefined} */
     supervisor: undefined,
+    /** @type {Map<string, WorkerPoolThreadClosed>} */
+    forgetting: new Map(),
+    /** @type {string[]} */
+    forgotten: [],
   };
   return {
     place: async (assignment, kind) =>
@@ -602,6 +671,7 @@ export function chatHostBackend(settings, seams) {
         .map(([assignment]) => assignment),
     drain: () => chatHostDrained(state),
     closed: () => chatHostClosed(state),
+    threadsClosedTaken: (threads) => chatHostThreadsClosed(state, threads),
     ...(seams.credentialsNamed === undefined
       ? {}
       : { credentialsNamed: seams.credentialsNamed }),

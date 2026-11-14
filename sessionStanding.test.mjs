@@ -120,3 +120,32 @@ test("a chat host's thread whose standing is fenced or unauthorized ends before 
     );
   }
 });
+
+/**
+ * Catches a chat host's session that tells its supervisor it holds no turn
+ * while one is claimed, which a drain then stops in the middle of, or that
+ * never says the turn settled, which a drain then waits on for good.
+ */
+test("a chat host's session says it holds a turn once the plane hands it one, and that it holds none once the turn is answered", async () => {
+  const plane = planeOf([turnOne, { ...turnOne, turn: "turn-2" }], threadFacts);
+  const said = [];
+  const { query } = queryOf(() => [
+    { type: "system", subtype: "init", session_id: "runtime-1" },
+    result("success", { result: "ok" }),
+  ]);
+
+  await run({
+    request: plane.request,
+    requestOnce: plane.requestOnce,
+    query,
+    chatHost: true,
+    turnHeld: (held) => said.push([held, plane.calls.at(-1)?.path]),
+  });
+
+  assert.deepEqual(said, [
+    [true, sessionPlaneRoutes.turn.path],
+    [false, sessionPlaneRoutes.turnAnswer.path],
+    [true, sessionPlaneRoutes.turn.path],
+    [false, sessionPlaneRoutes.turnAnswer.path],
+  ]);
+});

@@ -281,7 +281,7 @@ export async function chatCheckout(task, bearer, workspace, services) {
 }
 
 /** A tree given whole to `user`'s user and group, each link itself rather than what it names. */
-async function chatCheckoutHandedOver(directory, user) {
+export async function chatCheckoutHandedOver(directory, user) {
   await executeFile("chown", [
     "-R",
     "-h",

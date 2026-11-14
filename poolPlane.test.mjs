@@ -511,6 +511,39 @@ test("an answer's credential outcomes and pauses are passed on, and none where i
   assert.ok(!("credentialOutcomes" in none) && !("credentialPauses" in none));
 });
 
+/** Catches the threads a chat host keeps workspaces for dropped as the answer is rebuilt, or made up where the plane left them out. */
+test("an answer's closed threads and each session's thread are passed on, and none where it names none", async () => {
+  const thread = { project: "project-1", session: "thread-1" };
+  const session = {
+    assignment: "session-1",
+    capabilities: [],
+    cpuMillis: 500,
+    memoryMib: 512,
+    deadlineSecs: 1_800,
+    callbackUrl: "https://worker-plane.invalid/v1/session",
+    bearer: "chgs_0123456789abcdef0123456789abcdef",
+    image: "registry.invalid/chuggy/chat:1",
+    thread,
+  };
+  const passed = await answering(
+    200,
+    JSON.stringify({
+      assignments: [],
+      sessions: [session],
+      stop: [],
+      threadsClosed: [thread],
+    }),
+  ).poll("pool-token", [], 0, 1);
+  assert.deepEqual(passed.threadsClosed, [thread]);
+  assert.deepEqual(passed.sessions?.[0]?.thread, thread);
+  const none = await answering(
+    200,
+    JSON.stringify({ assignments: [], sessions: [], stop: [] }),
+  ).poll("pool-token", [], 1);
+  assert.equal(none.polled, "Reconciled");
+  assert.ok(!("threadsClosed" in none));
+});
+
 /**
  * Catches capabilities the plane would refuse reaching a poll, whose 400 ends
  * the pool, and a set bounded before its duplicates are dropped.

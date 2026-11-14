@@ -7,10 +7,19 @@
 
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PassThrough } from "node:stream";
+import { Duplex, PassThrough } from "node:stream";
+import process from "node:process";
 import test, { afterEach } from "node:test";
 
 import {
@@ -25,6 +34,9 @@ import {
   chatSessionLabel,
   chatSessionMountsWalked,
   chatSessionScratchListed,
+  chatSessionScratchOwned,
+  chatSessionScratchPlaces,
+  chatSessionThreadDirectory,
   chatSessionsOpened,
 } from "./chatSession.mjs";
 import { agentCredentialNameVariable } from "./agentCredentialSet.mjs";
@@ -83,14 +95,18 @@ afterEach(() => {
   for (const child of childrenStarted.splice(0)) child.emit("exit", 0, null);
 });
 
-/** A child process as `spawn` answers one, whose channel's writes are kept. */
+/** A child process as `spawn` answers one, whose channel's writes are kept, and on whose channel `says` writes as the session. */
 function childOf() {
   const child = new EventEmitter();
-  const channel = new PassThrough();
   child.written = "";
-  channel.on("data", (chunk) => {
-    child.written += chunk;
+  const channel = new Duplex({
+    read: () => undefined,
+    write: (chunk, _, done) => {
+      child.written += chunk;
+      done();
+    },
   });
+  child.says = (line) => channel.push(line);
   child.channel = channel;
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
@@ -139,6 +155,8 @@ function systemOf(overrides = {}) {
     swept: recorded("swept"),
     emptied: recorded("emptied"),
     removed: recorded("removed"),
+    threadHanded: recorded("threadHanded"),
+    threadKept: recorded("threadKept"),
     scattered: async (uid, roots) => {
       calls.push(["scattered", uid]);
       system.scratched = roots;
@@ -615,7 +633,7 @@ test("a stop ends the session's channel, and its user's processes are killed onc
   await sessions.prepared(assignment, envelope, live());
   const running = await sessions.prepared(assignment, envelope, live());
   const { child } = system.children[1];
-  const ended = new Promise((resolve) => child.channel.once("end", resolve));
+  const ended = new Promise((resolve) => child.channel.once("finish", resolve));
   const before = system.calls.length;
 
   running.stop();
@@ -639,7 +657,7 @@ test("a session still running at its deadline is stopped, and ends Failed howeve
   );
   const { child } = system.children[0];
 
-  await new Promise((resolve) => child.channel.once("end", resolve));
+  await new Promise((resolve) => child.channel.once("finish", resolve));
   child.emit("exit", 0, null);
 
   assert.equal(await running.ended, "Failed");
@@ -846,7 +864,9 @@ test("sessions opened sweep every session user and clear what a predecessor left
     "/sessions": [
       { path: "/sessions/session-20001", uid: 20_001 },
       { path: "/sessions/stray", uid: 0 },
+      { path: "/sessions/threads", uid: 0 },
     ],
+    "/sessions/threads": [{ path: "/sessions/threads/kept", uid: 20_000 }],
     "/minted": [{ path: "/minted/session-20001", uid: 20_001 }],
     "/supervisor": [{ path: "/supervisor/session-20001", uid: 0 }],
   };
@@ -856,6 +876,7 @@ test("sessions opened sweep every session user and clear what a predecessor left
 
   assert.deepEqual(system.calls, [
     ["rootMade", "/sessions", 0o711],
+    ["rootMade", "/sessions/threads", 0o711],
     ["rootMade", "/minted", 0o711],
     ["rootMade", "/supervisor", 0o700],
     ["swept", 20_000],
@@ -867,8 +888,12 @@ test("sessions opened sweep every session user and clear what a predecessor left
     ["removed", "/sessions/stray"],
     ["emptied", "/minted/session-20001", 20_001],
     ["removed", "/supervisor/session-20001"],
+    ["threadKept", "/sessions/threads/kept"],
   ]);
-  assert.deepEqual(system.scratched, ["/tmp", "/run/lock"]);
+  assert.deepEqual(system.scratched, {
+    roots: ["/tmp", "/run/lock"],
+    kept: "/sessions/threads",
+  });
   assert.equal(await sessions.holding(), true);
 });
 
@@ -1209,4 +1234,282 @@ test("two sessions naming two credentials are each handed a copy of its own cred
     ),
     ["team-a", "team-c"],
   );
+});
+
+const thread = { project: "project-1", session: "thread-1" };
+const otherThread = { project: "project-1", session: "thread-2" };
+
+/**
+ * Catches a thread's session handed a workspace of its own rather than its
+ * thread's, or its thread's emptied at its end, or left its user's, which a
+ * session of another thread run as that user would then enter.
+ */
+test("a thread's session works in the workspace kept for it, handed it whole, and at its end its tree is removed and the workspace is root's again", async () => {
+  const system = systemOf();
+  const { sessions, checkouts } = await sessionsOf(system);
+  const kept = chatSessionThreadDirectory("/sessions", thread);
+  const before = system.calls.length;
+
+  const running = await sessions.prepared(
+    assignment,
+    envelope,
+    live(),
+    undefined,
+    thread,
+  );
+
+  const [{ options }] = system.children;
+  assert.equal(options.cwd, kept);
+  assert.equal(options.env.CHUG_WORKER_WORKSPACE, kept);
+  assert.equal(options.env.HOME, "/sessions/session-20000/home");
+  assert.equal(options.env.TMPDIR, "/sessions/session-20000/tmp");
+  assert.equal(checkouts[0].workspace, kept);
+  assert.deepEqual(since(system, before).slice(0, 6), [
+    ["made", "/sessions/session-20000", 20_000],
+    ["made", "/sessions/session-20000/home", 20_000],
+    ["made", "/sessions/session-20000/tmp", 20_000],
+    ["removed", `${kept}/repository`],
+    ["threadHanded", kept, 20_000],
+    ["made", "/minted/session-20000", 20_000],
+  ]);
+  const ending = system.calls.length;
+  system.children[0].child.emit("exit", 0, null);
+  assert.equal(await running.ended, "Succeeded");
+  assert.deepEqual(since(system, ending), [
+    ["swept", 20_000],
+    ["emptied", "/sessions/session-20000", 20_000],
+    ["emptied", "/minted/session-20000", 20_000],
+    ["emptied", `${kept}/repository`, 20_000],
+    ["threadKept", kept],
+    ["removed", "/supervisor/session-20000"],
+    ["scattered", 20_000],
+  ]);
+});
+
+test("a thread's workspace is named for its thread alone, and a session naming none is given none", async () => {
+  const system = systemOf();
+  const { sessions } = await sessionsOf(system);
+
+  await sessions.prepared(assignment, envelope, live());
+
+  assert.notEqual(
+    chatSessionThreadDirectory("/sessions", thread),
+    chatSessionThreadDirectory("/sessions", otherThread),
+  );
+  assert.notEqual(
+    chatSessionThreadDirectory("/sessions", thread),
+    chatSessionThreadDirectory("/sessions", {
+      project: "project-2",
+      session: "thread-1",
+    }),
+  );
+  assert.ok(!system.calls.some(([name]) => name.startsWith("thread")));
+});
+
+/** Catches a user left holding its thread's workspace after a keeping that failed, which a session of another thread would then be run as. */
+test("a session whose thread's workspace could not be kept again holds its user", async () => {
+  const system = systemOf({
+    threadKept: async () => {
+      throw new Error("EPERM");
+    },
+  });
+  const { sessions, logged } = await sessionsOf(system);
+  const running = await sessions.prepared(
+    assignment,
+    envelope,
+    live(),
+    undefined,
+    thread,
+  );
+
+  system.children[0].child.emit("exit", 0, null);
+  await running.ended;
+
+  assert.match(logged.join(""), /its user is not given out again/u);
+  await sessions.prepared(assignment, envelope, live());
+  assert.ok(system.children[1].args.includes("--reuid=20001"));
+});
+
+/** A system on a real directory under `root`, owning nothing: it makes, removes and lists as the suite's own user. */
+function systemOnDisk(root) {
+  const system = systemOf({
+    rootMade: async (path) => {
+      await mkdir(path, { recursive: true });
+    },
+    made: async (path) => {
+      await mkdir(path);
+    },
+    threadHanded: async (path, uid) => {
+      system.calls.push(["threadHanded", path, uid]);
+      await mkdir(path, { recursive: true });
+    },
+    emptied: async (path) => rm(path, { recursive: true, force: true }),
+    removed: async (path) => rm(path, { recursive: true, force: true }),
+    listed: async (path) =>
+      (await readdir(path)).map((name) => ({ path: join(path, name), uid: 0 })),
+    named: async (uids) =>
+      new Map(
+        uids.map((uid) => [uid, chatSessionHome(join(root, "sessions"), uid)]),
+      ),
+  });
+  return system;
+}
+
+/** Sessions opened on `system` under `root`, each checkout a tree with a file in it. */
+async function sessionsOnDisk(system, root) {
+  return sessionsOf(
+    system,
+    {
+      sessionsRoot: join(root, "sessions"),
+      mintedRoot: join(root, "minted"),
+      supervisorMinted: join(root, "supervisor"),
+    },
+    {
+      checkout: async (task, handed, workspace) => {
+        await mkdir(join(workspace, "repository"));
+        await writeFile(join(workspace, "repository", "README"), "tree");
+        return {
+          checkout: { directory: join(workspace, "repository"), commit: "abc" },
+        };
+      },
+    },
+  );
+}
+
+/** One session of `named` run to its end on `sessions`, having left `note` in its workspace and its home. */
+async function sessionLeaving(system, sessions, named, note) {
+  const running = await sessions.prepared(
+    assignment,
+    envelope,
+    live(),
+    undefined,
+    named,
+  );
+  const { options, child } = system.children.at(-1);
+  const found = await readdir(options.cwd);
+  await writeFile(join(options.cwd, "notes"), note);
+  await writeFile(join(options.env.HOME, "notes"), note);
+  child.emit("exit", 0, null);
+  await running.ended;
+  return { workspace: options.cwd, found };
+}
+
+/**
+ * Catches a thread's workspace emptied at its session's end, removed by the
+ * next supervisor's clear of what a predecessor left, or handed to a session
+ * of another thread.
+ */
+test("a thread's second session finds what its first left in its workspace, across a supervisor's start, and a session of another thread is given another", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chat-thread-"));
+  try {
+    const system = systemOnDisk(root);
+    const first = await sessionsOnDisk(system, root);
+    const left = await sessionLeaving(system, first.sessions, thread, "one");
+    const other = await sessionLeaving(
+      system,
+      first.sessions,
+      otherThread,
+      "two",
+    );
+    const { sessions } = await sessionsOnDisk(system, root);
+
+    const again = await sessionLeaving(system, sessions, thread, "three");
+
+    assert.equal(again.workspace, left.workspace);
+    assert.deepEqual(again.found.sort(), ["notes", "repository"]);
+    assert.equal(
+      await readFile(join(left.workspace, "notes"), "utf8"),
+      "three",
+    );
+    assert.notEqual(other.workspace, left.workspace);
+    assert.deepEqual(other.found, ["repository"]);
+    assert.deepEqual(await readdir(left.workspace), ["notes"]);
+    assert.deepEqual(await readdir(join(root, "sessions")), ["threads"]);
+    assert.equal(await sessions.holding(), false);
+
+    await sessions.forgotten(thread);
+
+    assert.deepEqual(await readdir(join(root, "sessions", "threads")), [
+      basenameOf(other.workspace),
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/** The last name in `path`. */
+function basenameOf(path) {
+  return path.slice(path.lastIndexOf("/") + 1);
+}
+
+/**
+ * Catches a drain that stops a session in the middle of a turn it claimed,
+ * or that waits on one holding none, which never ends a standing thread.
+ */
+test("a drained session holding no claimed turn is stopped at once, and one holding one once it says the turn settled", async () => {
+  const system = systemOf();
+  const { sessions } = await sessionsOf(system);
+  const idle = await sessions.prepared(assignment, envelope, live());
+  const busy = await sessions.prepared(assignment, envelope, live());
+  const [idleChild, busyChild] = system.children.map(({ child }) => child);
+  let busyStopped = false;
+  busyChild.channel.once("finish", () => {
+    busyStopped = true;
+  });
+  busyChild.says('{"turn":"Claimed"}\n');
+  await new Promise((resolve) => globalThis.setImmediate(resolve));
+
+  const idleStopped = new Promise((resolve) =>
+    idleChild.channel.once("finish", resolve),
+  );
+  idle.drain();
+  busy.drain();
+
+  await idleStopped;
+  await new Promise((resolve) => globalThis.setImmediate(resolve));
+  assert.equal(busyStopped, false);
+  busyChild.says("not a turn\n");
+  await new Promise((resolve) => globalThis.setImmediate(resolve));
+  assert.equal(busyStopped, false);
+  const stopped = new Promise((resolve) =>
+    busyChild.channel.once("finish", resolve),
+  );
+  busyChild.says('{"turn":"Settled"}\n');
+  await stopped;
+});
+
+/** Catches a look for the places every user writes that enters the threads' workspaces, whose own world-writable directories would then be cleared. */
+test("the places every user writes are looked for past the threads' workspaces, and what a user owns is looked for past them too", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chat-scratch-"));
+  try {
+    const threads = join(root, "sessions", "threads");
+    await mkdir(join(threads, "kept", "open"), { recursive: true });
+    await mkdir(join(root, "open"));
+    for (const path of [
+      threads,
+      join(threads, "kept", "open"),
+      join(root, "open"),
+    ])
+      await chmod(path, 0o777);
+    await writeFile(join(root, "sessions", "left"), "");
+    await chmod(root, 0o755);
+
+    const places = await chatSessionScratchListed(
+      [root],
+      chatSessionScratchPlaces({
+        sessionsRoot: join(root, "sessions"),
+        uidFirst: settings.uidFirst,
+        uidCount: settings.uidCount,
+      }),
+    );
+    const owned = await chatSessionScratchListed(
+      [join(root, "sessions")],
+      chatSessionScratchOwned(process.getuid?.() ?? 0, threads),
+    );
+
+    assert.deepEqual(places, [join(root, "open")]);
+    assert.deepEqual(owned, [join(root, "sessions", "left")]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

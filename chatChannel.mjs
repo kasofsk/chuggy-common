@@ -11,6 +11,12 @@
  * after the envelope is a supervisor this session cannot follow, and ends it
  * the same way.
  *
+ * THE SESSION SAYS ON THE SAME PIPE WHEN IT HOLDS A CLAIMED TURN: a line once
+ * the plane hands it one, and a line once it has answered or failed that turn
+ * there, each as `chatChannelTurnLine` writes it. That is all it says, and
+ * what a supervisor's drain waits on. A line the supervisor reads as neither
+ * is passed over.
+ *
  * WHAT THE SESSION IS GIVEN BESIDE IT IS IN ITS ENVIRONMENT, and none of it is
  * a secret: which descriptor the channel is, the directory its credentials are
  * minted to, and the checkout the supervisor made, as `sessionCheckout`
@@ -40,6 +46,14 @@ export const chatMintedVariable = "CHUG_CHAT_SESSION_MINTED";
 
 /** The variable carrying the checkout the supervisor made for a session. */
 export const chatCheckoutVariable = "CHUG_CHAT_SESSION_CHECKOUT";
+
+/** What a session says of its turn: it holds one the plane handed it, or it holds none. */
+const chatChannelTurnSchema = z.strictObject({
+  turn: z.enum(["Claimed", "Settled"]),
+});
+
+/** The longest line a session says, past which the supervisor keeps none of it. */
+export const chatChannelTurnBytesMax = 64;
 
 /** A checkout as `sessionCheckout` answers one: a tree, the refusal of one, or none. */
 const chatCheckoutSchema = z.union([
@@ -109,6 +123,28 @@ export function chatChannelLine(envelope) {
   return `${line}\n`;
 }
 
+/**
+ * The line a session writes once it holds a claimed turn, `held`, or once it
+ * has settled it.
+ *
+ * @param {boolean} held
+ */
+export function chatChannelTurnLine(held) {
+  return `${JSON.stringify({ turn: held ? "Claimed" : "Settled" })}\n`;
+}
+
+/**
+ * Whether the line a session wrote says it holds a claimed turn, or none, or
+ * neither, which is nothing.
+ *
+ * @param {Buffer} bytes
+ * @returns {boolean | undefined}
+ */
+export function chatChannelTurnHeld(bytes) {
+  const said = chatChannelTurnSchema.safeParse(chatChannelJson(bytes));
+  return said.success ? said.data.turn === "Claimed" : undefined;
+}
+
 /** A checkout as the session's environment carries it. */
 export function chatCheckoutCarried(checkout) {
   return JSON.stringify(chatCheckoutSchema.parse(checkout ?? {}));
@@ -142,10 +178,11 @@ function chatChannelJson(bytes) {
 /**
  * The session's end of its channel, read from `input`: the envelope, refused
  * where the channel ends or says anything else first, and `stopped`, which is
- * aborted once anything follows it, the channel's end included. `close` lets
- * go of the channel.
+ * aborted once anything follows it, the channel's end included. `turnHeld`
+ * says whether the session holds a claimed turn, and `close` lets go of the
+ * channel.
  *
- * @param {import("node:stream").Readable} input
+ * @param {import("node:stream").Duplex} input
  */
 export function chatChannelOpened(input) {
   const stop = new globalThis.AbortController();
@@ -184,6 +221,10 @@ export function chatChannelOpened(input) {
   return {
     envelope,
     stopped: stop.signal,
+    /** @param {boolean} held */
+    turnHeld: (held) => {
+      if (input.writable) input.write(chatChannelTurnLine(held));
+    },
     close: () => input.destroy(),
   };
 }

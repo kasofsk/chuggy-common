@@ -320,8 +320,8 @@ async function poolPlaneRefusal(answered) {
 
 /**
  * A reconciliation, saying whether a job waits only where the plane that gave
- * it claims by room and said, and the image a chat host's sessions run in
- * where it names one.
+ * it claims by room and said, and the image a chat host's sessions run in and
+ * the threads it last ran that have closed, where it names them.
  *
  * @param {Response} answered
  * @returns {Promise<WorkerPoolPolled>}
@@ -351,6 +351,7 @@ async function poolPlaneReconciled(answered) {
     chatImage,
     credentialOutcomes,
     credentialPauses,
+    threadsClosed,
   } = read.data;
   const waiting = poolPlaneClaimsByRoom(answered) ? jobsWaiting : undefined;
   return {
@@ -363,6 +364,7 @@ async function poolPlaneReconciled(answered) {
     ...(chatImage === undefined ? {} : { chatImage }),
     ...(credentialOutcomes === undefined ? {} : { credentialOutcomes }),
     ...(credentialPauses === undefined ? {} : { credentialPauses }),
+    ...(threadsClosed === undefined ? {} : { threadsClosed }),
   };
 }
 

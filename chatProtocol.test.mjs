@@ -48,7 +48,7 @@ import {
  * release window; then this is written again under the new version.
  */
 const recorded = {
-  protocol: 2,
+  protocol: 3,
   shape: {
     variables: [
       "CHUG_CHAT_CREDENTIAL",

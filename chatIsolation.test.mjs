@@ -597,7 +597,10 @@ test(
       await writeFile(planted, "x");
       await chown(planted, own, own);
 
-      await chatSystem().scattered(own, [scratch]);
+      await chatSystem().scattered(own, {
+        roots: [scratch],
+        kept: place("threads"),
+      });
 
       await assert.rejects(stat(left), { code: "ENOENT" });
       assert.equal((await stat(planted)).uid, own);

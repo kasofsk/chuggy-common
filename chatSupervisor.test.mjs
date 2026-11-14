@@ -36,13 +36,17 @@ const envelope = {
   outputBytesMax: 4_096,
 };
 
-/** A session a suite ends by hand: `stops` counts the asks, `end` ends it in `phase`. */
+/** A session a suite ends by hand: `stops` and `drains` count the asks, `end` ends it in `phase`. */
 function runningOf() {
   let end;
   const running = {
     stops: 0,
+    drains: 0,
     stop: () => {
       running.stops += 1;
+    },
+    drain: () => {
+      running.drains += 1;
     },
     ended: new Promise((resolve) => {
       end = resolve;
@@ -53,8 +57,9 @@ function runningOf() {
 }
 
 /**
- * A supervisor over sessions whose preparations a suite answers by hand:
- * `preparations` holds each, `frames` every frame it wrote after `Ready`,
+ * A supervisor over sessions whose preparations and removals a suite answers
+ * by hand: `preparations` holds each preparation, `removals` each thread's
+ * workspace asked removed, `frames` every frame it wrote after `Ready`,
  * `send` writes a frame of the host's.
  */
 function supervisorOf(sessionsMax = 2, protocol = undefined) {
@@ -62,6 +67,7 @@ function supervisorOf(sessionsMax = 2, protocol = undefined) {
   const written = [];
   const logged = [];
   const preparations = [];
+  const removals = [];
   const closed = new globalThis.AbortController();
   const done = chatSupervised({
     input,
@@ -73,16 +79,21 @@ function supervisorOf(sessionsMax = 2, protocol = undefined) {
     },
     log: (text) => logged.push(text),
     sessions: {
-      prepared: (assignment, handed, signal, credential) =>
+      prepared: (assignment, handed, signal, credential, thread) =>
         new Promise((resolve, reject) => {
           preparations.push({
             assignment,
             envelope: handed,
             signal,
             credential,
+            thread,
             resolve,
             reject,
           });
+        }),
+      forgotten: (thread) =>
+        new Promise((resolve, reject) => {
+          removals.push({ thread, resolve, reject });
         }),
     },
     sessionsMax,
@@ -95,6 +106,7 @@ function supervisorOf(sessionsMax = 2, protocol = undefined) {
     frames: () => written.slice(1),
     logged,
     preparations,
+    removals,
     closed,
     done,
     send: (...frames) => input.write(frames.map(chatProtocolLine).join("")),
@@ -115,14 +127,14 @@ const refused = (assignment, reason) => ({
   reason,
 });
 
-test("the supervisor speaks first, naming both protocols of its window, its sessions and its contract", () => {
+test("the supervisor speaks first, naming every protocol of its window, its sessions and its contract", () => {
   const supervisor = supervisorOf(3);
 
-  assert.equal(chatProtocolVersion, 2);
+  assert.equal(chatProtocolVersion, 3);
   assert.deepEqual(supervisor.written, [
     {
       frame: "Ready",
-      protocols: [1, 2],
+      protocols: [1, 2, 3],
       sessionsMax: 3,
       contractRelease: workerContractRelease,
     },
@@ -166,23 +178,32 @@ test("a Start naming a credential prepares its session on that credential", asyn
   ]);
 });
 
-/** Catches a supervisor of the window that stops serving a host a release behind it. */
-test("a host speaking only protocol 1 still gets its session, on no credential named", async () => {
-  const supervisor = supervisorOf(2, 1);
+/** Catches a supervisor of the window that stops serving a host a release or two behind it. */
+test("a host speaking protocol 1 or 2 still gets its session, on the credential protocol 2 may name and no thread", async () => {
+  for (const [protocol, named] of [
+    [1, undefined],
+    [2, credential],
+  ]) {
+    const supervisor = supervisorOf(2, protocol);
 
-  supervisor.send(start("a"));
-  await settled();
-  assert.equal(supervisor.preparations[0].credential, undefined);
-  const running = runningOf();
-  supervisor.preparations[0].resolve(running);
-  await settled();
-  running.end();
-  await settled();
+    supervisor.send({
+      ...start("a"),
+      ...(named === undefined ? {} : { credential: named }),
+    });
+    await settled();
+    assert.deepEqual(supervisor.preparations[0].credential, named);
+    assert.equal(supervisor.preparations[0].thread, undefined);
+    const running = runningOf();
+    supervisor.preparations[0].resolve(running);
+    await settled();
+    running.end();
+    await settled();
 
-  assert.deepEqual(supervisor.frames(), [
-    { frame: "Started", assignment: "a" },
-    { frame: "Ended", assignment: "a", phase: "Succeeded" },
-  ]);
+    assert.deepEqual(supervisor.frames(), [
+      { frame: "Started", assignment: "a" },
+      { frame: "Ended", assignment: "a", phase: "Succeeded" },
+    ]);
+  }
 });
 
 /** Catches a host of protocol 1 whose `Start` is read in a later protocol's shape. */
@@ -332,12 +353,13 @@ test("a Stop for an assignment neither prepared nor run is answered by nothing",
 });
 
 /**
- * Catches a `Drain` that stops what is running, cancels what is prepared, or
- * says `Drained` before every `Start` read before it has its answer and every
- * `Started` its `Ended`.
+ * Catches a supervisor that drains a host of protocol 2 as protocol 3 does:
+ * stopping what is running, cancelling what is prepared, or saying `Drained`
+ * before every `Start` read before it has its answer and every `Started` its
+ * `Ended`.
  */
-test("Drain only waits: Drained once every Start before it is answered and every session has ended, then the supervisor exits", async () => {
-  const supervisor = supervisorOf();
+test("to a host of protocol 2, Drain only waits: Drained once every Start before it is answered and every session has ended, then the supervisor exits", async () => {
+  const supervisor = supervisorOf(2, 2);
   supervisor.send(start("a"), start("b"));
   await settled();
   const [a, b] = supervisor.preparations;
@@ -349,6 +371,7 @@ test("Drain only waits: Drained once every Start before it is answered and every
   await settled();
   assert.equal(a.signal.aborted, false);
   assert.equal(runningB.stops, 0);
+  assert.equal(runningB.drains, 0);
   runningB.end();
   await settled();
   const runningA = runningOf();
@@ -374,6 +397,202 @@ test("a Drain with nothing to wait for is Drained at once", async () => {
 
   assert.equal(await supervisor.done, 0);
   assert.deepEqual(supervisor.frames(), [{ frame: "Drained" }]);
+});
+
+const thread = { project: "project-1", session: "thread-1" };
+const forget = (named) => ({ frame: "Forget", thread: named });
+const forgotten = (named) => ({ frame: "Forgotten", thread: named });
+
+/**
+ * Catches a protocol-3 `Drain` that waits on a session no turn holds, which
+ * leaves a standing thread's supervisor draining for good, or that stops one
+ * outright rather than asking it to end once its turn settles.
+ */
+test("a Drain cancels each preparation and asks each session to end once it holds no claimed turn, and is Drained once all have ended", async () => {
+  const supervisor = supervisorOf();
+  supervisor.send(start("a"), start("b"));
+  await settled();
+  const [a, b] = supervisor.preparations;
+  const runningB = runningOf();
+  b.resolve(runningB);
+  await settled();
+
+  supervisor.send({ frame: "Drain" }, start("c"));
+  await settled();
+
+  assert.equal(a.signal.aborted, true);
+  assert.equal(runningB.drains, 1);
+  assert.equal(runningB.stops, 0);
+  a.reject(a.signal.reason);
+  await settled();
+  assert.ok(!supervisor.frames().some(({ frame }) => frame === "Drained"));
+  runningB.end();
+  assert.equal(await supervisor.done, 0);
+  assert.deepEqual(supervisor.frames(), [
+    { frame: "Started", assignment: "b" },
+    refused("c", "Draining"),
+    refused("a", "Stopped"),
+    { frame: "Ended", assignment: "b", phase: "Succeeded" },
+    { frame: "Drained" },
+  ]);
+});
+
+/** Catches two sessions of one thread run at once in the one workspace kept for it. */
+test("a Start naming a thread is prepared in it, and one more of that thread only once the first has ended", async () => {
+  const supervisor = supervisorOf(3);
+  const other = { ...thread, session: "thread-2" };
+  supervisor.send(
+    { ...start("a"), thread },
+    { ...start("b"), thread },
+    { ...start("c"), thread: other },
+  );
+  await settled();
+
+  assert.deepEqual(
+    supervisor.preparations.map(({ assignment, thread: named }) => [
+      assignment,
+      named,
+    ]),
+    [
+      ["a", thread],
+      ["c", other],
+    ],
+  );
+  const running = runningOf();
+  supervisor.preparations[0].resolve(running);
+  await settled();
+  running.end();
+  await settled();
+  assert.deepEqual(
+    supervisor.preparations.map(({ assignment }) => assignment),
+    ["a", "c", "b"],
+  );
+  assert.deepEqual(supervisor.preparations[2].thread, thread);
+});
+
+/**
+ * Catches a closed thread's workspace removed under a session still running
+ * in it, or a Start of it prepared once its Forget is read, or a Forget
+ * answered other than once.
+ */
+test("a Forget removes its thread's workspace once the thread's session has ended, refusing its Starts meanwhile, and is answered once for each", async () => {
+  const supervisor = supervisorOf(3);
+  supervisor.send({ ...start("a"), thread });
+  await settled();
+  const running = runningOf();
+  supervisor.preparations[0].resolve(running);
+  await settled();
+
+  supervisor.send(forget(thread), forget(thread), { ...start("b"), thread });
+  await settled();
+
+  assert.deepEqual(supervisor.removals, []);
+  running.end();
+  await settled();
+  assert.deepEqual(
+    supervisor.removals.map(({ thread: named }) => named),
+    [thread],
+  );
+  assert.ok(!supervisor.frames().some(({ frame }) => frame === "Forgotten"));
+  supervisor.removals[0].resolve();
+  await settled();
+  assert.deepEqual(supervisor.frames(), [
+    { frame: "Started", assignment: "a" },
+    refused("b", "Unprepared"),
+    { frame: "Ended", assignment: "a", phase: "Succeeded" },
+    forgotten(thread),
+    forgotten(thread),
+  ]);
+  supervisor.send({ ...start("c"), thread });
+  await settled();
+  assert.equal(supervisor.preparations.at(-1)?.assignment, "c");
+});
+
+test("a Forget for a thread no session holds is answered once its workspace is removed, and one that could not be is said and answered", async () => {
+  const supervisor = supervisorOf();
+
+  supervisor.send(forget(thread));
+  await settled();
+  supervisor.removals[0].reject(new Error("EBUSY"));
+  await settled();
+
+  assert.deepEqual(supervisor.frames(), [forgotten(thread)]);
+  assert.match(supervisor.logged.join(""), /still kept: EBUSY/u);
+});
+
+/** Catches `Drained` written while a `Forget` read before it is unanswered. */
+test("after a Drain each Forget is still answered, and Drained follows the last", async () => {
+  const supervisor = supervisorOf();
+  supervisor.send(start("a"));
+  await settled();
+  const running = runningOf();
+  supervisor.preparations[0].resolve(running);
+  await settled();
+
+  supervisor.send({ frame: "Drain" }, forget(thread));
+  await settled();
+  running.end();
+  await settled();
+  assert.ok(!supervisor.frames().some(({ frame }) => frame === "Drained"));
+  supervisor.removals[0].resolve();
+
+  assert.equal(await supervisor.done, 0);
+  assert.deepEqual(supervisor.frames(), [
+    { frame: "Started", assignment: "a" },
+    { frame: "Ended", assignment: "a", phase: "Succeeded" },
+    forgotten(thread),
+    { frame: "Drained" },
+  ]);
+});
+
+/** Catches a supervisor that reads on past `Drained`, answering what its next supervisor is to be asked. */
+test("a Forget behind Drained is not read, and is answered by nothing", async () => {
+  const supervisor = supervisorOf();
+
+  supervisor.send({ frame: "Drain" }, forget(thread));
+
+  assert.equal(await supervisor.done, 0);
+  await settled();
+  assert.deepEqual(supervisor.frames(), [{ frame: "Drained" }]);
+  assert.deepEqual(supervisor.removals, []);
+});
+
+test("at the end of its input a Forget held for a running session's thread is answered once the session has ended", async () => {
+  const supervisor = supervisorOf();
+  supervisor.send({ ...start("a"), thread });
+  await settled();
+  const running = runningOf();
+  supervisor.preparations[0].resolve(running);
+  await settled();
+  supervisor.send(forget(thread));
+  await settled();
+
+  supervisor.input.end();
+  await settled();
+  assert.equal(running.stops, 1);
+  running.end();
+  await settled();
+  supervisor.removals[0].resolve();
+
+  assert.equal(await supervisor.done, 0);
+  assert.deepEqual(supervisor.frames().slice(-2), [
+    { frame: "Ended", assignment: "a", phase: "Succeeded" },
+    forgotten(thread),
+  ]);
+});
+
+/** Catches a supervisor that reads a host of protocol 2 in protocol 3's shape. */
+test("a host speaking protocol 2 that names a thread or forgets one is not followed, and nothing is prepared or removed", async () => {
+  for (const frame of [{ ...start("a"), thread }, forget(thread)]) {
+    const supervisor = supervisorOf(2, 2);
+
+    supervisor.send(frame);
+
+    assert.equal(await supervisor.done, 1);
+    assert.equal(supervisor.preparations.length, 0);
+    assert.equal(supervisor.removals.length, 0);
+    assert.match(supervisor.logged.join(""), /speaks protocol 2/u);
+  }
 });
 
 /** Catches the end of the host's stream leaving a preparation unanswered or a session running. */
@@ -478,13 +697,13 @@ const credentialed = {
  * fails every session it is handed.
  */
 test("a supervisor refuses a host that names no protocol or one it does not speak, saying which side to update", () => {
-  assert.deepEqual(chatSupervisorProtocols, [1, 2]);
-  for (const named of ["1", "2"])
+  assert.deepEqual(chatSupervisorProtocols, [1, 2, 3]);
+  for (const named of ["1", "2", "3"])
     assert.equal(
       chatSupervisorProtocolRefusal({ CHUG_CHAT_PROTOCOL: named }),
       undefined,
     );
-  const spoken = "this image's supervisor speaks protocol(s) [1, 2]";
+  const spoken = "this image's supervisor speaks protocol(s) [1, 2, 3]";
   for (const [named, said, side] of [
     [undefined, "none", "the host's runner"],
     ["", "none", "the host's runner"],

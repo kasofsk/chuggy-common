@@ -73,12 +73,25 @@ function sessionMailboxIdled(bounds, idleForMs) {
   return bounds.idleMs !== undefined && idleForMs >= bounds.idleMs;
 }
 
+/** One long poll of the mailbox: the turn it handed over, `Stop`, or nothing where it is empty. */
+async function sessionMailboxClaim(task, bearer, request) {
+  const response = await request(task, bearer, sessionPlaneRoutes.turn.path, {
+    method: "GET",
+  });
+  if (sessionStopped(response) || response.status === emptyStatus)
+    return sessionStopped(response) ? "Stop" : undefined;
+  if (response.status !== claimedStatus)
+    throw new Error(`the session mailbox answered ${String(response.status)}`);
+  return response.json();
+}
+
 export function sessionMailbox(task, bearer, services = {}) {
   const {
     request = sessionRequest,
     wait: pause = wait,
     now = Date.now,
     claim: onClaim = () => undefined,
+    settle: onSettle = () => undefined,
   } = services;
   let held;
   let stopped = false;
@@ -93,25 +106,13 @@ export function sessionMailbox(task, bearer, services = {}) {
     });
   }
 
-  async function claim() {
-    const response = await request(task, bearer, sessionPlaneRoutes.turn.path, {
-      method: "GET",
-    });
-    if (sessionStopped(response) || response.status === emptyStatus)
-      return sessionStopped(response) ? "Stop" : undefined;
-    if (response.status !== claimedStatus)
-      throw new Error(
-        `the session mailbox answered ${String(response.status)}`,
-      );
-    return response.json();
-  }
-
   return {
     claimed: () => held,
 
     /** What the pod calls once a turn is answered or failed, releasing the next. */
     settled() {
       held = undefined;
+      onSettle();
       release();
     },
 
@@ -137,7 +138,7 @@ export function sessionMailbox(task, bearer, services = {}) {
           yield asked;
           continue;
         }
-        const turn = await claim();
+        const turn = await sessionMailboxClaim(task, bearer, request);
         if (turn === "Stop") return;
         if (turn === undefined) {
           idleSince ??= now();
