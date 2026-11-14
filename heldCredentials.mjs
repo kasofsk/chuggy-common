@@ -200,21 +200,31 @@ export async function heldCredentialPlacedWritten(
 
 /**
  * The plane's answer to an ask for the names `asked`: the version it answered
- * under, each credential it serves, and each it names absent.
+ * under, each credential it serves, and each it names absent. `signal` aborts
+ * the ask and `transport` is handed to `request`.
  */
 export async function heldCredentialsAsked({
   task,
   bearer,
   asked,
   request = workerRequest,
+  signal,
+  transport,
 }) {
-  const response = await request(task, bearer, workerHeldCredentialsPath, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(
-      workerHeldCredentialsSchema.parse({ credentials: asked }),
-    ),
-  });
+  const response = await request(
+    task,
+    bearer,
+    workerHeldCredentialsPath,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(
+        workerHeldCredentialsSchema.parse({ credentials: asked }),
+      ),
+      ...(signal === undefined ? {} : { signal }),
+    },
+    ...(transport === undefined ? [] : [transport]),
+  );
   const version = answeredVersion(response);
   return {
     version,

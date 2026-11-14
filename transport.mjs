@@ -63,6 +63,8 @@ export function workerPlaneHeaders(bearer, headers = {}) {
  * failing status is the plane's answer, and asking again only delays the
  * caller hearing it. So it raises at once, unless the caller names it as
  * settled — a credential this deployment does not mint — and reads it instead.
+ * A caller that asks again on its own clock names `once`, and hears a failure
+ * of either kind at the first try.
  */
 export async function workerRequest(
   task,
@@ -76,6 +78,7 @@ export async function workerRequest(
     wait: pause = wait,
     now = Date.now,
     settled = [],
+    once = false,
   } = transport;
   const began = now();
   for (let tries = 1; ; tries += 1) {
@@ -99,7 +102,7 @@ export async function workerRequest(
         throw new WorkerPlaneRefusal(answered);
       else failure = new Error(answered);
     }
-    if (now() - began >= workerPlaneAwayMillisecondsMax) throw failure;
+    if (once || now() - began >= workerPlaneAwayMillisecondsMax) throw failure;
     await pause(workerPlaneRetryPause(tries));
   }
 }

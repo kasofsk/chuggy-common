@@ -9,15 +9,18 @@
  * did is one no shell can take, and stops that credential's refreshing.
  *
  * NO REFRESH ENDS THE ATTEMPT. A job that no longer needs a credential is not
- * killed for it. A refresh that fails is asked again with a growing pause,
- * until the credential expires or the retries run out, and then logged once
- * with what the plane answered; one answered with an absence is logged and
- * not asked again. Either way that credential is refreshed no more.
+ * killed for it. A refresh the plane never answered is asked again here, on
+ * this module's clock and not the transport's, with a growing pause until the
+ * credential expires or the retries run out, and then logged once with the
+ * last failure. One the plane refused or answered with an absence is its
+ * answer, logged once and not asked again. Either way that credential is
+ * refreshed no more.
  *
  * Each new secret is handed to `keep` before any file is written, as at the
  * first delivery.
  */
 
+import { WorkerPlaneRefusal } from "./transport.mjs";
 import {
   heldCredentialPlaced,
   heldCredentialPlacedWritten,
@@ -85,11 +88,18 @@ function heldCredentialRefreshSame(placed, held) {
  * serves none; otherwise `{stopped}`, the line saying why it is refreshed no
  * more. Anything the ask raised is raised.
  */
-async function heldCredentialRefreshAsked(credential, held, attempt, request) {
+async function heldCredentialRefreshAsked(
+  credential,
+  held,
+  attempt,
+  { request, signal },
+) {
   const answered = await heldCredentialsAsked({
     task: attempt.task,
     bearer: attempt.bearer,
     asked: [credential],
+    signal,
+    transport: { once: true },
     ...(request === undefined ? {} : { request }),
   });
   const served = answered.credentials.find(
@@ -113,7 +123,8 @@ async function heldCredentialRefreshAsked(credential, held, attempt, request) {
 
 /**
  * `heldCredentialRefreshAsked`'s answer, its files written through
- * `refreshing`'s seams unless its refreshing stopped while it was asked.
+ * `refreshing`'s seams unless its refreshing stopped while it was asked, and
+ * the write held in `refreshing.writing` until it ends.
  */
 async function heldCredentialRefreshWritten(
   credential,
@@ -121,15 +132,20 @@ async function heldCredentialRefreshWritten(
   attempt,
   refreshing,
 ) {
-  const { request, seams } = refreshing;
-  const answered = await heldCredentialRefreshAsked(
-    credential,
-    held,
-    attempt,
+  const { request, seams, aborting, writing } = refreshing;
+  const answered = await heldCredentialRefreshAsked(credential, held, attempt, {
     request,
-  );
-  if (!refreshing.stopped && answered.placed !== undefined)
-    await heldCredentialPlacedWritten(answered.placed, seams);
+    signal: aborting.signal,
+  });
+  if (!refreshing.stopped && answered.placed !== undefined) {
+    const written = heldCredentialPlacedWritten(answered.placed, seams);
+    writing.add(written);
+    try {
+      await written;
+    } finally {
+      writing.delete(written);
+    }
+  }
   return answered;
 }
 
@@ -151,10 +167,14 @@ function heldCredentialRefreshFailed(
     nowMs,
   );
   if (delayMs !== undefined) return { delayMs };
-  const answered = failure instanceof Error ? failure.message : String(failure);
   return {
-    line: `the held credential ${credential} could not be refreshed by its expiry: ${answered}; it is refreshed no more\n`,
+    line: `the held credential ${credential} could not be refreshed: ${heldCredentialRefreshFailure(failure)}; it is refreshed no more\n`,
   };
+}
+
+/** What `failure` says. */
+function heldCredentialRefreshFailure(failure) {
+  return failure instanceof Error ? failure.message : String(failure);
 }
 
 /**
@@ -167,7 +187,7 @@ function heldCredentialRefreshScheduled(
   { credential, held, expiresAtMs, failures },
   delayMs,
 ) {
-  const { attempt, services, timers, pending } = refreshing;
+  const { attempt, services, timers } = refreshing;
   const ask = async () => {
     let answered;
     try {
@@ -179,6 +199,12 @@ function heldCredentialRefreshScheduled(
       );
     } catch (failure) {
       if (refreshing.stopped) return;
+      if (failure instanceof WorkerPlaneRefusal) {
+        services.warn(
+          `the worker plane refused the held credential ${credential} its refresh: ${failure.message}; it is refreshed no more\n`,
+        );
+        return;
+      }
       const failed = heldCredentialRefreshFailed(
         credential,
         failure,
@@ -208,9 +234,7 @@ function heldCredentialRefreshScheduled(
     credential,
     services.setTimeout(() => {
       timers.delete(credential);
-      const asking = ask().finally(() => pending.delete(asking));
-      pending.add(asking);
-      return asking;
+      return ask();
     }, delayMs),
   );
 }
@@ -221,8 +245,9 @@ function heldCredentialRefreshScheduled(
  * handed to its `keep`. `services` are the plane's `request`, the file seams
  * `write` and `makeDirectory`, `warn`, and the clock: `now`, `setTimeout` and
  * `clearTimeout`, a timer's callback answering the ask it begins. What it
- * answers stops every timer and waits for any ask in flight, and never
- * raises; an answer arriving after it is called writes nothing.
+ * answers stops every timer, aborts any ask in flight and waits only for a
+ * write already under way, and never raises; an answer arriving after it is
+ * called writes nothing.
  */
 export function keepHeldCredentialsFresh(expiring, attempt, services = {}) {
   const { request, write, makeDirectory } = services;
@@ -241,7 +266,8 @@ export function keepHeldCredentialsFresh(expiring, attempt, services = {}) {
       warn: services.warn ?? ((text) => process.stderr.write(text)),
     },
     timers: new Map(),
-    pending: new Set(),
+    aborting: new globalThis.AbortController(),
+    writing: new Set(),
     stopped: false,
   };
   for (const { credential, held, expiresAtMs } of expiring)
@@ -255,6 +281,7 @@ export function keepHeldCredentialsFresh(expiring, attempt, services = {}) {
     for (const timer of refreshing.timers.values())
       refreshing.services.clearTimeout(timer);
     refreshing.timers.clear();
-    await Promise.allSettled([...refreshing.pending]);
+    refreshing.aborting.abort();
+    await Promise.allSettled([...refreshing.writing]);
   };
 }

@@ -267,3 +267,35 @@ test("a plane away for less than a lease is waited out", async () => {
   assert.equal(received, response);
   assert.ok(clock.now() >= awayMilliseconds);
 });
+
+test("a request asked once raises a failure the plane never answered at the first try, as it does a refusal", async () => {
+  for (const send of [
+    async () => {
+      throw new TypeError("fetch failed");
+    },
+    async () => planeAnswered(503),
+    async () => proxyAnswered(404),
+  ]) {
+    const clock = pausedClock();
+    let requests = 0;
+    const raised = await workerRequest(
+      task,
+      "secret",
+      "/v1/held-credentials",
+      { method: "POST" },
+      {
+        fetch: async () => {
+          requests += 1;
+          return send();
+        },
+        ...clock,
+        once: true,
+      },
+    ).catch((failure) => failure);
+
+    assert.ok(raised instanceof Error);
+    assert.equal(raised instanceof WorkerPlaneRefusal, false);
+    assert.equal(requests, 1);
+    assert.deepEqual(clock.pauses, []);
+  }
+});

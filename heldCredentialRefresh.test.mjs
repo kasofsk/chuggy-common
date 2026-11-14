@@ -347,11 +347,11 @@ test("a refresh answered with an absence is logged once with its reason and not 
   assert.match(warned, /track-record.*IssuerRefused/u);
 });
 
-test("a refresh that keeps failing is retried with a growing pause until its expiry, then logged once with what the plane answered", async () => {
+test("a refresh the plane never answers is retried with a growing pause until its expiry, then logged once with the last failure", async () => {
   const expiresAtMs = heldCredentialRefreshLeadMs;
   const plane = refreshPlane(
     Array.from({ length: heldCredentialRefreshRetriesMax + 1 }, () => ({
-      status: 409,
+      status: 503,
     })),
   );
   const timers = pausedTimers();
@@ -372,14 +372,14 @@ test("a refresh that keeps failing is retried with a growing pause until its exp
   assert.ok(pauses[2] > pauses[1]);
   assert.deepEqual(order, []);
   assert.equal(warned.length, 1);
-  assert.match(warned[0], /track-record.*409/u);
+  assert.match(warned[0], /track-record.*503/u);
   await stop();
 });
 
-test("a refresh that keeps failing ahead of a long expiry is retried no more than the bound", async () => {
+test("a refresh the plane never answers ahead of a long expiry is retried no more than the bound", async () => {
   const plane = refreshPlane(
     Array.from({ length: heldCredentialRefreshRetriesMax + 1 }, () => ({
-      status: 409,
+      status: 503,
     })),
   );
   const timers = pausedTimers();
@@ -400,9 +400,55 @@ test("a refresh that keeps failing ahead of a long expiry is retried no more tha
   await stop();
 });
 
+test("a refresh refused by the plane is logged once with its answer and not asked again, and ends nothing", async () => {
+  const warned = await refreshStopped({ status: 409 });
+  assert.match(warned, /track-record.*409/u);
+});
+
+test("a refresh whose fetch throws is retried on the refresher's clock, not the transport's", async () => {
+  let asks = 0;
+  const transportWaits = [];
+  const timers = pausedTimers();
+  const { order, warned, stop } = refresher(
+    [
+      {
+        credential: "track-record",
+        expiresAtMs: hourMs,
+        held: trackRecordHeld,
+      },
+    ],
+    {
+      request: (asked, bearer, path, init, transport) =>
+        workerRequest(asked, bearer, path, init, {
+          ...transport,
+          now: timers.now,
+          wait: async (pauseMs) => transportWaits.push(pauseMs),
+          fetch: async (url, sent) => {
+            asks += 1;
+            if (asks === 1) throw new TypeError("fetch failed");
+            return planeFetch(planes.job, () => ({
+              status: 200,
+              body: { credentials: [trackRecord("second")] },
+              release: releaseBeforeBundles,
+            })).fetch(url, sent);
+          },
+        }),
+    },
+    timers,
+  );
+  await timers.fire();
+  assert.equal(asks, 1);
+  assert.deepEqual(transportWaits, [], "the transport asked once");
+  assert.deepEqual(timers.delays(), [heldCredentialRefreshIntervalMsMin]);
+  await timers.fire();
+  assert.equal(order.at(-1)[2], "second");
+  assert.deepEqual(warned, []);
+  await stop();
+});
+
 test("a refresh that fails once and then succeeds is written and logs nothing", async () => {
   const plane = refreshPlane([
-    { status: 409 },
+    { status: 503 },
     { status: 200, body: { credentials: [trackRecord("second")] } },
   ]);
   const timers = pausedTimers();
@@ -425,24 +471,21 @@ test("a refresh that fails once and then succeeds is written and logs nothing", 
   await stop();
 });
 
-test("stopping clears every timer, waits for an ask in flight, and writes nothing it answers", async () => {
-  let answer;
-  const answered = new Promise((resolve) => {
-    answer = resolve;
-  });
+test("stopping clears every timer and aborts an ask in flight without waiting on the plane, and writes nothing", async () => {
   let asked;
   const askedSignal = new Promise((resolve) => {
     asked = resolve;
   });
-  const plane = planeFetch(planes.job, async () => {
-    asked();
-    await answered;
-    return {
-      status: 200,
-      body: { credentials: [trackRecord("late", 2 * hourMs)] },
-      release: releaseBeforeBundles,
-    };
-  });
+  const plane = planeFetch(
+    planes.job,
+    (_route, _request, signal) =>
+      new Promise((_resolve, reject) => {
+        asked();
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        });
+      }),
+  );
   const timers = pausedTimers();
   const { order, warned, stop } = refresher(
     [
@@ -468,17 +511,52 @@ test("stopping clears every timer, waits for an ask in flight, and writes nothin
   );
   const firing = timers.fire();
   await askedSignal;
-  let stopped = false;
-  const stopping = stop().then(() => {
-    stopped = true;
-  });
+  await stop();
   assert.deepEqual(timers.delays(), [], "no timer outlives the stop");
-  await Promise.resolve();
-  assert.equal(stopped, false, "the stop waits for the ask in flight");
-  answer();
-  await stopping;
   await firing;
   assert.deepEqual(order, []);
   assert.deepEqual(warned, []);
   assert.deepEqual(timers.delays(), []);
+});
+
+test("stopping waits for a write already under way", async () => {
+  let release;
+  const writing = new Promise((resolve) => {
+    release = resolve;
+  });
+  let began;
+  const writeBegan = new Promise((resolve) => {
+    began = resolve;
+  });
+  const timers = pausedTimers();
+  const { stop } = refresher(
+    [
+      {
+        credential: "track-record",
+        expiresAtMs: hourMs,
+        held: trackRecordHeld,
+      },
+    ],
+    refreshPlane([
+      { status: 200, body: { credentials: [trackRecord("second")] } },
+    ]),
+    timers,
+    {
+      write: async () => {
+        began();
+        await writing;
+      },
+    },
+  );
+  const firing = timers.fire();
+  await writeBegan;
+  let stopped = false;
+  const stopping = stop().then(() => {
+    stopped = true;
+  });
+  await new Promise((resolve) => globalThis.setImmediate(resolve));
+  assert.equal(stopped, false, "the stop waits for the write");
+  release();
+  await stopping;
+  await firing;
 });
