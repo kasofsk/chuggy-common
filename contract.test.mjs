@@ -708,11 +708,14 @@ test("a read of another repository meets every status of the credential route as
 /** The session routes the pool holding a session calls rather than its pod, which `poolSessionPlane.test.mjs` holds to their statuses. */
 const poolSessionRoutes = ["ended"];
 
+/** The session routes nothing of this core calls: `wake`, by which a thread's attempt offers its own thread a wake, is offered by none of it. */
+const sessionRoutesUncalled = ["wake"];
+
 test("every status a session route the pod calls may answer is one the pod has a named reaction to", async () => {
   await heldToMap(
     planes.session,
     sessionReactions,
-    poolSessionRoutes,
+    [...poolSessionRoutes, ...sessionRoutesUncalled],
     sessionCallers,
     sessionSuccess,
     sessionTransport,

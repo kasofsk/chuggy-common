@@ -35,7 +35,7 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, chown, mkdir, readdir, stat } from "node:fs/promises";
+import { chmod, chown, lstat, mkdir, readdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
@@ -231,9 +231,17 @@ export function chatAbortable(signal, pending) {
  * `credentialFiles` and `environment` what the site's map resolves it with.
  * `handOver` gives a tree to a user and its group; `signal` cancels, and a
  * checkout it cancels while the plane is asked raises its reason.
+ *
+ * A KEPT WORKSPACE KEEPS ITS TREE. Where `kept` says `workspace` outlives the
+ * session, the tree is cloned once, borrowing nothing from the mirror, and a
+ * later session is given the one it finds there as it was left, its
+ * remote-tracking branches brought up to the mirror by `userRun`, which
+ * runs git as the session's user with the mirror's group, never as the
+ * supervisor, since everything in that tree is a session's. A kept tree is never removed here,
+ * one git cannot read included: the session is then told of none.
  */
 export async function chatCheckout(task, bearer, workspace, services) {
-  const { mint, mirrors, signal, log, user } = services;
+  const { mint, mirrors, signal, log, user, kept = false } = services;
   const { run = sessionCheckoutGit, handOver = chatCheckoutHandedOver } =
     services;
   if (task.repository === undefined) return { checkout: undefined };
@@ -256,12 +264,27 @@ export async function chatCheckout(task, bearer, workspace, services) {
   const { repository, environment } = remote;
   const directory = jobRepositoryDirectory(workspace);
   const options = { signal, timeout: sessionCheckoutTimeoutMs };
+  if (kept && (await chatCheckoutFound(directory)))
+    return chatCheckoutKept(services, {
+      reference,
+      repository,
+      environment,
+      directory,
+      scrub,
+    });
   try {
     const mirror = await mirrors.updated(repository, environment, signal);
-    await run(["clone", "--shared", "--quiet", mirror.path, directory], {
-      ...options,
-      cwd: dirname(mirror.path),
-    });
+    await run(
+      [
+        "clone",
+        "--shared",
+        ...(kept ? ["--dissociate"] : []),
+        "--quiet",
+        mirror.path,
+        directory,
+      ],
+      { ...options, cwd: dirname(mirror.path) },
+    );
     await run(["remote", "set-url", "origin", repository], {
       ...options,
       cwd: directory,
@@ -273,15 +296,72 @@ export async function chatCheckout(task, bearer, workspace, services) {
     await handOver(directory, user);
     const commit = stdout.trim();
     log(`session checkout ${reference} at ${commit}\n`);
-    return { checkout: { directory, commit }, group: mirror.group };
+    return {
+      checkout: { directory, commit },
+      ...(kept ? {} : { group: mirror.group }),
+    };
   } catch (failure) {
     await sessionCheckoutFailed(reference, failure, directory, { log, scrub });
     return { checkout: undefined };
   }
 }
 
+/** Whether anything, a link included, is at `path`. */
+async function chatCheckoutFound(path) {
+  try {
+    await lstat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The tree a kept workspace already holds, as a session of its thread left
+ * it, with its remote-tracking branches fetched from the mirror as the
+ * session's user; nothing where git as that user could not read it, and the
+ * tree left where it is.
+ */
+async function chatCheckoutKept(services, kept) {
+  const { mirrors, signal, log, userRun } = services;
+  const { reference, repository, environment, directory, scrub } = kept;
+  try {
+    const mirror = await mirrors.updated(repository, environment, signal);
+    const options = {
+      signal,
+      timeout: sessionCheckoutTimeoutMs,
+      cwd: directory,
+      group: mirror.group,
+    };
+    await userRun(
+      [
+        "-c",
+        `safe.directory=${mirror.path}`,
+        "fetch",
+        "--quiet",
+        "--prune",
+        "--no-tags",
+        mirror.path,
+        "+refs/heads/*:refs/remotes/origin/*",
+      ],
+      options,
+    );
+    const { stdout } = await userRun(["rev-parse", "HEAD"], options);
+    const commit = stdout.trim();
+    log(`session checkout ${reference} kept at ${commit}\n`);
+    return { checkout: { directory, commit } };
+  } catch (failure) {
+    log(
+      scrub(
+        `session checkout ${reference} kept at ${directory} could not be read: ${failure instanceof Error ? failure.message : String(failure)}\n`,
+      ),
+    );
+    return { checkout: undefined };
+  }
+}
+
 /** A tree given whole to `user`'s user and group, each link itself rather than what it names. */
-async function chatCheckoutHandedOver(directory, user) {
+export async function chatCheckoutHandedOver(directory, user) {
   await executeFile("chown", [
     "-R",
     "-h",

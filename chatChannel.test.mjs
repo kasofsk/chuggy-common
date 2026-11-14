@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
-import { PassThrough } from "node:stream";
+import { Duplex, PassThrough } from "node:stream";
 import test from "node:test";
 
 import { chatProtocolFrameBytesMax } from "@chuggy/worker-contract/chatHost";
@@ -8,6 +8,8 @@ import { chatProtocolFrameBytesMax } from "@chuggy/worker-contract/chatHost";
 import {
   chatChannelLine,
   chatChannelOpened,
+  chatChannelTurnHeld,
+  chatChannelTurnLine,
   chatCheckoutCarried,
   chatCheckoutRead,
   chatLineReader,
@@ -130,4 +132,32 @@ test("a channel that ends, overruns a frame or says something else first carries
     await assert.rejects(channel.envelope, refusal);
     channel.close();
   }
+});
+
+/** Catches a session's word on its turn that its supervisor reads otherwise, or reads at all where it is not one. */
+test("a session says on its channel whether it holds a claimed turn, as its supervisor reads it, and nothing else is read so", async () => {
+  let written = "";
+  const input = new Duplex({
+    read: () => undefined,
+    write: (chunk, _, done) => {
+      written += chunk;
+      done();
+    },
+  });
+  const channel = chatChannelOpened(input);
+  input.push(chatChannelLine(envelope));
+  await channel.envelope;
+
+  channel.turnHeld(true);
+  channel.turnHeld(false);
+
+  const lines = written.split("\n").filter((line) => line.length > 0);
+  assert.deepEqual(
+    lines.map((line) => chatChannelTurnHeld(Buffer.from(line))),
+    [true, false],
+  );
+  assert.equal(chatChannelTurnLine(true), `${lines[0]}\n`);
+  for (const other of ["", "{}", '{"turn":"Held"}', chatChannelLine(envelope)])
+    assert.equal(chatChannelTurnHeld(Buffer.from(other.trim())), undefined);
+  channel.close();
 });

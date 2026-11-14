@@ -304,8 +304,9 @@ export const chatHostStoppingWaitMs = 1_000;
 export const chatHostRestartBackoffMs = 30_000;
 
 /**
- * The volumes a host's supervisor keeps its sessions' directories and its
- * mirrors in, named for the host so no other's shares them.
+ * The volumes a host's supervisor keeps its sessions' directories, each
+ * thread's workspace among them, and its mirrors in, named for the host so no
+ * other's shares them.
  *
  * @param {ChatHostIdentity} identity
  */

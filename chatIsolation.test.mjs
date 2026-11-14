@@ -33,6 +33,7 @@ import { workerCredentialFilesVariable } from "@chuggy/worker-contract/workerEnv
 
 import { chatCheckout, chatMirrorsOpened } from "./chatCheckout.mjs";
 import {
+  chatSessionGit,
   chatSessionHome,
   chatSessionsOpened,
   chatSessionLabel,
@@ -239,7 +240,7 @@ function checkoutOf(place, mirrors, log) {
       },
     ]),
   );
-  return (task, bearer, workspace, { signal, uid }) =>
+  return (task, bearer, workspace, { signal, uid, kept }) =>
     chatCheckout(task, bearer, workspace, {
       mint: async () => undefined,
       mirrors,
@@ -247,6 +248,12 @@ function checkoutOf(place, mirrors, log) {
       credentialFiles: { "git-a": "/absent", "git-b": "/absent" },
       environment: process.env,
       user: { uid, gid: uid },
+      kept,
+      userRun: (args, { group, ...options }) =>
+        chatSessionGit({ uid, gid: uid }, [group], args, {
+          ...options,
+          path: process.env["PATH"] ?? "/usr/bin:/bin",
+        }),
       signal,
       log,
     });
@@ -503,6 +510,73 @@ test(
     }),
 );
 
+/**
+ * Catches a thread's tree that a later session, run as another user, cannot
+ * fetch the mirror into, or finds borrowing from it.
+ */
+test(
+  "a thread's later session, as another user, is given its tree as it was left, fetched from the mirror since",
+  { skip: skipped },
+  () =>
+    inMachine(async (place) => {
+      const machine = await supervisorIn(place, 2);
+      machine.answers.set(bearers[0], answerOf("a"));
+      const live = new globalThis.AbortController().signal;
+      const thread = { project: "project-1", session: "thread-1" };
+      const first = await machine.sessions.prepared(
+        assignment,
+        envelopeOf(bearers[0]),
+        live,
+        undefined,
+        thread,
+      );
+      await said(machine.logged, placesOf(place, uidFirst).label, "hello");
+      const head = /session checkout a at (\S+)/u.exec(
+        machine.logged.join(""),
+      )?.[1];
+      first.stop();
+      await first.ended;
+      const later = await committed(join(place("remotes"), "a"), "# later\n");
+      machine.logged.length = 0;
+
+      const second = await machine.sessions.prepared(
+        assignment,
+        envelopeOf(bearers[0]),
+        live,
+        undefined,
+        thread,
+      );
+
+      assert.match(
+        machine.logged.join(""),
+        new RegExp(`session checkout a kept at ${String(head)}`, "u"),
+      );
+      await said(machine.logged, placesOf(place, uidFirst + 1).label, "hello");
+      const tree = join(
+        place("sessions"),
+        "threads",
+        (await readdir(join(place("sessions"), "threads")))[0] ?? "",
+        "repository",
+      );
+      const { stdout } = await run("git", [
+        "-c",
+        `safe.directory=${tree}`,
+        "-C",
+        tree,
+        "for-each-ref",
+        "--format=%(objectname)",
+        "refs/remotes/origin",
+      ]);
+      assert.ok(stdout.split("\n").includes(later));
+      await assert.rejects(
+        stat(join(tree, ".git", "objects", "info", "alternates")),
+        { code: "ENOENT" },
+      );
+      second.stop();
+      assert.equal(await second.ended, "Succeeded");
+    }),
+);
+
 /** The ids of every System V IPC object `uid` owns or made. */
 async function ipcOf(uid) {
   const held = [];
@@ -597,7 +671,10 @@ test(
       await writeFile(planted, "x");
       await chown(planted, own, own);
 
-      await chatSystem().scattered(own, [scratch]);
+      await chatSystem().scattered(own, {
+        roots: [scratch],
+        kept: place("threads"),
+      });
 
       await assert.rejects(stat(left), { code: "ENOENT" });
       assert.equal((await stat(planted)).uid, own);

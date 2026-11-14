@@ -72,6 +72,7 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @typedef {import("@chuggy/worker-contract/workerPool").AssignmentOutcome} AssignmentOutcome
  * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolCredentialOutcome} WorkerPoolCredentialOutcome
  * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolCredentialPause} WorkerPoolCredentialPause
+ * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolThreadClosed} WorkerPoolThreadClosed
  * @typedef {import("@chuggy/worker-contract/workerPool").WorkerRunnerCredentials} WorkerRunnerCredentials
  * @typedef {import("@chuggy/worker-contract/sessionPlane").SessionContainerEnd} SessionContainerEnd
  * @typedef {import("@chuggy/worker-contract/workerEnvironment").WorkerImageFault} WorkerImageFault
@@ -119,6 +120,7 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @property {() => readonly string[]} [capabilitiesWithheld] the capabilities a poll leaves out now: each agent's of which its selector has no credential available; none for a backend that holds no selector
  * @property {() => WorkerRunnerCredentials} [credentialsNamed] the credentials a poll names now, by agent, as its selector names them, and a chat host's of the agent its sessions run on alone; none for a backend given no selector
  * @property {(pauses: readonly WorkerPoolCredentialPause[]) => void} [credentialPausesTaken] replaces the pauses its selector holds with an answer's; none for a backend given no selector
+ * @property {(threads: readonly WorkerPoolThreadClosed[]) => void} [threadsClosedTaken] takes an answer's closed threads, removing what it keeps for each; none for a backend that keeps nothing for a thread
  * @property {(byRoom: boolean) => boolean} [jobsTaken] whether it takes a job now, as its last `held` found, from a plane that claims by room or one that does not; false while its machine's disk is low or its engine's memory has no room for it, and true for a backend that keeps neither
  * @property {() => WorkerPoolMemoryRoom | undefined} [memoryRoom] its engine's memory as its last `held` found; none for a backend that keeps no budget
  * @property {() => Promise<(() => Promise<void>) | undefined>} [claimed] takes its engine's claim without waiting: what lets it go, or nothing while another pool holds it; none for a backend that keeps no claim lock
@@ -131,8 +133,8 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @typedef {{polled: "Reconciled", assignments: readonly WorkerPoolAssignment[],
  *   sessions: readonly WorkerPoolSessionAssignment[], stop: readonly string[], release?: WorkerRunnerRelease,
  *   jobsWaiting?: boolean, chatImage?: string, credentialOutcomes?: readonly WorkerPoolCredentialOutcome[],
- *   credentialPauses?: readonly WorkerPoolCredentialPause[]}
- *   | {polled: "Stale"} | {polled: "Denied", evidence: string} | {polled: "Unavailable", evidence: string}} WorkerPoolPolled `jobsWaiting` where the plane claims by room: whether a job waits that fits what the poll named; `chatImage` the image a chat host's sessions run in, where the plane names one; `credentialOutcomes` how the credential stopped each job of `stop` the plane names one for; `credentialPauses` each credential the poll named that is paused for the runner's owner
+ *   credentialPauses?: readonly WorkerPoolCredentialPause[], threadsClosed?: readonly WorkerPoolThreadClosed[]}
+ *   | {polled: "Stale"} | {polled: "Denied", evidence: string} | {polled: "Unavailable", evidence: string}} WorkerPoolPolled `jobsWaiting` where the plane claims by room: whether a job waits that fits what the poll named; `chatImage` the image a chat host's sessions run in, where the plane names one; `credentialOutcomes` how the credential stopped each job of `stop` the plane names one for; `credentialPauses` each credential the poll named that is paused for the runner's owner; `threadsClosed` the threads a chat host last ran that have closed
  *
  * @typedef {object} WorkerPoolPollTerms what a poll names beside its query
  * @property {WorkerPoolMemoryRoom} [memory] the room it offers jobs, and its ceiling
@@ -745,6 +747,7 @@ async function workerPoolClientReconciled(client, token, held, taking, terms) {
   if (polled.credentialOutcomes !== undefined)
     client.backend.credentialOutcomesTaken?.(polled.credentialOutcomes);
   client.backend.credentialPausesTaken?.(polled.credentialPauses ?? []);
+  client.backend.threadsClosedTaken?.(polled.threadsClosed ?? []);
   const stopped = await workerPoolClientStopped(client, polled.stop);
   if ("passed" in stopped) return stopped;
   const jobs = await workerPoolClientPlaced(

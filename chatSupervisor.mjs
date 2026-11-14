@@ -15,9 +15,19 @@
  * already started its process stops it first, and is still refused, since the
  * host was told of no session to end.
  *
- * `Drain` ONLY WAITS. Every later `Start` is refused `Draining`, unless it is
- * a `Duplicate`, and once no entry is left `Drained` is written and the
- * supervisor exits.
+ * A THREAD'S SESSIONS RUN ONE AT A TIME, in the workspace kept for it
+ * (`./chatSession.mjs`). A `Start` naming a thread an entry already names is
+ * prepared once every such entry has ended, and its entry counts meanwhile.
+ * A `Forget` is held until no entry names its thread, a `Start` naming it is
+ * refused `Unprepared` while it is held, and then the thread's workspace is
+ * removed and each `Forget` held for it is answered `Forgotten`.
+ *
+ * `Drain` ENDS WHAT HOLDS NO CLAIMED TURN. Every later `Start` is refused
+ * `Draining`, unless it is a `Duplicate`; each preparation is cancelled, and
+ * each session is stopped once it says it holds no claimed turn. Once no
+ * entry is left and every `Forget` is answered, `Drained` is written and the
+ * supervisor exits. To a host of a protocol before
+ * `chatSupervisorThreadProtocol`, `Drain` only waits, as it did then.
  *
  * A SESSION RUNS ON THE CREDENTIAL ITS `Start` NAMES, the file the host
  * handed for that name in `CHUG_CHAT_CREDENTIALS`, and a `Start` naming one
@@ -27,8 +37,9 @@
  * `Start` names none.
  *
  * THE END OF ITS INPUT ENDS EVERYTHING. Every preparation is cancelled and
- * refused `Stopped`, every session is stopped and its `Ended` written, and
- * the supervisor exits. A line longer than a frame, or one that is not a
+ * refused `Stopped`, every session is stopped and its `Ended` written, every
+ * `Forget` held is answered once its thread's sessions have ended, and the
+ * supervisor exits. A line longer than a frame, or one that is not a
  * frame, is a host this supervisor cannot follow, which it trusts no less
  * for it: it says so on its log, without the line, reads nothing more, and
  * ends as it would at the end of its input, exiting non-zero. A signal to end
@@ -43,9 +54,9 @@
  * `chatSupervisorProtocols`, saying which side to update. A supervisor's
  * `Ready` names the same protocols, and a host ends one that lacks its own.
  * So a change to any of that bumps the version, and the supervisor speaks the
- * old one beside it, reading either shape, for one release window: a host
- * and a supervisor a release apart then agree, and any further apart each
- * refuses the other before a session is claimed. `chatProtocol.test.mjs`
+ * old ones beside it, reading each shape, until its window ends: a host and a
+ * supervisor a release apart then agree, and any further apart each refuses
+ * the other before a session is claimed. `chatProtocol.test.mjs`
  * holds that shape against the version; it sees names and mounts, so a
  * value's form or meaning changing under a name it already holds — the JSON
  * in `CHUG_WORKER_CLAUDE_CREDENTIAL`, what `CHUG_CHAT_CREDENTIAL_UID` is the
@@ -53,12 +64,14 @@
  * `@chuggy/worker-contract`, so a bump is a contract release and then this
  * core's lock moved to it.
  *
- * THE WINDOW ENDS AT THE PLANE'S FLOOR. N-1 leaves `chatSupervisorProtocols`
- * only once the plane admits no host that speaks only N-1: once chuggy's
- * `workerContractChatHost.min`, the contract release below which a chat host
- * is refused every pool plane route, is at or past the release that brought
- * N. The release a poll names (`./runnerUpdate.mjs`) moves a host forward and
- * refuses none, so it ends no window.
+ * THE WINDOW ENDS AT THE PLANE'S FLOOR. A version leaves
+ * `chatSupervisorProtocols` only once the plane admits no host that speaks
+ * only it: once chuggy's `workerContractChatHost.min`, the contract release
+ * below which a chat host is refused every pool plane route, is at or past
+ * the release that brought the version after it, which
+ * `chatSupervisorProtocolOldest` is moved past then. The release a poll names
+ * (`./runnerUpdate.mjs`) moves a host forward and refuses none, so it ends no
+ * window.
  */
 
 import process from "node:process";
@@ -82,6 +95,7 @@ import {
 } from "./agentCredentialSet.mjs";
 import { chatLineReader, chatLineText } from "./chatChannel.mjs";
 import {
+  chatAbortable,
   chatCheckout,
   chatMirrorGroupCount,
   chatMirrorGroupFirst,
@@ -92,6 +106,7 @@ import {
   chatSessionClearWaitMs,
   chatSessionEntrypoint,
   chatSessionFreeBytesMin,
+  chatSessionGit,
   chatSessionStopGraceMs,
   chatSessionUidCount,
   chatSessionUidFirst,
@@ -107,17 +122,25 @@ import { planeCredential, sessionCredentialPath } from "./planeCredential.mjs";
 import { workerRepositories } from "./repository.mjs";
 import { sessionRequest } from "./sessionTransport.mjs";
 
+/** The oldest protocol a host the plane admits may speak alone, as the module says. */
+const chatSupervisorProtocolOldest = 1;
+
 /**
- * The protocols this supervisor speaks, newest last: the version, and in a
- * release window the one before it, as the module says.
+ * The protocols this supervisor speaks, newest last: the version, and every
+ * one before it back to `chatSupervisorProtocolOldest`, as the module says.
  */
-export const chatSupervisorProtocols = Object.freeze([
-  chatProtocolVersion - 1,
-  chatProtocolVersion,
-]);
+export const chatSupervisorProtocols = Object.freeze(
+  Array.from(
+    { length: chatProtocolVersion - chatSupervisorProtocolOldest + 1 },
+    (_, offset) => chatSupervisorProtocolOldest + offset,
+  ),
+);
 
 /** The first protocol whose `Start` may name the credential its session runs on. */
 const chatSupervisorCredentialProtocol = 2;
+
+/** The first protocol whose `Start` may name a thread, which has `Forget`, and whose `Drain` ends what holds no claimed turn. */
+const chatSupervisorThreadProtocol = 3;
 
 /** Where the host names the protocol it speaks, which it sets beside every other variable. */
 export const chatSupervisorProtocolVariable = "CHUG_CHAT_PROTOCOL";
@@ -305,26 +328,42 @@ function chatSupervisorRefused(state, assignment, reason) {
   chatSupervisorWritten(state, { frame: "Refused", assignment, reason });
 }
 
-/** The supervisor's end, once no entry is left after a `Drain` or the end of its input. */
+/** The supervisor's end, once no entry is left and no `Forget` is held after a `Drain` or the end of its input. */
 function chatSupervisorSettled(state) {
-  if (state.finished || state.entries.size > 0) return;
+  if (state.finished || state.entries.size > 0 || state.forgetting.size > 0)
+    return;
   if (!state.draining && !state.closing) return;
   state.finished = true;
   if (state.draining) chatSupervisorWritten(state, { frame: "Drained" });
   state.finish(state.code);
 }
 
+/** The key a thread is held under, which no two threads share. */
+function chatSupervisorThreadKey(thread) {
+  return JSON.stringify([thread.project, thread.session]);
+}
+
+/** Whether an entry names the thread `key` is. */
+function chatSupervisorThreadBusy(state, key) {
+  for (const entry of state.entries.values())
+    if (entry.thread === key) return true;
+  return false;
+}
+
 /** An entry's preparation, then its session, answered and ended as its frames say. */
 async function chatSupervisorPrepared(state, start, entry) {
-  const { assignment, envelope, credential } = start;
+  const { assignment, envelope, credential, thread } = start;
   const { signal } = entry.cancel;
   let running;
   try {
+    await chatAbortable(signal, entry.after);
+    signal.throwIfAborted();
     running = await state.sessions.prepared(
       assignment,
       envelope,
       signal,
       credential,
+      thread,
     );
   } catch {
     running = undefined;
@@ -346,22 +385,50 @@ async function chatSupervisorPrepared(state, start, entry) {
     chatSupervisorWritten(state, { frame: "Ended", assignment, phase });
   }
   state.entries.delete(assignment);
+  entry.finish();
+  if (entry.thread !== undefined) chatSupervisorForgetting(state, entry.thread);
   chatSupervisorSettled(state);
 }
 
-/** A `Start`, answered at once where it is refused, and prepared where it is not. */
+/**
+ * A `Start`, answered at once where it is refused, and prepared where it is
+ * not, once every entry naming its thread before it has ended.
+ */
 function chatSupervisorStart(state, start) {
   const { assignment } = start;
+  const thread =
+    start.thread === undefined
+      ? undefined
+      : chatSupervisorThreadKey(start.thread);
   if (state.entries.has(assignment))
     return chatSupervisorRefused(state, assignment, "Duplicate");
   if (state.draining)
     return chatSupervisorRefused(state, assignment, "Draining");
   if (state.entries.size >= state.sessionsMax)
     return chatSupervisorRefused(state, assignment, "Full");
+  if (thread !== undefined && state.forgetting.has(thread))
+    return chatSupervisorRefused(state, assignment, "Unprepared");
   const entry = {
     cancel: new globalThis.AbortController(),
     running: undefined,
+    thread,
+    after: Promise.resolve(),
+    done: Promise.resolve(),
+    finish: () => undefined,
   };
+  entry.done = new Promise((resolve) => {
+    entry.finish = resolve;
+  });
+  if (thread !== undefined) {
+    entry.after = state.threadLast.get(thread) ?? Promise.resolve();
+    // A cancelled entry finishes before the one it queued behind has ended.
+    const ended = Promise.all([entry.after, entry.done]);
+    state.threadLast.set(thread, ended);
+    void ended.then(() => {
+      if (state.threadLast.get(thread) === ended)
+        state.threadLast.delete(thread);
+    });
+  }
   state.entries.set(assignment, entry);
   void chatSupervisorPrepared(state, start, entry);
   return undefined;
@@ -371,6 +438,45 @@ function chatSupervisorStart(state, start) {
 function chatSupervisorStopped(entry) {
   if (entry.running === undefined) entry.cancel.abort();
   else entry.running.stop();
+}
+
+/** An entry drained: its preparation cancelled, or its session ended once it holds no claimed turn. */
+function chatSupervisorEntryDrained(entry) {
+  if (entry.running === undefined) entry.cancel.abort();
+  else entry.running.drain();
+}
+
+/**
+ * The thread `key` is forgotten where a `Forget` is held for it and no entry
+ * names it: its workspace removed, and each `Forget` held for it answered.
+ */
+function chatSupervisorForgetting(state, key) {
+  const held = state.forgetting.get(key);
+  if (held === undefined || held.removing) return;
+  if (chatSupervisorThreadBusy(state, key)) return;
+  held.removing = true;
+  void (async () => {
+    try {
+      await state.sessions.forgotten(held.thread);
+    } catch (failure) {
+      state.log(
+        `the workspace of a closed thread could not be removed, and is still kept: ${failure instanceof Error ? failure.message : String(failure)}\n`,
+      );
+    }
+    state.forgetting.delete(key);
+    for (let answer = 0; answer < held.count; answer += 1)
+      chatSupervisorWritten(state, { frame: "Forgotten", thread: held.thread });
+    chatSupervisorSettled(state);
+  })();
+}
+
+/** A `Forget`, held until no entry names its thread. */
+function chatSupervisorForget(state, thread) {
+  const key = chatSupervisorThreadKey(thread);
+  const held = state.forgetting.get(key);
+  if (held !== undefined) held.count += 1;
+  else state.forgetting.set(key, { thread, count: 1, removing: false });
+  chatSupervisorForgetting(state, key);
 }
 
 /** The end of the host's frames, whether its stream ended or could not be followed. */
@@ -391,7 +497,7 @@ function chatSupervisorUnfollowed(state, why) {
 
 /** One line of the host's, acted on as the frame it is. */
 function chatSupervisorHeard(state, bytes) {
-  if (state.closing) return undefined;
+  if (state.closing || state.finished) return undefined;
   let frame;
   try {
     frame = parseChatHostFrame(chatLineText(bytes));
@@ -401,29 +507,46 @@ function chatSupervisorHeard(state, bytes) {
       "the host wrote a line that is not a frame",
     );
   }
-  if (frame.frame === "Start") {
-    if (
-      frame.credential !== undefined &&
-      state.protocol < chatSupervisorCredentialProtocol
-    )
-      return chatSupervisorUnfollowed(
-        state,
-        `the host speaks protocol ${String(state.protocol)} and wrote a Start naming a credential, which that protocol's does not`,
-      );
-    return chatSupervisorStart(state, frame);
-  }
+  const unspoken = chatSupervisorUnspoken(state.protocol, frame);
+  if (unspoken !== undefined)
+    return chatSupervisorUnfollowed(
+      state,
+      `the host speaks protocol ${String(state.protocol)} and wrote ${unspoken}, which that protocol's does not`,
+    );
+  if (frame.frame === "Start") return chatSupervisorStart(state, frame);
+  if (frame.frame === "Forget")
+    return chatSupervisorForget(state, frame.thread);
   if (frame.frame === "Stop") {
     const entry = state.entries.get(frame.assignment);
     if (entry !== undefined) chatSupervisorStopped(entry);
     return undefined;
   }
   state.draining = true;
+  if (state.protocol >= chatSupervisorThreadProtocol)
+    for (const entry of state.entries.values())
+      chatSupervisorEntryDrained(entry);
   return chatSupervisorSettled(state);
+}
+
+/** What of `frame` a host speaking `protocol` cannot have written, or nothing. */
+function chatSupervisorUnspoken(protocol, frame) {
+  if (frame.frame === "Forget" && protocol < chatSupervisorThreadProtocol)
+    return "a Forget";
+  if (frame.frame !== "Start") return undefined;
+  if (
+    frame.credential !== undefined &&
+    protocol < chatSupervisorCredentialProtocol
+  )
+    return "a Start naming a credential";
+  if (frame.thread !== undefined && protocol < chatSupervisorThreadProtocol)
+    return "a Start naming a thread";
+  return undefined;
 }
 
 /**
  * A supervisor speaking the protocol on `input` and `output` over `sessions`,
- * which prepares and runs one (`./chatSession.mjs`'s `prepared`), at most
+ * which prepares and runs one (`./chatSession.mjs`'s `prepared`) and removes
+ * a thread's workspace (its `forgotten`), at most
  * `sessionsMax` at once, to a host speaking `protocol`, the newest it speaks
  * where none is given: `Ready` first, then each frame the host's call for.
  * It settles with the code the supervisor exits with, once it has nothing
@@ -445,6 +568,8 @@ export function chatSupervised({
     sessions,
     sessionsMax,
     entries: new Map(),
+    threadLast: new Map(),
+    forgetting: new Map(),
     draining: false,
     closing: false,
     finished: false,
@@ -484,14 +609,15 @@ export function chatSupervised({
 
 /**
  * The tree a session reads, checked out by the supervisor as root under a
- * credential the plane mints for the session's own attempt; it is handed no
- * repository's credential file of its own.
+ * credential the plane mints for the session's own attempt, and one its
+ * thread's workspace keeps fetched into as the session's user; it is handed
+ * no repository's credential file of its own.
  */
 export function chatSupervisorCheckout(environment, mirrors) {
   const named = environment[workerRepositoriesVariable];
   const repositories =
     named === undefined || named.length === 0 ? {} : workerRepositories(named);
-  return (task, bearer, workspace, { signal, uid, minted, log }) =>
+  return (task, bearer, workspace, { signal, uid, kept, minted, log }) =>
     chatCheckout(task, bearer, workspace, {
       mint: (repository) =>
         planeCredential({
@@ -507,6 +633,12 @@ export function chatSupervisorCheckout(environment, mirrors) {
       credentialFiles: {},
       environment,
       user: { uid, gid: uid },
+      kept,
+      userRun: (args, { group, ...options }) =>
+        chatSessionGit({ uid, gid: uid }, [group], args, {
+          ...options,
+          path: environment["PATH"] ?? "/usr/bin:/bin",
+        }),
       signal,
       log,
     });
