@@ -1,17 +1,23 @@
 /**
- * The credentials an attempt's grant names and its launcher did not mount,
- * asked of the worker plane, which serves those its deployment holds as files.
+ * The credentials an attempt's configuration lists and its launcher did not
+ * mount, asked of the worker plane, which serves those its deployment holds as
+ * files.
  *
  * ONLY WHAT NO LAUNCHER MOUNTED IS ASKED FOR. A pod launched with a credential
- * map is mounted every name its grant gives, so it never asks; one launched by
- * envelope, any pool's, is mounted only its agent's credential, and asks once
- * for the rest. The plane answers each name asked that the attempt's recorded
- * grant names and its deployment holds for the project, and none other.
+ * map is mounted every name its grant gives, so it asks only for those its
+ * configuration lists beyond its grant; one launched by envelope, any pool's,
+ * is mounted only its agent's credential, and asks once for the rest. The
+ * plane answers each name asked that the attempt's configuration lists, serving
+ * those its recorded grant names and its deployment holds for the project, and
+ * naming the rest absent.
  *
- * A REFUSAL OR AN OUTAGE IS THE ATTEMPT'S FAILURE. A job's shells run on
- * without a credential its grant names only where the plane holds none, which
- * is an empty answer; a plane that could not say is no reason to run them
- * without it.
+ * A LISTED CREDENTIAL NOT DELIVERED IS THE ATTEMPT'S FAILURE. A job holds only
+ * the credentials its configuration lists, so to a plane whose answer names
+ * `workerContractRunCredentialAbsent` or later, every absence is logged and the
+ * first ends the attempt under its own label, carrying the credential and why.
+ * A plane before it cannot say why and refuses the label, so there an absence
+ * is logged and fails nothing. A refusal or an outage is the attempt's failure
+ * at every version: a plane that could not say is no reason to run without it.
  *
  * THE SECRET IS WRITTEN AND NEVER PASSED. Each is written to a file of its own
  * in the minted directory, which only this pod's user reads, and a job's
@@ -23,13 +29,16 @@
  *
  * THE PLANE'S VERSION CHOOSES THE SHAPE. A plane whose answer names
  * `workerContractCredentialBundles` or later serves bundles and names those it
- * does not serve, each logged; any other serves single secrets and names none.
+ * does not serve; any other serves single secrets and names none.
  */
 
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
-import { workerContractCredentialBundles } from "@chuggy/worker-contract/workerContract";
+import {
+  workerContractCredentialBundles,
+  workerContractRunCredentialAbsent,
+} from "@chuggy/worker-contract/workerContract";
 
 import {
   heldCredentialFilePlaceholder,
@@ -39,6 +48,7 @@ import {
   workerPlaneRoutes,
 } from "@chuggy/worker-contract/workerPlane";
 
+import { RunStepFailure, runCredentialAbsent } from "./runEvidence.mjs";
 import { workerRequest } from "./transport.mjs";
 import { answeredVersion, versionReaches } from "./wire.mjs";
 
@@ -56,9 +66,9 @@ const heldCredentialFileMode = 0o600;
 /** What a bundle's directory is created with, so nothing outside this pod's user lists it. */
 const heldCredentialDirectoryMode = 0o700;
 
-/** The names `granted` gives that `credentialFiles`, the launcher's, does not hold. */
-export function heldCredentialsUnmounted(granted, credentialFiles) {
-  return [...new Set(granted)].filter(
+/** The names `listed` gives that `credentialFiles`, the launcher's, does not hold. */
+export function heldCredentialsUnmounted(listed, credentialFiles) {
+  return [...new Set(listed)].filter(
     (credential) => !Object.hasOwn(credentialFiles, credential),
   );
 }
@@ -165,18 +175,20 @@ async function heldCredentialsBundleWritten(
 }
 
 /**
- * Each credential the plane holds of the names `granted` gives that
+ * Each credential the plane holds of the names `listed` gives that
  * `credentialFiles` does not, its secrets handed to `keep` and then written
  * under `directory`, and each it names absent handed to `warn` as one line:
  * `{credential, variable, value}` for each variable a job's shells are handed,
- * none where nothing is unmounted, which asks nothing. `request`, `write` and
+ * none where nothing is unmounted, which asks nothing. To a plane that takes
+ * `RunCredentialAbsent`, any absence is instead a `RunStepFailure` under it,
+ * naming the first, and nothing is written. `request`, `write` and
  * `makeDirectory` are the seams the plane, a file and a bundle's directory are
  * reached through.
  */
 export async function heldCredentials({
   task,
   bearer,
-  granted,
+  listed,
   credentialFiles,
   directory,
   keep,
@@ -185,7 +197,7 @@ export async function heldCredentials({
   makeDirectory = mkdir,
   warn = (text) => process.stderr.write(text),
 }) {
-  const asked = heldCredentialsUnmounted(granted, credentialFiles);
+  const asked = heldCredentialsUnmounted(listed, credentialFiles);
   if (asked.length === 0) return [];
   const response = await request(task, bearer, workerHeldCredentialsPath, {
     method: "POST",
@@ -194,14 +206,25 @@ export async function heldCredentials({
       workerHeldCredentialsSchema.parse({ credentials: asked }),
     ),
   });
+  const version = answeredVersion(response);
   const answered = heldCredentialsRead(
     await response.json().catch(() => undefined),
     asked,
-    answeredVersion(response),
+    version,
   );
   for (const { credential, reason } of answered.absent)
     warn(
       `the worker plane served no held credential ${credential}: ${reason}\n`,
+    );
+  const [absent] = answered.absent;
+  if (
+    absent !== undefined &&
+    versionReaches(version, workerContractRunCredentialAbsent)
+  )
+    throw new RunStepFailure(
+      runCredentialAbsent,
+      `the held credential ${absent.credential} this attempt's configuration lists was not delivered: ${absent.reason}`,
+      { absent: { credential: absent.credential, reason: absent.reason } },
     );
   const held = [];
   for (const served of answered.credentials) {

@@ -35,6 +35,7 @@ import {
   workerContractCredentialBundles,
   workerContractHeader,
   workerContractRelease,
+  workerContractRunCredentialAbsent,
 } from "@chuggy/worker-contract/workerContract";
 import {
   heldCredentialFilePlaceholder,
@@ -219,6 +220,9 @@ const trackRecord = {
 
 /** The release just before the plane serves bundles, whose answers serve single secrets. */
 const releaseBeforeBundles = `${String(workerContractCredentialBundles.major)}.${String(workerContractCredentialBundles.minor - 1)}.0`;
+
+/** The release just before the plane takes a run ended for a credential not delivered. */
+const releaseBeforeCredentialAbsent = `${String(workerContractRunCredentialAbsent.major)}.${String(workerContractRunCredentialAbsent.minor - 1)}.0`;
 
 /** The held credentials route serving `trackRecord`, as a plane before bundles serves it. */
 const trackRecordHeld = {
@@ -4537,8 +4541,9 @@ test("an agent's git is handed only a read of its own repository, and the clone 
 });
 
 /**
- * An evaluation whose grant names `trackRecord` beside the forge, which no
- * launcher mounted, running `commands` after the setup lines `setup`.
+ * An evaluation whose configuration lists and whose grant names `trackRecord`
+ * beside the forge, which no launcher mounted, running `commands` after the
+ * setup lines `setup`.
  */
 function trackRecordTask(commands, setup = []) {
   return {
@@ -4550,6 +4555,7 @@ function trackRecordTask(commands, setup = []) {
         ...fetchedAnswer.authority,
         credentials: ["forge", trackRecord.credential],
       },
+      credentialsListed: ["forge", trackRecord.credential],
       worker: { mode: { type: "Commands", commands }, setup, files: [] },
     }),
   };
@@ -4557,7 +4563,7 @@ function trackRecordTask(commands, setup = []) {
 
 /**
  * A job in a container and one on its runner's host each write a held
- * credential where they write the git credential, and ask for every granted
+ * credential where they write the git credential, and ask for every listed
  * name no launcher mounted. Catches the file written anywhere else, readable
  * past the pod's user, or a name mounted asked for.
  */
@@ -4760,7 +4766,7 @@ test("a held credential's variable the pod already holds is overridden, and the 
 });
 
 /** Catches a credential the plane names absent failing the attempt, or kept from the attempt's log. */
-test("a held credential the plane names absent is logged, and fails nothing", async (t) => {
+test("to a plane before RunCredentialAbsent, a held credential named absent is logged, and fails nothing", async (t) => {
   const minted = await suiteDirectory(t, "chuggy-minted-");
   const warned = [];
   const handed = await workerHeldCredentials({
@@ -4770,7 +4776,7 @@ test("a held credential the plane names absent is logged, and fails nothing", as
     minted,
     keepSecret: () => undefined,
     request: async () => ({
-      headers: new Map([[workerContractHeader, workerContractRelease]]),
+      headers: new Map([[workerContractHeader, releaseBeforeCredentialAbsent]]),
       json: async () => ({
         credentials: [],
         absent: [{ credential: trackRecord.credential, reason: "NotHeld" }],
@@ -4784,6 +4790,72 @@ test("a held credential the plane names absent is logged, and fails nothing", as
   assert.equal(warned.length, 1);
   assert.ok(warned[0].includes(trackRecord.credential), warned[0]);
   assert.ok(warned[0].includes("NotHeld"), warned[0]);
+});
+
+/**
+ * Catches a name the configuration lists beyond the grant left unasked, a
+ * mounted name asked, or a task from before listed names asking anything but
+ * its granted ones.
+ */
+test("the names asked are those the task lists, its granted ones where it lists none, less those mounted", async () => {
+  const asked = [];
+  const request = async (_task, _bearer, _path, init) => {
+    asked.push(JSON.parse(init.body).credentials);
+    return {
+      headers: new Map([[workerContractHeader, workerContractRelease]]),
+      json: async () => ({ credentials: [], absent: [] }),
+    };
+  };
+  const authority = { credentials: ["claude-code", "forge"] };
+  for (const listed of [
+    { credentialsListed: ["claude-code", "forge", "registry"] },
+    {},
+  ])
+    await workerHeldCredentials({
+      task: { ...task, authority, ...listed },
+      bearer: envelope.bearer,
+      credentialFiles: { "claude-code": "/c" },
+      minted: "/m",
+      keepSecret: () => undefined,
+      request,
+      environment: {},
+    });
+
+  assert.deepEqual(asked, [["forge", "registry"], ["forge"]]);
+});
+
+/**
+ * Catches a listed credential not delivered letting the attempt clone or run,
+ * ended under any label but its own, or ended without the credential and why.
+ */
+test("a listed credential the plane does not deliver ends the attempt as RunCredentialAbsent, naming it, before the clone", async (t) => {
+  const absent = { credential: trackRecord.credential, reason: "NotHeld" };
+  const plane = await servedPlane(
+    (route) => (route === "task" ? trackRecordTask(["true"]) : { status: 204 }),
+    planes.job,
+    { status: 200, body: { credentials: [], absent: [absent] } },
+  );
+  t.after(() => plane.close());
+  const minted = await suiteDirectory(t, "chuggy-minted-");
+
+  const ran = await launched(
+    {
+      [workerTaskVariable]: JSON.stringify({
+        ...envelope,
+        callbackUrl: plane.url,
+      }),
+    },
+    minted,
+  );
+
+  assert.equal(ran.code, 1, ran.stderr);
+  assert.ok(ran.stderr.includes(trackRecord.credential), ran.stderr);
+  assert.deepEqual(planeBodies(plane, "runEnded"), [
+    { evidence: "RunCredentialAbsent", absent },
+  ]);
+  const routes = plane.requests.map(({ route }) => route);
+  assert.ok(!routes.includes("input"), routes.join());
+  assert.ok(!routes.includes("credential"), routes.join());
 });
 
 /**

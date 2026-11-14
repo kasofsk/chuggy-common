@@ -44,6 +44,7 @@ import {
   RunStepFailure,
   runCloneFailed,
   runCommitFailed,
+  runCredentialAbsent,
   runEvidenceRecorder,
   runLimit,
   runPushFailed,
@@ -1613,6 +1614,18 @@ async function postedEnded(recorder, calls, step) {
   assert.ok(workerRunEndedSchema.safeParse(body).success, posted.init.body);
   return body;
 }
+
+/** Catches a run ended for a credential not delivered posting without the credential and why, or outside the contract. */
+test("a run ended RunCredentialAbsent carries the credential and why, inside the contract", async () => {
+  const { recorder, calls } = harness();
+  const absent = { credential: "track-record", reason: "NotGranted" };
+  await recorder.ended(runCredentialAbsent, absent);
+  const posted = calls.find(({ path }) => path === "/v1/run/ended");
+  const body = JSON.parse(posted.init.body);
+
+  assert.ok(workerRunEndedSchema.safeParse(body).success, posted.init.body);
+  assert.deepEqual(body, { evidence: "RunCredentialAbsent", absent });
+});
 
 test("a run's totals carry the latest reading of each window it saw, inside the contract", async () => {
   const { recorder, calls } = harness();

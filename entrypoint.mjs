@@ -111,6 +111,7 @@ import {
   filesystemAccesses,
   poolEnvelopeSchema,
   workTaskAnswerSchema,
+  workTaskCredentialsListed,
   workTaskDocumentSchema,
   workerTaskAnswerSchema,
 } from "@chuggy/worker-contract/workerTask";
@@ -1915,11 +1916,12 @@ function workerProjectReads({
 }
 
 /**
- * The credentials the plane holds of those `task` grants and
+ * The credentials the plane holds of those `task` lists and
  * `credentialFiles` does not hold, each kept among the attempt's secrets and
  * written under `minted`: the variables they set, as a job's shells are handed
  * them. One the pod already holds is overridden, which is logged by its name
- * alone, and each the plane names absent is logged through `warn`.
+ * alone, and each the plane names absent is logged through `warn`, and to a
+ * plane that takes it ends the attempt as `heldCredentials` says.
  */
 export async function workerHeldCredentials({
   task,
@@ -1934,7 +1936,7 @@ export async function workerHeldCredentials({
   const held = await heldCredentials({
     task,
     bearer,
-    granted: task.authority.credentials,
+    listed: workTaskCredentialsListed(task),
     credentialFiles,
     directory: minted,
     keep: (value) => keepSecret({ kind: workerSecretKinds.held, value }),
@@ -2344,7 +2346,15 @@ function reportWorkerFailureText(content) {
  * would split is still matched.
  */
 export async function reportWorkerFailure(
-  { task, bearer, evidence, request = workerRequest, scrub = scrubbed, step },
+  {
+    task,
+    bearer,
+    evidence,
+    request = workerRequest,
+    scrub = scrubbed,
+    step,
+    absent,
+  },
   message,
 ) {
   await evidence?.finish();
@@ -2359,7 +2369,7 @@ export async function reportWorkerFailure(
   } catch {
     process.stderr.write("worker failure text could not be uploaded\n");
   }
-  await evidence?.ended(step);
+  await evidence?.ended(step, absent);
 }
 
 /**
@@ -2371,7 +2381,7 @@ async function reportWorkerFailureBeforeRun(
   bearer,
   request,
   message,
-  step,
+  { step, absent } = {},
 ) {
   const scrub = credentialScrub([bearer]);
   await reportWorkerFailure(
@@ -2382,6 +2392,7 @@ async function reportWorkerFailureBeforeRun(
       request,
       scrub,
       step,
+      absent,
     },
     message,
   );
@@ -2529,7 +2540,8 @@ async function reportActiveFailure(failure) {
   const message = scrubbed(
     failure instanceof Error ? failure.message : "worker failed",
   );
-  const step = failure instanceof RunStepFailure ? failure.evidence : undefined;
+  const { evidence: step, absent } =
+    failure instanceof RunStepFailure ? failure : {};
   process.stderr.write(`${message}\n`);
   if (activeTask !== undefined && activeBearer !== undefined) {
     try {
@@ -2539,7 +2551,7 @@ async function reportActiveFailure(failure) {
             activeBearer,
             workerRequest,
             message,
-            step,
+            { step, absent },
           )
         : reportWorkerFailure(
             {
@@ -2548,6 +2560,7 @@ async function reportActiveFailure(failure) {
               evidence: activeEvidence,
               scrub: scrubbed,
               step,
+              absent,
             },
             message,
           ));

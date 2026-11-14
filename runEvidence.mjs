@@ -128,20 +128,27 @@ export const [
   runCommitFailed,
   runPushFailed,
   runTimedOut,
+  runCredentialAbsent,
 ] = [
   "RunCloneFailed",
   "RunSetupFailed",
   "RunCommitFailed",
   "RunPushFailed",
   "RunTimedOut",
+  "RunCredentialAbsent",
 ].map((label) => rosterLabel(runEndedEvidences, label));
 
-/** A failure of one of the harness's own steps, carrying that step's label. */
+/**
+ * A failure of one of the harness's own steps, carrying that step's label and,
+ * with `RunCredentialAbsent`, `options.absent`: the credential and why.
+ */
 export class RunStepFailure extends Error {
-  constructor(evidence, message, options) {
-    super(message, options);
+  constructor(evidence, message, options = {}) {
+    const { absent, ...rest } = options;
+    super(message, rest);
     this.name = "RunStepFailure";
     this.evidence = evidence;
+    if (absent !== undefined) this.absent = absent;
   }
 }
 
@@ -556,8 +563,11 @@ function runCredentialNamed(state) {
     : undefined;
 }
 
-/** What a run's end posts: its label, and beside `RunRateLimited` the limit that stopped it. */
-function runEndedBody(state, step) {
+/**
+ * What a run's end posts: its label, beside `RunRateLimited` the limit that
+ * stopped it, and beside `RunCredentialAbsent` the credential `absent` names.
+ */
+function runEndedBody(state, step, absent) {
   const evidence = endedEvidence(
     state.result,
     state.planeRefused,
@@ -569,6 +579,7 @@ function runEndedBody(state, step) {
     evidence === runRateLimited
       ? runLimit(state.sightings.reset, runCredentialNamed(state))
       : undefined;
+  if (evidence === runCredentialAbsent) return { evidence, absent };
   return limit === undefined ? { evidence } : { evidence, limit };
 }
 
@@ -846,12 +857,12 @@ function evidenceUploads(state, call, warn, drain, done) {
         refuse(state, warn, "run totals", failure);
       }
     },
-    async ended(step) {
+    async ended(step, absent) {
       done();
       await call(workerPlaneRoutes.runEnded.path, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(runEndedBody(state, step)),
+        body: JSON.stringify(runEndedBody(state, step, absent)),
       });
     },
     stop: done,
