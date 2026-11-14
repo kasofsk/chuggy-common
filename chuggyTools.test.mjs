@@ -3258,6 +3258,7 @@ test("the descriptions say what the server does where a session reads it", () =>
     ],
     read_ticket: [
       /`escalation\.failed`, which read_run_error takes to read the attempt's error text/,
+      /or because a credential its configuration listed was not delivered, names that step's label.*, and for a credential not delivered its `absent`: the `credential` and the `reason` it was not/,
       /`runTotals`, what every run of its executions reported, summed/,
       /`costUsdMicros`, millionths of a dollar at the runtime's list price/,
       /per model in `models`/,
