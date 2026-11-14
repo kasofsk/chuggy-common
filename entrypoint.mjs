@@ -1919,7 +1919,7 @@ function workerProjectReads({
  * `credentialFiles` does not hold, each kept among the attempt's secrets and
  * written under `minted`: the variables they set, as a job's shells are handed
  * them. One the pod already holds is overridden, which is logged by its name
- * alone.
+ * alone, and each the plane names absent is logged through `warn`.
  */
 export async function workerHeldCredentials({
   task,
@@ -1938,6 +1938,7 @@ export async function workerHeldCredentials({
     credentialFiles,
     directory: minted,
     keep: (value) => keepSecret({ kind: workerSecretKinds.held, value }),
+    warn,
     ...(request === undefined ? {} : { request }),
   });
   for (const { credential, variable } of held)

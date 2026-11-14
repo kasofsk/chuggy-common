@@ -18,11 +18,18 @@
  * shells are told the file under the variable the plane names for it. A
  * bundle's files are written to a directory of its own there, and its
  * variables handed each its file's path or its value, either with the paths
- * its placeholders name filled in.
+ * its placeholders name filled in. Each file is written under a name of its
+ * own beside it and then renamed, so no reader sees part of one.
+ *
+ * THE PLANE'S VERSION CHOOSES THE SHAPE. A plane whose answer names
+ * `workerContractCredentialBundles` or later serves bundles and names those it
+ * does not serve, each logged; any other serves single secrets and names none.
  */
 
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, rename, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
+
+import { workerContractCredentialBundles } from "@chuggy/worker-contract/workerContract";
 
 import {
   heldCredentialFilePlaceholder,
@@ -33,6 +40,7 @@ import {
 } from "@chuggy/worker-contract/workerPlane";
 
 import { workerRequest } from "./transport.mjs";
+import { answeredVersion, versionReaches } from "./wire.mjs";
 
 /** The route an attempt asks for its held credentials through. */
 export const workerHeldCredentialsPath = workerPlaneRoutes.heldCredentials.path;
@@ -56,16 +64,38 @@ export function heldCredentialsUnmounted(granted, credentialFiles) {
 }
 
 /**
- * The plane's answer, refused where it serves a name not asked, or one no file
- * can be named by.
+ * `content` written to `file` with `options`, first under a name beside it that
+ * no credential's file or directory takes, then renamed onto it. `seams` are
+ * the filesystem's `writeFile` and `rename`.
  */
-function heldCredentialsRead(body, asked) {
+export async function heldCredentialFileWritten(
+  file,
+  content,
+  options,
+  seams = { writeFile, rename },
+) {
+  const writing = join(dirname(file), `.${basename(file)}.writing`);
+  await seams.writeFile(writing, content, options);
+  await seams.rename(writing, file);
+}
+
+/**
+ * The plane's answer, refused where it serves a shape the version `version`
+ * does not, a name not asked, or one no file can be named by.
+ */
+function heldCredentialsRead(body, asked, version) {
   const answer = workerHeldCredentialsAnswerSchema.safeParse(body);
   if (!answer.success)
     throw new Error(
       "the worker plane answered held credentials this pod cannot read",
     );
-  for (const { credential } of answer.data.credentials) {
+  const bundles = versionReaches(version, workerContractCredentialBundles);
+  for (const served of answer.data.credentials) {
+    const { credential } = served;
+    if (Object.hasOwn(served, "files") !== bundles)
+      throw new Error(
+        `the worker plane answered a held credential in a shape its version does not serve: ${credential}`,
+      );
     if (!asked.includes(credential))
       throw new Error(
         `the worker plane answered a held credential this attempt did not ask for: ${credential}`,
@@ -75,7 +105,10 @@ function heldCredentialsRead(body, asked) {
         `the worker plane answered a held credential no file in the minted directory can be named by: ${credential}`,
       );
   }
-  return answer.data.credentials;
+  return {
+    credentials: answer.data.credentials,
+    absent: bundles ? (answer.data.absent ?? []) : [],
+  };
 }
 
 /**
@@ -134,10 +167,11 @@ async function heldCredentialsBundleWritten(
 /**
  * Each credential the plane holds of the names `granted` gives that
  * `credentialFiles` does not, its secrets handed to `keep` and then written
- * under `directory`: `{credential, variable, value}` for each variable a job's
- * shells are handed, none where nothing is unmounted, which asks nothing.
- * `request`, `write` and `makeDirectory` are the seams the plane, a file and a
- * bundle's directory are reached through.
+ * under `directory`, and each it names absent handed to `warn` as one line:
+ * `{credential, variable, value}` for each variable a job's shells are handed,
+ * none where nothing is unmounted, which asks nothing. `request`, `write` and
+ * `makeDirectory` are the seams the plane, a file and a bundle's directory are
+ * reached through.
  */
 export async function heldCredentials({
   task,
@@ -147,8 +181,9 @@ export async function heldCredentials({
   directory,
   keep,
   request = workerRequest,
-  write = writeFile,
+  write = heldCredentialFileWritten,
   makeDirectory = mkdir,
+  warn = (text) => process.stderr.write(text),
 }) {
   const asked = heldCredentialsUnmounted(granted, credentialFiles);
   if (asked.length === 0) return [];
@@ -162,9 +197,14 @@ export async function heldCredentials({
   const answered = heldCredentialsRead(
     await response.json().catch(() => undefined),
     asked,
+    answeredVersion(response),
   );
+  for (const { credential, reason } of answered.absent)
+    warn(
+      `the worker plane served no held credential ${credential}: ${reason}\n`,
+    );
   const held = [];
-  for (const served of answered) {
+  for (const served of answered.credentials) {
     if (Object.hasOwn(served, "files")) {
       held.push(
         ...(await heldCredentialsBundleWritten(served, {

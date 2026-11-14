@@ -32,6 +32,11 @@ import {
 } from "@chuggy/worker-contract/workerEnvironment";
 import { resultReportCharsMax } from "@chuggy/worker-contract/workerDocuments";
 import {
+  workerContractCredentialBundles,
+  workerContractHeader,
+  workerContractRelease,
+} from "@chuggy/worker-contract/workerContract";
+import {
   heldCredentialFilePlaceholder,
   runConfigurationBytesMax,
   workerPlaneBytesMediaType,
@@ -212,8 +217,15 @@ const trackRecord = {
   secret: "track-record-0123456789abcdefghij",
 };
 
-/** The held credentials route serving `trackRecord`. */
-const trackRecordHeld = { status: 200, body: { credentials: [trackRecord] } };
+/** The release just before the plane serves bundles, whose answers serve single secrets. */
+const releaseBeforeBundles = `${String(workerContractCredentialBundles.major)}.${String(workerContractCredentialBundles.minor - 1)}.0`;
+
+/** The held credentials route serving `trackRecord`, as a plane before bundles serves it. */
+const trackRecordHeld = {
+  status: 200,
+  body: { credentials: [trackRecord] },
+  release: releaseBeforeBundles,
+};
 
 /** A value the pod holds for `trackRecord`'s variable, as a runner's `environment` sets one. */
 const trackRecordRunners = "/the-runners/track-record";
@@ -4747,6 +4759,33 @@ test("a held credential's variable the pod already holds is overridden, and the 
   });
 });
 
+/** Catches a credential the plane names absent failing the attempt, or kept from the attempt's log. */
+test("a held credential the plane names absent is logged, and fails nothing", async (t) => {
+  const minted = await suiteDirectory(t, "chuggy-minted-");
+  const warned = [];
+  const handed = await workerHeldCredentials({
+    task: { ...task, authority: { credentials: [trackRecord.credential] } },
+    bearer: envelope.bearer,
+    credentialFiles: {},
+    minted,
+    keepSecret: () => undefined,
+    request: async () => ({
+      headers: new Map([[workerContractHeader, workerContractRelease]]),
+      json: async () => ({
+        credentials: [],
+        absent: [{ credential: trackRecord.credential, reason: "NotHeld" }],
+      }),
+    }),
+    environment: {},
+    warn: (text) => warned.push(text),
+  });
+
+  assert.deepEqual(handed, {});
+  assert.equal(warned.length, 1);
+  assert.ok(warned[0].includes(trackRecord.credential), warned[0]);
+  assert.ok(warned[0].includes("NotHeld"), warned[0]);
+});
+
 /**
  * Catches a credential served as a bundle reaching a job's shells as anything
  * but its variables: a Path variable as the path its file was written at, and
@@ -4778,7 +4817,10 @@ test("a held credential served as a bundle reaches a job's shells as its variabl
     credentialFiles: {},
     minted,
     keepSecret: (secret) => kept.push(secret),
-    request: async () => ({ json: async () => ({ credentials: [bundle] }) }),
+    request: async () => ({
+      headers: new Map([[workerContractHeader, workerContractRelease]]),
+      json: async () => ({ credentials: [bundle] }),
+    }),
     environment: {},
   });
 
