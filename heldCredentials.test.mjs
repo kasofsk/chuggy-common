@@ -8,6 +8,7 @@ import {
   workerContractCredentialBundles,
   workerContractHeader,
   workerContractRelease,
+  workerContractRunCredentialAbsent,
 } from "@chuggy/worker-contract/workerContract";
 import {
   heldCredentialFilePlaceholder,
@@ -21,6 +22,7 @@ import {
   heldCredentialsUnmounted,
 } from "./heldCredentials.mjs";
 import { overPlane, planeFetch, planes } from "./plane.fixture.mjs";
+import { RunStepFailure, runCredentialAbsent } from "./runEvidence.mjs";
 import { WorkerPlaneRefusal, workerRequest } from "./transport.mjs";
 
 const task = { workerPlane: { url: "http://worker-plane.test:3001" } };
@@ -33,6 +35,9 @@ const trackRecord = {
 /** The release just before the plane serves bundles, whose answers serve single secrets. */
 const releaseBeforeBundles = `${String(workerContractCredentialBundles.major)}.${String(workerContractCredentialBundles.minor - 1)}.0`;
 
+/** The release just before the plane takes a run ended for a credential not delivered. */
+const releaseBeforeCredentialAbsent = `${String(workerContractRunCredentialAbsent.major)}.${String(workerContractRunCredentialAbsent.minor - 1)}.0`;
+
 /** A plane answering the held credentials route `answer`, every ask of it recorded. */
 function heldPlane(answer) {
   const plane = planeFetch(planes.job, () => answer);
@@ -43,13 +48,13 @@ function heldPlane(answer) {
 }
 
 /**
- * What one ask, given `granted` and the launcher's `credentialFiles`, kept and
+ * What one ask, given `listed` and the launcher's `credentialFiles`, kept and
  * wrote; through `write` where a case names it, which `written` then holds
  * nothing of.
  */
 async function asked(
   plane,
-  granted,
+  listed,
   credentialFiles = {},
   directory = "/m",
   write,
@@ -59,7 +64,7 @@ async function asked(
   const held = await heldCredentials({
     task,
     bearer: "capability",
-    granted,
+    listed,
     credentialFiles,
     directory,
     keep: (value) => kept.push(value),
@@ -74,7 +79,7 @@ async function asked(
 }
 
 /** Catches a name the launcher mounted asked of the plane, and a name asked twice. */
-test("only the granted names the launcher did not mount are asked for", async () => {
+test("only the listed names the launcher did not mount are asked for", async () => {
   assert.deepEqual(
     heldCredentialsUnmounted(
       ["forge", "claude-code", "track-record", "forge"],
@@ -92,8 +97,8 @@ test("only the granted names the launcher did not mount are asked for", async ()
   );
 });
 
-/** Catches a pod every granted name was mounted for asking anyway, as a pod launched with a credential map would. */
-test("a pod mounted every granted name asks nothing", async () => {
+/** Catches a pod every listed name was mounted for asking anyway. */
+test("a pod mounted every listed name asks nothing", async () => {
   const plane = heldPlane({ status: 200, body: { credentials: [] } });
 
   const { held } = await asked(plane, ["forge"], { forge: "/f" });
@@ -127,7 +132,7 @@ test("a held credential is kept, then written privately under the minted directo
   await heldCredentials({
     task,
     bearer: "capability",
-    granted: ["track-record"],
+    listed: ["track-record"],
     credentialFiles: {},
     directory: "/m",
     keep: () => order.push("kept"),
@@ -296,7 +301,7 @@ test("every Secret content of a bundle is kept before any of its files is writte
   await heldCredentials({
     task,
     bearer: "capability",
-    granted: ["forge"],
+    listed: ["forge"],
     credentialFiles: {},
     directory: "/m",
     keep: (value) => order.push(`kept ${value}`),
@@ -352,7 +357,7 @@ test("a placeholder is filled with its file's path literally, whatever the crede
     const held = await heldCredentials({
       task,
       bearer: "capability",
-      granted: [credential],
+      listed: [credential],
       credentialFiles: {},
       directory: "/m",
       keep: () => {},
@@ -380,7 +385,7 @@ test("a placeholder is filled with its file's path literally, whatever the crede
   }
 });
 
-/** Catches a granted name that would write its secret outside the minted directory. */
+/** Catches a listed name that would write its secret outside the minted directory. */
 test("an answer serving a name no file in the minted directory can be named by fails the ask, keeping and writing nothing", async () => {
   const credential = "a/../../x";
   const plane = heldPlane({
@@ -395,7 +400,7 @@ test("an answer serving a name no file in the minted directory can be named by f
     heldCredentials({
       task,
       bearer: "capability",
-      granted: [credential],
+      listed: [credential],
       credentialFiles: {},
       directory: "/m",
       keep: (value) => kept.push(value),
@@ -423,14 +428,14 @@ function oneFileBundle(file, variable = "FORGE_TOKEN_FILE") {
   };
 }
 
-/** What one ask of `plane` for `granted` kept, wrote, made and warned, or the error it failed with. */
-async function seamed(plane, granted) {
+/** What one ask of `plane` for `listed` kept, wrote, made and warned, or the error it failed with. */
+async function seamed(plane, listed) {
   const seen = { kept: [], written: [], made: [], warned: [] };
   try {
     seen.held = await heldCredentials({
       task,
       bearer: "capability",
-      granted,
+      listed,
       credentialFiles: {},
       directory: "/m",
       keep: (value) => seen.kept.push(value),
@@ -533,8 +538,8 @@ test("a bundle naming a reserved variable, a file outside the minted directory, 
   }
 });
 
-/** Catches an absence failing the ask, logged without its credential or its reason, or logged as more or fewer lines than it names. */
-test("each credential the plane names absent is logged as one line with its reason, and fails nothing", async () => {
+/** Catches an absence failing the ask to a plane that would refuse its label, logged without its credential or its reason, or logged as more or fewer lines than it names. */
+test("to a plane before RunCredentialAbsent, each credential named absent is logged as one line with its reason, and fails nothing", async () => {
   const absent = [
     { credential: "track-record", reason: "NotHeld" },
     { credential: "linear", reason: "IssuerRefused" },
@@ -543,6 +548,7 @@ test("each credential the plane names absent is logged as one line with its reas
     heldPlane({
       status: 200,
       body: { credentials: [oneFileBundle("token")], absent },
+      release: releaseBeforeCredentialAbsent,
     }),
     ["forge", "track-record", "linear"],
   );
@@ -556,6 +562,44 @@ test("each credential the plane names absent is logged as one line with its reas
     assert.ok(seen.warned[at].endsWith("\n"), seen.warned[at]);
     assert.equal(seen.warned[at].indexOf("\n"), seen.warned[at].length - 1);
   }
+});
+
+/**
+ * Catches a listed credential not delivered letting the attempt run on, an
+ * absence not logged before the ending, or the ending naming any but the first.
+ */
+test("to a plane taking RunCredentialAbsent, every absence is logged and the first ends the attempt under that label, keeping and writing nothing", async () => {
+  const absent = [
+    { credential: "track-record", reason: "NotGranted" },
+    { credential: "linear", reason: "NotHeld" },
+  ];
+  const seen = await seamed(
+    heldPlane({
+      status: 200,
+      body: { credentials: [oneFileBundle("token")], absent },
+    }),
+    ["forge", "track-record", "linear"],
+  );
+
+  assert.ok(seen.error instanceof RunStepFailure, String(seen.error));
+  assert.equal(seen.error.evidence, runCredentialAbsent);
+  assert.deepEqual(seen.error.absent, absent[0]);
+  assert.ok(seen.error.message.includes("track-record"), seen.error.message);
+  assert.ok(seen.error.message.includes("NotGranted"), seen.error.message);
+  assert.equal(seen.warned.length, absent.length);
+  for (const [at, { credential }] of absent.entries())
+    assert.ok(seen.warned[at].includes(credential), seen.warned[at]);
+  assert.deepEqual([seen.kept, seen.written, seen.made], [[], [], []]);
+
+  const delivered = await seamed(
+    heldPlane({
+      status: 200,
+      body: { credentials: [oneFileBundle("token")], absent: [] },
+    }),
+    ["forge"],
+  );
+  assert.equal(delivered.error, undefined);
+  assert.deepEqual(delivered.written, ["/m/held-forge/token"]);
 });
 
 /** Catches a held file written in place, so a reader can see part of it, or written under a name beside it that is left behind. */

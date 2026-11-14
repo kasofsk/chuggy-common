@@ -313,7 +313,7 @@ const jobCallers = {
     heldCredentials({
       task: jobTask,
       bearer,
-      granted: [heldCredential.credential],
+      listed: [heldCredential.credential],
       credentialFiles: {},
       directory: "/minted",
       keep: () => undefined,
