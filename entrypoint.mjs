@@ -2506,6 +2506,7 @@ async function chatSessionMain(environment = process.env) {
       await import("./session.mjs");
     process.exitCode = await sessionMain({
       ...sessionEnvelopeServices(envelope, fetched.answer, environment),
+      chatHost: true,
       minted: required(chatMintedVariable),
       checkout: async () => checkout,
       stopped: channel.stopped,

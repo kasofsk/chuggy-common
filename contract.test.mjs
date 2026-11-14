@@ -96,7 +96,7 @@ import {
   versionRefusal,
 } from "./plane.fixture.mjs";
 import { runEvidenceRecorder } from "./runEvidence.mjs";
-import { sessionLease } from "./session.mjs";
+import { sessionLease, sessionStandingReported } from "./session.mjs";
 import { sessionLiveSender } from "./sessionLive.mjs";
 import { blockStart, messageStart, settled } from "./sessionLive.fixture.mjs";
 import {
@@ -328,6 +328,13 @@ const answeredTurn = sessionRun(() => [
   result("success", { result: "ok" }),
 ]);
 
+/** A chat host's thread reporting its standing, carrying on where it may. */
+const standingReported = (request) =>
+  sessionStandingReported(sessionTask, bearer, {
+    request,
+    warn: () => undefined,
+  });
+
 /** A session's store over `request`, whose wire is what this suite asks about. */
 function sessionStoreOver(request) {
   return sessionStoreAdapter(sessionTask, bearer, {
@@ -410,6 +417,7 @@ const sessionCallers = {
   turnLive: reportedLive,
   turnStopped: watchedStop,
   held: sessionRun(() => [rejection, result("error_during_execution")]),
+  standing: standingReported,
   storeStreams: (request) =>
     sessionStoreOver(request).listSubkeys({ sessionId: "runtime-1" }),
   storeBatch: (request) =>
@@ -562,6 +570,7 @@ const sessionReactions = {
     409: "stops",
   },
   held: { 204: "reads", 401: "stops", 409: "stops" },
+  standing: { 204: "reads", 400: "reads", 401: "stops", 409: "stops" },
   storeStreams: {
     200: "reads",
     400: "stops",
@@ -700,6 +709,26 @@ test("every status a session route the pod calls may answer is one the pod has a
     sessionSuccess,
     sessionTransport,
     sessionBodies,
+  );
+});
+
+/**
+ * Catches a thread a plane refuses as no chat host's ending its session: the
+ * table above drives the first reason a status names, and the standing is
+ * advisory, so this reason of its conflict is carried past as its other
+ * reasons are not.
+ */
+test("a standing refused as no chat host's thread is carried past", async () => {
+  assert.equal(
+    await reaction(
+      planes.session,
+      sessionSuccess,
+      sessionTransport,
+      standingReported,
+      "standing",
+      { status: 409, body: { action: "stop", reason: "NotChatHostThread" } },
+    ),
+    "reads",
   );
 });
 

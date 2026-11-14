@@ -123,7 +123,8 @@ export function heldUntilLetGo(signal) {
  * answers, or what it answers for each repository named, nothing where it
  * mints none, and a not found where it carries a `reason`; without one the plane mints nothing, which is the deployment
  * every case that is about something else runs under. `refuse(path)` names a
- * status to answer a path with instead, which must be one its route answers.
+ * status to answer a path with instead, which must be one its route answers,
+ * or a status and the body it carries.
  * `stopped(turn, signal)` answers the watch on a turn, which without one is
  * held for as long as the turn is watched, as a plane holds it for a turn
  * nobody stopped. `live(post)` answers a post of live events, which without
@@ -143,7 +144,7 @@ export function planeOf(
     const refused = refuse(path.split("?")[0]);
     if (refused !== undefined) {
       calls.push({ path, method });
-      return { status: refused };
+      return typeof refused === "number" ? { status: refused } : refused;
     }
     calls.push({ path, method, body });
     switch (route) {
