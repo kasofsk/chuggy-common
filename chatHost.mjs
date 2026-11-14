@@ -56,7 +56,10 @@ import { lstat, readdir } from "node:fs/promises";
 import { posix } from "node:path";
 import process from "node:process";
 
-import { chatProtocolVersion } from "@chuggy/worker-contract/chatHost";
+import {
+  chatHostSettingsSchema,
+  chatProtocolVersion,
+} from "@chuggy/worker-contract/chatHost";
 import { workerRepositoriesVariable } from "@chuggy/worker-contract/workerEnvironment";
 import { z } from "zod";
 
@@ -149,6 +152,7 @@ import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
  * @property {number} sessionsMax the most sessions the host runs at once, whatever its supervisor's room
  * @property {number} sessionMemoryBytes the memory its supervisor is given for each of those
  * @property {number} [idleSecs] how long a session it claims may sit idle, which each poll names; none where absent
+ * @property {ChatHostConfig["sessionCapabilities"]} [sessionCapabilities] the capabilities its threads may hold, which each poll to a plane that reads them names, and without which it claims no session; its threads' rosters whole where absent
  * @property {number} outputBytesMax what a session may write of its output
  * @property {ChatHostImageSetting} [image] the host's own image, run in place of the plane's
  * @property {ChatSupervisorPlaces} places
@@ -256,6 +260,8 @@ export const chatHostConfigSchema = z.strictObject({
     .optional(),
   /** How long a session it claims may sit idle, which chuggy caps; no idle limit where absent. */
   idleSecs: chatHostPositiveSchema.optional(),
+  /** The capabilities its threads may hold, which narrow each thread's roster; the roster whole where absent. */
+  sessionCapabilities: chatHostSettingsSchema.shape.sessionCapabilities,
   /** The most output a session may report; the runner's own where absent. */
   outputBytesMax: chatHostPositiveSchema.optional(),
 });
@@ -975,7 +981,13 @@ export function chatHostStatusLines(status) {
  * @returns {Omit<ChatHostSettings, "places">}
  */
 export function chatHostConfigured(config, outputBytesMax) {
-  const { image, sessionsMax, sessionMemoryMib, idleSecs } = config ?? {};
+  const {
+    image,
+    sessionsMax,
+    sessionMemoryMib,
+    idleSecs,
+    sessionCapabilities,
+  } = config ?? {};
   return {
     sessionsMax: sessionsMax ?? chatHostSessionsMaxDefault,
     sessionMemoryBytes:
@@ -984,6 +996,7 @@ export function chatHostConfigured(config, outputBytesMax) {
         : sessionMemoryMib * 2 ** 20,
     outputBytesMax: config?.outputBytesMax ?? outputBytesMax,
     ...(idleSecs === undefined ? {} : { idleSecs }),
+    ...(sessionCapabilities === undefined ? {} : { sessionCapabilities }),
     ...(image === undefined ? {} : { image }),
   };
 }
@@ -1086,6 +1099,9 @@ export function chatHost(credentials, settings, seams) {
         : { fetch: seams.fetch, planeFetch: seams.fetch }),
       ...(seams.runner === undefined ? {} : { runner: seams.runner }),
       ...(checked.idleSecs === undefined ? {} : { idleSecs: checked.idleSecs }),
+      ...(checked.sessionCapabilities === undefined
+        ? {}
+        : { sessionCapabilities: checked.sessionCapabilities }),
     },
   );
   /** @type {ChatHostState} */

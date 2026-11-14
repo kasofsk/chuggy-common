@@ -5,9 +5,11 @@ import test from "node:test";
 import {
   workerContractHeader,
   workerContractRelease,
+  workerContractSessionCapabilitiesNamed,
 } from "@chuggy/worker-contract/workerContract";
 import {
   workerPoolCapabilitiesMax,
+  workerPoolPollSessionCapabilitiesText,
   workerRunnerPollWaitHeader,
   workerRunnerCapabilitiesHeader,
   workerRunnerCapabilitiesOf,
@@ -748,6 +750,97 @@ test("a client given no idle bound names none, and an idle bound that is no posi
       () => checkedPoolPlaneClientSettings({ ...planeSettings, idleSecs }),
       /^RangeError: pool plane idleSecs must be a positive integer$/u,
     );
+});
+
+test("a chat host names its threads' capabilities only to a plane whose last answer reads them, and asks any other for no session", async () => {
+  const seen = [];
+  const { major, minor } = workerContractSessionCapabilitiesNamed;
+  const first = `${String(major)}.${String(minor)}.0`;
+  const releases = [
+    undefined,
+    `${String(major)}.${String(minor - 1)}.0`,
+    first,
+    `${String(major + 1)}.0.0`,
+    first,
+  ];
+  let answers = 0;
+  const plane = poolPlaneClient(
+    {
+      ...planeSettings,
+      sessionCapabilities: ["RepositoryRead", "RunCommands"],
+    },
+    async (input) => {
+      seen.push(String(input));
+      const release = releases[answers];
+      answers += 1;
+      return new globalThis.Response(
+        JSON.stringify({ assignments: [], sessions: [], stop: [] }),
+        {
+          status: 200,
+          headers:
+            release === undefined ? {} : { [workerContractHeader]: release },
+        },
+      );
+    },
+  );
+  for (let poll = 0; poll < releases.length + 1; poll += 1)
+    await plane.poll("pool-token", [], 0, 2);
+  const asked = "https://pool-plane.invalid/v1/assignments?wanted=0";
+  const named = `${asked}&wantedSessions=2&sessionCapabilities=${encodeURIComponent(
+    workerPoolPollSessionCapabilitiesText(["RepositoryRead", "RunCommands"]),
+  )}`;
+  assert.deepEqual(seen, [
+    `${asked}&wantedSessions=0`,
+    `${asked}&wantedSessions=0`,
+    `${asked}&wantedSessions=0`,
+    named,
+    `${asked}&wantedSessions=0`,
+    named,
+  ]);
+});
+
+test("a chat host naming no capability for its threads names the empty set, and a set the contract cannot read is refused at once", async () => {
+  const seen = [];
+  const plane = poolPlaneClient(
+    { ...planeSettings, sessionCapabilities: [] },
+    async (input) => {
+      seen.push(new globalThis.URL(String(input)));
+      return answered(
+        200,
+        JSON.stringify({ assignments: [], sessions: [], stop: [] }),
+      );
+    },
+  );
+  await plane.poll("pool-token", [], 0, 1);
+  await plane.poll("pool-token", [], 0, 1);
+  assert.equal(seen[1].searchParams.get("sessionCapabilities"), "");
+  assert.equal(seen[1].searchParams.get("wantedSessions"), "1");
+  for (const sessionCapabilities of [["RunCommands", "RunCommands"], ["Root"]])
+    assert.throws(
+      () =>
+        checkedPoolPlaneClientSettings({
+          ...planeSettings,
+          sessionCapabilities,
+        }),
+      /^RangeError: pool plane sessionCapabilities must name session capabilities, each once$/u,
+    );
+});
+
+test("a client given no capabilities for its threads names none and asks for its sessions whatever the plane's release", async () => {
+  const seen = [];
+  const plane = poolPlaneClient(planeSettings, async (input) => {
+    seen.push(new globalThis.URL(String(input)));
+    return new globalThis.Response(
+      JSON.stringify({ assignments: [], sessions: [], stop: [] }),
+      { status: 200 },
+    );
+  });
+  await plane.poll("pool-token", [], 0, 3);
+  await plane.poll("pool-token", [], 0, 3);
+  for (const url of seen) {
+    assert.equal(url.searchParams.get("wantedSessions"), "3");
+    assert.equal(url.searchParams.has("sessionCapabilities"), false);
+  }
 });
 
 test("an answer naming a chat image the contract cannot read is an outage", async () => {

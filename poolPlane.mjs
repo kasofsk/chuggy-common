@@ -29,7 +29,10 @@
  *
  * A member's chat host names on every poll how long a session it claims may
  * sit idle, where its client is given that, and the answer names it the
- * image its sessions run in, which is passed on.
+ * image its sessions run in, which is passed on. A host given the
+ * capabilities its threads may hold names them only to a plane whose last
+ * answer named `workerContractSessionCapabilitiesNamed` or later, and asks
+ * any other for no session, so none is claimed without them.
  *
  * A member's personal runner names on every poll, whatever version the plane
  * last answered, the credentials its terms name for each agent, and only as a
@@ -56,12 +59,15 @@ import {
   workerContractHeader,
   workerContractMemoryRoom,
   workerContractRelease,
+  workerContractSessionCapabilitiesNamed,
   workerContractVersionOf,
 } from "@chuggy/worker-contract/workerContract";
 import {
   workerPoolCapabilitiesMax,
   workerPoolPollQuery,
   workerPoolPollRoute,
+  workerPoolPollSessionCapabilitiesText,
+  workerPoolSessionCapabilitiesSchema,
   workerRunnerPollWaitHeader,
   workerPoolReconciliationSchema,
   workerPoolSettlementPath,
@@ -79,6 +85,7 @@ import {
 
 import { boundedResponseBytes } from "./boundedResponse.mjs";
 import { workerPlaneHeaders } from "./transport.mjs";
+import { versionReaches } from "./wire.mjs";
 
 /**
  * @typedef {import("@chuggy/worker-contract/workerPool").AssignmentOutcome} AssignmentOutcome
@@ -97,6 +104,7 @@ import { workerPlaneHeaders } from "./transport.mjs";
  * @property {WorkerRunner} [runner] the runner's package and version, which each poll names
  * @property {readonly string[]} [capabilities] the runner's capabilities, which each poll names, each once
  * @property {number} [idleSecs] how long a session a chat host claims may sit idle, which each poll names; the plane caps it, and reads it from a chat host alone
+ * @property {Parameters<typeof workerPoolPollSessionCapabilitiesText>[0]} [sessionCapabilities] the capabilities a chat host's threads may hold, which each poll to a plane that reads them names, and without which no session is asked for
  */
 
 /** The most one reconciliation may weigh, orders above a bounded batch of assignments. */
@@ -169,6 +177,14 @@ export function checkedPoolPlaneClientSettings(input) {
     (!Number.isSafeInteger(input.idleSecs) || input.idleSecs < 1)
   )
     throw new RangeError("pool plane idleSecs must be a positive integer");
+  if (
+    input.sessionCapabilities !== undefined &&
+    !workerPoolSessionCapabilitiesSchema.safeParse(input.sessionCapabilities)
+      .success
+  )
+    throw new RangeError(
+      "pool plane sessionCapabilities must name session capabilities, each once",
+    );
   return {
     ...input,
     baseUrl: url.toString(),
@@ -188,24 +204,44 @@ function poolPlaneUrl(settings, route) {
 }
 
 /**
+ * The poll's address. Where the settings name session capabilities it names
+ * them only to a plane whose last answer, `version`, reads them, and asks any
+ * other for no session.
+ *
  * @param {PoolPlaneClientSettings} settings
  * @param {readonly string[]} held
  * @param {number} wanted
  * @param {number} wantedSessions
+ * @param {WorkerContractVersion | undefined} version
  */
-function poolPlaneAssignmentsUrl(settings, held, wanted, wantedSessions) {
+function poolPlaneAssignmentsUrl(
+  settings,
+  held,
+  wanted,
+  wantedSessions,
+  version,
+) {
   const url = poolPlaneUrl(settings, workerPoolPollRoute);
   for (const assignment of held)
     url.searchParams.append(workerPoolPollQuery.held, assignment);
   url.searchParams.set(workerPoolPollQuery.wanted, String(wanted));
+  const { sessionCapabilities } = settings;
+  const named =
+    sessionCapabilities !== undefined &&
+    versionReaches(version, workerContractSessionCapabilitiesNamed);
   url.searchParams.set(
     workerPoolPollQuery.wantedSessions,
-    String(wantedSessions),
+    String(sessionCapabilities === undefined || named ? wantedSessions : 0),
   );
   if (settings.idleSecs !== undefined)
     url.searchParams.set(
       workerPoolPollQuery.idleSecs,
       String(settings.idleSecs),
+    );
+  if (named)
+    url.searchParams.set(
+      workerPoolPollQuery.sessionCapabilities,
+      workerPoolPollSessionCapabilitiesText(sessionCapabilities),
     );
   return url;
 }
@@ -372,24 +408,26 @@ async function poolPlaneReconciled(answered) {
  * @param {PoolPlaneClientSettings} settings
  * @param {typeof fetch} fetcher
  * @param {string} token
- * @param {readonly string[]} held
- * @param {number} wanted
- * @param {number} wantedSessions
- * @param {WorkerPoolPollTerms} terms
+ * @param {{held: readonly string[], wanted: number, wantedSessions: number, terms: WorkerPoolPollTerms}} asked
+ * @param {WorkerContractVersion | undefined} version the version the last answer named
  * @returns {Promise<{polled: WorkerPoolPolled, version: WorkerContractVersion | undefined}>}
  */
 async function poolPlanePolled(
   settings,
   fetcher,
   token,
-  held,
-  wanted,
-  wantedSessions,
-  terms,
+  { held, wanted, wantedSessions, terms },
+  version,
 ) {
   let answered;
   try {
-    const url = poolPlaneAssignmentsUrl(settings, held, wanted, wantedSessions);
+    const url = poolPlaneAssignmentsUrl(
+      settings,
+      held,
+      wanted,
+      wantedSessions,
+      version,
+    );
     const { runner } = settings;
     const withheld = new Set(terms.withheld);
     const capabilities = settings.capabilities?.filter(
@@ -551,10 +589,8 @@ export function poolPlaneClient(input, fetcher = globalThis.fetch) {
         settings,
         fetcher,
         token,
-        held,
-        wanted,
-        wantedSessions,
-        terms,
+        { held, wanted, wantedSessions, terms },
+        polledVersion,
       );
       polledVersion = version;
       if (polled.polled === "Reconciled")
