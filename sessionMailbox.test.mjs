@@ -8,7 +8,7 @@ const task = {
   bounds: { mailboxPollMs: 10, idleMs: 100 },
 };
 
-function mailboxOf(answers, bounds = task.bounds) {
+function mailboxOf(answers, bounds = task.bounds, busy) {
   const calls = [];
   let clock = 0;
   const services = {
@@ -21,6 +21,7 @@ function mailboxOf(answers, bounds = task.bounds) {
       clock += milliseconds;
     },
     now: () => clock,
+    ...(busy === undefined ? {} : { busy }),
   };
   return {
     calls,
@@ -123,6 +124,22 @@ test("a mailbox launched with no idle bound is not ended by sitting idle", async
   assert.equal(first.done, false, "an idle session with no idle bound ended");
   assert.equal(mailbox.claimed().turn, "turn-1");
   assert.equal(calls.length, polledEmpty + 1);
+});
+
+test("an empty mailbox is not ended by its idle bound while the session is busy, and its idle window opens once it is not", async () => {
+  const idlePolls = task.bounds.idleMs / task.bounds.mailboxPollMs;
+  const busyPolls = idlePolls * 10;
+  let polled = 0;
+  const { calls, mailbox } = mailboxOf([{ status: 204 }], task.bounds, () => {
+    polled += 1;
+    return polled <= busyPolls;
+  });
+
+  const taken = [];
+  for await (const message of mailbox.turns()) taken.push(message);
+
+  assert.deepEqual(taken, []);
+  assert.equal(calls.length, busyPolls + idlePolls + 1);
 });
 
 test("a fenced claim ends the iterable rather than asking again", async () => {
