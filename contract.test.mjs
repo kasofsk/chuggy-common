@@ -4,6 +4,10 @@
  * documents it writes are read by the contract's schemas, and the tools it
  * offers are the contract's roster under the contract's capabilities.
  *
+ * IT IS HELD TO WHAT IT IMPLEMENTS. A route is held where its feature is one
+ * this package lists, or where it has none; a tool, and a route of the tools'
+ * table, where this package does not name it as not built here.
+ *
  * WHAT A STATUS DOES IS WRITTEN HERE, NOT DERIVED. Each table names what the pod
  * does with every status of every route it calls, and must name exactly the
  * statuses the contract's map does: a status the plane starts answering is a
@@ -61,6 +65,8 @@ import {
   chuggyToolContext,
   chuggyToolDefinitions,
   chuggyToolHandler,
+  chuggyToolRoutesUnbuilt,
+  chuggyToolsUnbuilt,
   sessionAllowedTools,
   sessionBuiltInTools,
 } from "./chuggyTools.mjs";
@@ -117,7 +123,7 @@ import { sessionStopWatch } from "./sessionStop.mjs";
 import { sessionStoreAdapter } from "./sessionStore.mjs";
 import { sessionRequest, sessionRequestOnce } from "./sessionTransport.mjs";
 import { readTicketImages } from "./ticketImages.mjs";
-import { workerRequest } from "./transport.mjs";
+import { workerFeaturesImplemented, workerRequest } from "./transport.mjs";
 
 const jobTask = {
   taskKind: "Evaluation",
@@ -625,6 +631,33 @@ function answersOf(wire, success, bodies, route, status) {
   return refusalBodies(schema).map((body) => ({ status, body }));
 }
 
+/**
+ * The routes of `wire` this package is held to: those whose feature it lists,
+ * and those of no feature, which every client of the plane is.
+ */
+function routesHeld(wire) {
+  return Object.keys(wire.answers).filter((route) => {
+    const feature = wire.features[route];
+    assert.notEqual(feature, undefined, `${route} names no feature or null`);
+    return feature === null || workerFeaturesImplemented.includes(feature);
+  });
+}
+
+test("a route whose feature this package does not list is not held, and one of no feature is", () => {
+  assert.deepEqual(
+    routesHeld({
+      answers: { listed: {}, unlisted: {}, every: {} },
+      features: {
+        listed: workerFeaturesImplemented[0],
+        unlisted: "Unlisted",
+        every: null,
+      },
+    }),
+    ["listed", "every"],
+  );
+  assert.throws(() => routesHeld({ answers: { named: {} }, features: {} }));
+});
+
 /** Each table's statuses against the map's, and each driven through its caller. */
 async function heldToMap(
   wire,
@@ -637,8 +670,8 @@ async function heldToMap(
 ) {
   assert.deepEqual(
     [...Object.keys(reactions), ...uncalled].sort(),
-    Object.keys(wire.answers).sort(),
-    "a route the contract names is neither driven nor named as uncalled",
+    routesHeld(wire).sort(),
+    "a route this package is held to is neither driven nor named as uncalled, or one it is not held to is",
   );
   for (const [route, statuses] of Object.entries(reactions)) {
     assert.deepEqual(
@@ -1248,6 +1281,30 @@ const everyToolArgument = {
 /** What a tool whose parameter shares a name with another tool's takes in place of `everyToolArgument`'s. */
 const toolArgumentInPlace = { update_placement: { thread: "Pool" } };
 
+/** The tools of the contract's roster this package builds. */
+const toolsBuilt = allChuggyTools.filter(
+  (tool) => !chuggyToolsUnbuilt.includes(tool),
+);
+
+/** The tools `roster` admits that this package builds, as the runtime names them. */
+function toolNamesBuilt(roster) {
+  return chuggyToolNames(roster).filter((name) =>
+    toolsBuilt.some((tool) => name === `${chuggyToolPrefix}${tool}`),
+  );
+}
+
+test("every tool and tools' route named as not built here is the contract's, and none is named twice", () => {
+  for (const tool of chuggyToolsUnbuilt)
+    assert.ok(allChuggyTools.includes(tool), tool);
+  for (const route of chuggyToolRoutesUnbuilt)
+    assert.ok(Object.hasOwn(chuggyToolRoutes, route), route);
+  assert.equal(new Set(chuggyToolsUnbuilt).size, chuggyToolsUnbuilt.length);
+  assert.equal(
+    new Set(chuggyToolRoutesUnbuilt).size,
+    chuggyToolRoutesUnbuilt.length,
+  );
+});
+
 /** The routes of the tools' table one path matches. */
 function toolRoutesMatching(pathname) {
   return Object.entries(chuggyToolRoutes)
@@ -1296,7 +1353,12 @@ test("the pod's tools reach exactly the routes the contract gives them", async (
     assert.equal(matched.length, 1, `${definition.name} asked ${paths[0]}`);
     reached.add(matched[0]);
   }
-  assert.deepEqual([...reached].sort(), Object.keys(chuggyToolRoutes).sort());
+  assert.deepEqual(
+    [...reached].sort(),
+    Object.keys(chuggyToolRoutes)
+      .filter((route) => !chuggyToolRoutesUnbuilt.includes(route))
+      .sort(),
+  );
 });
 
 /** The tool names one roster registers, off the pod's own server definitions. */
@@ -1324,7 +1386,7 @@ test("the pod defines every tool the contract rosters, and no other", () => {
     ...leadDecisionStaging().definitions.map(({ name }) => name),
   ];
 
-  assert.deepEqual([...defined].sort(), [...allChuggyTools].sort());
+  assert.deepEqual([...defined].sort(), [...toolsBuilt].sort());
   assert.deepEqual(
     leadDecisionStaging().definitions.map(({ name }) => name),
     [...chuggyToolCapabilities.LeadDecision],
@@ -1349,7 +1411,7 @@ test("every roster registers, allows and disallows exactly what the contract's c
     const named = roster.join(",") || "no capability";
     const admitted = new Set([
       ...roster.flatMap((capability) => builtInToolCapabilities[capability]),
-      ...chuggyToolNames(roster),
+      ...toolNamesBuilt(roster),
     ]);
     const { allowedTools, disallowedTools } = sessionAllowedTools(roster);
 
@@ -1363,7 +1425,7 @@ test("every roster registers, allows and disallows exactly what the contract's c
       registered(roster)
         .map((tool) => `${chuggyToolPrefix}${tool}`)
         .sort(),
-      [...chuggyToolNames(roster)].sort(),
+      [...toolNamesBuilt(roster)].sort(),
       named,
     );
   }

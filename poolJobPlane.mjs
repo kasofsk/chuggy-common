@@ -11,18 +11,14 @@
  * reported is no longer live, so the plane refuses this and the report stands.
  *
  * A job its backend stopped for low disk is ended so only where the answer to
- * its error text named a release that takes that end, and as a failed run
- * where it named an older one, none, or did not come.
+ * its error text came from a plane that implements `RunDiskLow`, and as a
+ * failed run where it came from one that does not, named no release, or did
+ * not come.
  */
 
 import { Buffer } from "node:buffer";
 import { URL } from "node:url";
 
-import {
-  workerContractHeader,
-  workerContractRunDiskLow,
-  workerContractVersionOf,
-} from "@chuggy/worker-contract/workerContract";
 import {
   runEndedEvidences,
   workerPlaneBytesMediaType,
@@ -36,13 +32,19 @@ import {
   workerErrorPath,
 } from "./runEvidence.mjs";
 import { workerPlaneHeaders } from "./transport.mjs";
-import { rosterLabel, routePath } from "./wire.mjs";
+import {
+  answeredPeer,
+  peerImplements,
+  rosterLabel,
+  routePath,
+} from "./wire.mjs";
 
 /**
  * @typedef {import("./poolLoop.mjs").WorkerPoolAttempt} WorkerPoolAttempt
  * @typedef {import("./poolLoop.mjs").WorkerPoolEndAnswer} WorkerPoolEndAnswer
  * @typedef {import("./poolLoop.mjs").WorkerPoolJobEnd} WorkerPoolJobEnd
  * @typedef {import("./poolLoop.mjs").WorkerPoolJobPlane} WorkerPoolJobPlane
+ * @typedef {import("@chuggy/worker-contract/workerContract").WorkerContractPeer} WorkerContractPeer
  *
  * @typedef {object} PoolJobPlaneClientSettings
  * @property {number} timeoutMs each call's own
@@ -86,15 +88,15 @@ export function checkedPoolJobPlaneClientSettings(input) {
 
 /**
  * One call to an attempt's plane, resolved against its callback as the
- * harness resolves its own, answered by its status and the release the plane
- * named, its body unread.
+ * harness resolves its own, answered by its status and the plane that gave the
+ * answer as its headers name it, its body unread.
  *
  * @param {PoolJobPlaneClientSettings} settings
  * @param {typeof fetch} fetcher
  * @param {WorkerPoolAttempt} attempt
  * @param {string} path
  * @param {{method: string, contentType: string, body: string | Buffer}} sent
- * @returns {Promise<{status: number, release: string | undefined}>}
+ * @returns {Promise<{status: number, peer: WorkerContractPeer | undefined}>}
  */
 async function poolAttemptAnswered(settings, fetcher, attempt, path, sent) {
   const answered = await fetcher(new URL(path, attempt.callbackUrl), {
@@ -108,7 +110,7 @@ async function poolAttemptAnswered(settings, fetcher, attempt, path, sent) {
   await answered.body?.cancel();
   return {
     status: answered.status,
-    release: answered.headers.get(workerContractHeader) ?? undefined,
+    peer: answeredPeer(answered),
   };
 }
 
@@ -134,18 +136,12 @@ export async function poolAttemptStatus(
 }
 
 /**
- * Whether a plane that named `release` takes a run ended `RunDiskLow`.
+ * Whether the plane `peer` takes a run ended `RunDiskLow`.
  *
- * @param {string | undefined} release
+ * @param {WorkerContractPeer | undefined} peer
  */
-function diskLowTaken(release) {
-  const version =
-    release === undefined ? undefined : workerContractVersionOf(release);
-  return (
-    version !== undefined &&
-    version.major === workerContractRunDiskLow.major &&
-    version.minor >= workerContractRunDiskLow.minor
-  );
+function diskLowTaken(peer) {
+  return peerImplements(peer, "RunDiskLow");
 }
 
 /**
@@ -159,14 +155,14 @@ export function poolEndAnswer(status) {
 }
 
 /**
- * Leaves an attempt its error text, answering the release its plane named:
- * what follows is asked for whatever the status.
+ * Leaves an attempt its error text, answering the plane that took it as its
+ * headers name it: what follows is asked for whatever the status.
  *
  * @param {PoolJobPlaneClientSettings} settings
  * @param {typeof fetch} fetcher
  * @param {WorkerPoolJobEnd} ended
  * @param {string} text
- * @returns {Promise<string | undefined>}
+ * @returns {Promise<WorkerContractPeer | undefined>}
  */
 async function poolJobErrorLeft(settings, fetcher, ended, text) {
   try {
@@ -181,7 +177,7 @@ async function poolJobErrorLeft(settings, fetcher, ended, text) {
         body: Buffer.from(text),
       },
     );
-    return answered.release;
+    return answered.peer;
   } catch {
     return undefined;
   }
@@ -193,11 +189,11 @@ async function poolJobErrorLeft(settings, fetcher, ended, text) {
  * takes that, and failed otherwise.
  *
  * @param {WorkerPoolJobEnd} ended
- * @param {string | undefined} release
+ * @param {WorkerContractPeer | undefined} peer
  */
-function poolJobEvidence(ended, release) {
+function poolJobEvidence(ended, peer) {
   if (ended.killed === "Deadline") return runTimedOut;
-  if (ended.killed === "DiskLow" && diskLowTaken(release)) return runDiskLow;
+  if (ended.killed === "DiskLow" && diskLowTaken(peer)) return runDiskLow;
   return runFailed;
 }
 
@@ -211,7 +207,7 @@ function poolJobEvidence(ended, release) {
  * @returns {Promise<WorkerPoolEndAnswer>}
  */
 async function poolJobPlaneEnded(settings, fetcher, ended) {
-  const release = await poolJobErrorLeft(
+  const peer = await poolJobErrorLeft(
     settings,
     fetcher,
     ended,
@@ -227,7 +223,7 @@ async function poolJobPlaneEnded(settings, fetcher, ended) {
         {
           method: workerPlaneRoutes.runEnded.method,
           contentType: "application/json",
-          body: JSON.stringify({ evidence: poolJobEvidence(ended, release) }),
+          body: JSON.stringify({ evidence: poolJobEvidence(ended, peer) }),
         },
       ),
     );

@@ -1,7 +1,8 @@
 /**
  * A worker plane the suites drive the pod through, built from the contract's
  * own tables rather than written beside them. It resolves each request to the
- * route the contract names, holds it to naming the contract's release, reads
+ * route the contract names, holds it to naming the contract's release and
+ * listing this package's features, reads
  * its body under that route's schema, and answers only a status that route's
  * map names, with a body the map's schema reads.
  *
@@ -19,6 +20,7 @@ import {
   sessionCredentialSchema,
   sessionEndedSchema,
   sessionPlaneAnswers,
+  sessionPlaneRouteFeatures,
   sessionPlaneRoutes,
   sessionReferenceSchema,
   sessionTurnAnswerSchema,
@@ -28,6 +30,8 @@ import {
 } from "@chuggy/worker-contract/sessionPlane";
 import {
   contractVersionRefusalSchema,
+  workerContractFeaturesHeader,
+  workerContractFeaturesText,
   workerContractHeader,
   workerContractRelease,
   workerContractVersionOf,
@@ -39,6 +43,7 @@ import {
   workerHeldCredentialsSchema,
   workerPlaneAnswers,
   workerPlaneBytesMediaType,
+  workerPlaneRouteFeatures,
   workerPlaneRoutes,
   workerRunContextSchema,
   workerRunEndedSchema,
@@ -48,15 +53,17 @@ import {
 import { z } from "zod";
 
 import { pausedClock } from "./clock.fixture.mjs";
+import { workerFeaturesImplemented } from "./transport.mjs";
 
 /**
- * Each wire: its routes, what each answers, the schema a route's JSON body is
- * read under, the routes that schema reads only where a body is sent, and the
- * routes whose body is bytes.
+ * Each wire: its routes, the feature each belongs to, what each answers, the
+ * schema a route's JSON body is read under, the routes that schema reads only
+ * where a body is sent, and the routes whose body is bytes.
  */
 export const planes = {
   job: {
     routes: workerPlaneRoutes,
+    features: workerPlaneRouteFeatures,
     answers: workerPlaneAnswers,
     bodies: {
       runTurns: workerRunTurnsSchema,
@@ -72,6 +79,7 @@ export const planes = {
   },
   session: {
     routes: sessionPlaneRoutes,
+    features: sessionPlaneRouteFeatures,
     answers: sessionPlaneAnswers,
     bodies: {
       reference: sessionReferenceSchema,
@@ -171,16 +179,22 @@ function refusalBody(schema) {
 /**
  * The response one status of one route is, refused where the route's map does
  * not name it, naming `release` as a plane names its own on every answer, or
- * no release where it is `null`.
+ * no release where it is `null`, and listing `features` where it names them.
  */
-function answered(plane, route, status, body, release) {
+function answered(plane, route, status, body, { release, features }) {
   const schema = plane.answers[route][status];
   if (schema === undefined)
     throw violated(`${route} never answers ${String(status)}`);
-  const named =
-    release === null
+  const named = {
+    ...(release === null
       ? {}
-      : { [workerContractHeader]: release ?? workerContractRelease };
+      : { [workerContractHeader]: release ?? workerContractRelease }),
+    ...(features === undefined
+      ? {}
+      : {
+          [workerContractFeaturesHeader]: workerContractFeaturesText(features),
+        }),
+  };
   if (schema === "empty") {
     if (body !== undefined)
       throw violated(`${route} answers ${String(status)} with no body`);
@@ -206,7 +220,8 @@ function answered(plane, route, status, body, release) {
 /**
  * A `fetch` for one wire. `answer(route, asked, signal)` names the status and,
  * for a status whose body is not a refusal, the body, and may name the
- * release the plane answers under, this pod's where none; `signal` is the
+ * release the plane answers under, this pod's where none, and the features it
+ * lists, none where none; `signal` is the
  * request's own, for an answer that is held until its asker lets go.
  */
 export function planeFetch(plane, answer) {
@@ -220,6 +235,9 @@ export function planeFetch(plane, answer) {
       const release = init.headers?.[workerContractHeader];
       if (release !== workerContractRelease)
         throw violated(`${route} was asked under release ${String(release)}`);
+      const listed = init.headers?.[workerContractFeaturesHeader];
+      if (listed !== workerContractFeaturesText(workerFeaturesImplemented))
+        throw violated(`${route} was asked listing ${String(listed)}`);
       const body = offeredBody(plane, route, init);
       const request = { route, path: `${pathname}${search}`, method, body };
       asked.push(request);
@@ -227,8 +245,12 @@ export function planeFetch(plane, answer) {
         status,
         body: sent,
         release: answeredUnder,
+        features,
       } = await answer(route, request, init.signal);
-      return answered(plane, route, status, sent, answeredUnder);
+      return answered(plane, route, status, sent, {
+        release: answeredUnder,
+        features,
+      });
     },
   };
 }

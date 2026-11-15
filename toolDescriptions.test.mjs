@@ -22,6 +22,7 @@ import {
   chuggyProjectTools,
   chuggyToolContext,
   chuggyToolServer,
+  chuggyToolsUnbuilt,
   sessionCapabilityTools,
 } from "./chuggyTools.mjs";
 import { jobHost, jobHostToolNames } from "./jobHost.mjs";
@@ -141,11 +142,18 @@ function podServerJobs() {
 }
 
 for (const [server, built, roster] of [
-  ["the pod's server", podServer, allChuggyTools],
+  [
+    "the pod's server",
+    podServer,
+    allChuggyTools.filter((tool) => !chuggyToolsUnbuilt.includes(tool)),
+  ],
   [
     "a chat host's thread's server",
     podServerJobs,
-    [...allChuggyTools, ...Object.values(jobHostToolNames)],
+    [
+      ...allChuggyTools.filter((tool) => !chuggyToolsUnbuilt.includes(tool)),
+      ...Object.values(jobHostToolNames),
+    ],
   ],
   ["the local server", localServer, chuggyProjectTools.map(({ name }) => name)],
 ])

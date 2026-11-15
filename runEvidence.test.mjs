@@ -29,12 +29,13 @@ import {
 
 import {
   workerContractCredentialOutcome,
-  workerContractHeader,
   workerContractRelease,
   workerContractRunCredential,
+  workerContractVersionText,
 } from "@chuggy/worker-contract/workerContract";
 
 import { drawnSecrets, drawnText, seeded } from "./credentialText.fixture.mjs";
+import { planeHeaders, planeNamed, planesDeciding } from "./peer.fixture.mjs";
 import {
   credentialScrub,
   credentialScrubbing,
@@ -98,7 +99,10 @@ function harness(options = {}) {
         const headers = new globalThis.Headers(
           options.release === undefined
             ? {}
-            : { [workerContractHeader]: options.release },
+            : planeHeaders({
+                release: options.release,
+                features: options.features,
+              }),
         );
         if (path !== "/v1/run/turns") return { ok: true, status: 204, headers };
         return {
@@ -714,6 +718,33 @@ test("a plane from before readings is offered none", async () => {
   assert.deepEqual(postedReadings(calls), []);
 });
 
+/**
+ * Catches a subagent or a reading offered to a plane whose list leaves
+ * `RunContext` out, which refuses the field and the route, or withheld from
+ * one that lists it, and a plane listing nothing read otherwise than by its
+ * release.
+ */
+test("a subagent and the readings are offered to a plane listing RunContext, never to one leaving it out, and by its release to one listing nothing", async () => {
+  for (const plane of planesDeciding("RunContext")) {
+    const { recorder, calls, tick } = harness(plane);
+    await recorder.configuration(Buffer.from("{}"));
+    await recordAll(
+      recorder,
+      callEvents("msg_1", ["text"], { parent_tool_use_id: "toolu_01" }),
+    );
+    offerReading(recorder, "Compaction", { compaction });
+    await tick();
+
+    const named = planeNamed(plane);
+    assert.equal(
+      Object.hasOwn(postedTurns(calls)[0], "parentToolUseId"),
+      plane.takes,
+      named,
+    );
+    assert.equal(postedReadings(calls).length, plane.takes ? 1 : 0, named);
+  }
+});
+
 test("a refused reading stops the readings and nothing else of the run's evidence", async () => {
   const { recorder, calls, tick } = harness({
     release: workerContractRelease,
@@ -1154,6 +1185,15 @@ test("a hold outranks the turn count, because a held run had no turns to spend",
   );
 });
 
+/** A plane listing no features whose release is `minors` from the first that takes `RunCreditsExhausted`. */
+function credentialOutcomePlane(minors) {
+  const { major, minor } = workerContractCredentialOutcome;
+  return {
+    release: `${workerContractVersionText({ major, minor: minor + minors })}.0`,
+    features: undefined,
+  };
+}
+
 /**
  * Catches exhausted credits labelled for a plane whose release does not take
  * the label, which would refuse the run's end, or labelled a hold, or outranking
@@ -1161,8 +1201,8 @@ test("a hold outranks the turn count, because a held run had no turns to spend",
  */
 test("exhausted credits end a run RunCreditsExhausted only to a plane whose release takes it, outranking a hold", () => {
   const seen = seenBy(rejection, creditsRefused, creditsResult);
-  const takes = workerContractCredentialOutcome;
-  const before = { ...takes, minor: takes.minor - 1 };
+  const takes = credentialOutcomePlane(0);
+  const before = credentialOutcomePlane(-1);
   assert.ok(runEndedEvidences.includes("RunCreditsExhausted"));
   assert.equal(
     endedEvidence(creditsResult, false, seen, undefined, takes),
@@ -1192,9 +1232,24 @@ test("exhausted credits end a run RunCreditsExhausted only to a plane whose rele
   );
 });
 
+/**
+ * Catches exhausted credits labelled for a plane whose list leaves the
+ * outcome out, or not labelled for one that lists it, and a plane listing
+ * nothing read otherwise than by its release.
+ */
+test("exhausted credits end a run RunCreditsExhausted to a plane listing CredentialOutcome, never to one leaving it out, and by its release to one listing nothing", () => {
+  const seen = seenBy(rejection, creditsRefused, creditsResult);
+  for (const plane of planesDeciding("CredentialOutcome"))
+    assert.equal(
+      endedEvidence(creditsResult, false, seen, undefined, plane),
+      plane.takes ? "RunCreditsExhausted" : "RunRateLimited",
+      planeNamed(plane),
+    );
+});
+
 /** Catches a workspace whose Codex credits are depleted labelled a limit, or a Codex limit labelled exhausted credits. */
 test("a Codex rollout naming depleted credits ends RunCreditsExhausted, and one naming a limit RunRateLimited", () => {
-  const takes = workerContractCredentialOutcome;
+  const takes = credentialOutcomePlane(0);
   const ended = (snapshot) =>
     endedEvidence(
       undefined,
@@ -1918,6 +1973,29 @@ test("a rate-limited end names its credential inside its limit, only to a plane 
       limit === undefined ? { evidence } : { evidence, limit },
       case_,
     );
+  }
+});
+
+/**
+ * Catches a credential named to a plane whose list leaves `RunCredential` out,
+ * or not named to one that lists it, and a plane listing nothing read
+ * otherwise than by its release.
+ */
+test("a run's totals and its limit name its credential to a plane listing RunCredential, never to one leaving it out, and by its release to one listing nothing", async () => {
+  for (const plane of planesDeciding("RunCredential")) {
+    const { recorder, calls } = harness({
+      ...plane,
+      credential: runCredentialName,
+    });
+    await recorder.configuration(Buffer.from("{}"));
+    framed(recorder, limitRejected);
+    recorder.observed(processResult({ num_turns: 1 }));
+
+    const named = planeNamed(plane);
+    const totals = await postedTotals(recorder, calls);
+    assert.equal(Object.hasOwn(totals, "credential"), plane.takes, named);
+    const { limit } = await postedEnded(recorder, calls);
+    assert.equal(Object.hasOwn(limit, "credential"), plane.takes, named);
   }
 });
 

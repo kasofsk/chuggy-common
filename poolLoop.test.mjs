@@ -16,6 +16,7 @@ import {
   workerRunnerPollWaitHeader,
 } from "@chuggy/worker-contract/workerPool";
 
+import { planeHeaders, planeNamed, planesDeciding } from "./peer.fixture.mjs";
 import {
   workerPoolClaimWaitMs,
   workerPoolClientPass,
@@ -685,15 +686,16 @@ function answerBody(reconciliation) {
 
 /**
  * A plane client as a runner builds one, answered by a plane naming
- * `release`: each poll with the next of `answers`, nothing waiting once they
- * run out, a job said to wait only where the room the poll named fits one,
- * and each settlement as taken. Each poll's `wanted`, and the wait and the
- * room it names, are recorded.
+ * `release` and listing `features`, none where they are none: each poll with
+ * the next of `answers`, nothing waiting once they run out, a job said to wait
+ * only where the room the poll named fits one, and each settlement as taken.
+ * Each poll's `wanted`, and the wait and the room it names, are recorded.
  *
  * @param {string} release
  * @param {object[]} answers
+ * @param {string[]} [features]
  */
-function planeNaming(release, answers) {
+function planeNaming(release, answers, features = undefined) {
   const polls = [];
   const plane = poolPlaneClient(
     {
@@ -702,7 +704,7 @@ function planeNaming(release, answers) {
       settleTimeoutMs: 1_000,
     },
     async (url, init) => {
-      const headers = { [workerContractHeader]: release };
+      const headers = planeHeaders({ release, features });
       if (init.method !== "GET")
         return new globalThis.Response(null, { status: 204, headers });
       const room = init.headers[workerRunnerMemoryRoomHeader];
@@ -768,6 +770,28 @@ test("a pool keeping a claim whose first answer shows the plane does not claim b
   const old = planeNaming("1.20.0", []);
   await workerPoolClientPass({ ...gated.pooled, plane: old.plane });
   assert.deepEqual(old.polls, [["0", "0", "4096"]]);
+});
+
+/**
+ * Catches a pool claiming by room from a plane whose list leaves `MemoryRoom`
+ * out, or asking one that lists it by count, and a plane listing nothing read
+ * otherwise than by its release.
+ */
+test("a pool keeping a claim claims by room from a plane listing MemoryRoom, never from one leaving it out, and by its release from one listing nothing", async () => {
+  for (const decided of planesDeciding("MemoryRoom")) {
+    const { pooled } = claimingRoom();
+    const { plane, polls } = planeNaming(
+      decided.release,
+      [waiting(true)],
+      decided.features,
+    );
+    await workerPoolClientPass({ ...pooled, plane });
+    assert.deepEqual(
+      polls[1],
+      ["2", decided.takes ? "0" : undefined, "4096"],
+      planeNamed(decided),
+    );
+  }
 });
 
 test("a pool whose first read takes no job reads what it holds no more that pass, whatever the plane turns out to be", async () => {
