@@ -6,7 +6,7 @@ The worker core of chuggy: the harness a worker pod runs, and that the local com
 
 - **Each gate's own header.** Every script in `.chug/tasks/` opens by stating the rule it enforces, and its sibling `*.test.sh` proves the rule bites. The rule and its enforcement are the same file.
 - **chuggy's review brief**, [`review-change.md`](https://github.com/kasofsk/chuggy/blob/main/.chug/tasks/review-change.md). Its house rules and standing commitments bind here, for the rules no script can decide.
-- **The contract is chuggy's.** `@chuggy/worker-contract` is locked to a GitHub release asset by URL and integrity. A change here that needs the contract to be different is a chuggy change and a release first, then a lock bump here.
+- **The contract is chuggy's.** `@chuggy/worker-contract` is locked to a GitHub release asset by URL and integrity. A change here that needs the contract to be different is a chuggy change published as a package, then a lock bump here. The core asks a plane for a feature by name, never by the release it names.
 
 ## Layout
 
