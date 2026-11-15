@@ -1954,6 +1954,9 @@ const pathArguments = (z, into) => ({
 });
 /** A position in a mailbox, which is counted from one and never from zero. */
 const ordinal = (z) => z.number().int().min(1);
+/** What take_ticket and return_ticket say of the refusals both answer. */
+const chuggyTicketTakeRefusals =
+  "Every refusal is the API's, its status and body unaltered: 404 for a ticket this project does not hold, 403 TakerNotAPerson for a caller that is an agent, and 409 for a draft never released (Unreleased) and for a ticket Done (TicketDone) or Revoked (TicketRevoked), which runs nothing more.";
 /**
  * A JSON object this tool passes through and the API's own schema is the
  * authority on. IT IS `looseObject` AND NOT `record`: the runtime converts a
@@ -1962,10 +1965,6 @@ const ordinal = (z) => z.number().int().min(1);
  * the model no tools at all. `./toolProbe.mjs` is what holds that shut at
  * build time.
  */
-/** What take_ticket and return_ticket say of the refusals both answer. */
-const chuggyTicketTakeRefusals =
-  "Every refusal is the API's, its status and body unaltered: 404 for a ticket this project does not hold, 403 TakerNotAPerson for a caller that is an agent, and 409 for a draft never released (Unreleased) and for a ticket Done (TicketDone) or Revoked (TicketRevoked), which runs nothing more.";
-
 const anyObject = (z) => z.looseObject({});
 
 /**
