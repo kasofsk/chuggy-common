@@ -30,6 +30,7 @@ import {
   localToolServer,
   localToolReleasesBytesMax,
   localToolSignInFile,
+  localToolSignInStore,
   localToolUpdated,
 } from "./localTools.mjs";
 
@@ -402,8 +403,8 @@ test("the end of the agent's input closes the server", async () => {
 });
 
 test("served with the global fetch, a call with no sign-in is answered with a page, and the end of input ends it", async (t) => {
-  const signIns = await mkdtemp(join(tmpdir(), "local-tools-"));
-  t.after(() => rm(signIns, { recursive: true, force: true }));
+  const store = await mkdtemp(join(tmpdir(), "local-tools-"));
+  t.after(() => rm(store, { recursive: true, force: true }));
   t.mock.method(globalThis, "fetch", async (url) => {
     const asked = String(url);
     if (asked === "https://chuggy.test/config.json")
@@ -439,7 +440,7 @@ test("served with the global fetch, a call with no sign-in is answered with a pa
       workspace: "vteng",
       project: "chuggy",
       version: "1",
-      signIns,
+      store,
     },
     { McpServer, StdioServerTransport: class {}, z },
     stdin,
@@ -474,6 +475,25 @@ test("an ask names a site a credential may be sent to, and a workspace and proje
   assert.equal(
     localToolAskRefusal({ ...named, site: "http://127.0.0.1:8080" }),
     undefined,
+  );
+});
+
+test("the sign-in store is the worker contract's, on the platforms it defines one for", () => {
+  assert.equal(
+    localToolSignInStore("darwin", {
+      home: "/Users/me",
+      configHome: undefined,
+    }),
+    "/Users/me/.config/chuggy/sign-ins",
+  );
+  assert.equal(
+    localToolSignInStore("linux", { home: "/home/me", configHome: "/etc/me/" }),
+    "/etc/me/chuggy/sign-ins",
+  );
+  assert.throws(
+    () =>
+      localToolSignInStore("win32", { home: "C:\\me", configHome: undefined }),
+    /not defined on win32/,
   );
 });
 
@@ -725,8 +745,8 @@ test("the serve ends only once the update it started once connected has ended", 
 });
 
 test("served with updates on, the site's pin goes to the runner updater once connected, its refusal is said on stderr, and the serve goes on", async (t) => {
-  const signIns = await mkdtemp(join(tmpdir(), "local-tools-"));
-  t.after(() => rm(signIns, { recursive: true, force: true }));
+  const store = await mkdtemp(join(tmpdir(), "local-tools-"));
+  t.after(() => rm(store, { recursive: true, force: true }));
   const stderr = [];
   t.mock.method(process.stderr, "write", (chunk) => stderr.push(String(chunk)));
   const stdout = t.mock.method(process.stdout, "write", () => true);
@@ -751,7 +771,7 @@ test("served with updates on, the site's pin goes to the runner updater once con
       workspace: "vteng",
       project: "chuggy",
       version: "0.4.0",
-      signIns,
+      store,
       fetch: async (url) => {
         asked.push({ url: String(url), connected });
         return globalThis.Response.json({ releases: [pinOf("0.5.0")] });

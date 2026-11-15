@@ -1,7 +1,7 @@
 /**
  * The lock's races, opened on purpose: the file system's own calls are slowed
  * or answered by a competitor here, so this file is a process of its own and
- * the store is imported only once they are in place.
+ * the lock is imported only once they are in place.
  */
 import assert from "node:assert/strict";
 import fsp from "node:fs/promises";
@@ -34,11 +34,28 @@ fsp.rm = async (path, options) => {
   await realWriteFile(path, "4242\n");
 };
 syncBuiltinESMExports();
-const { localTokenStore } = await import("./localTokenStore.mjs");
-const { fileLockHolderAlive } = await import("./fileLock.mjs");
+const { fileLocked, fileLockHolderAlive } = await import("./fileLock.mjs");
+
+const bounds = {
+  waitMsMax: 20_000,
+  heldMsMax: 300_000,
+  pollMs: 100,
+  busy: "the lock is held past the wait",
+};
+
+function lockOf(path, overrides) {
+  const ports = {
+    pid: process.pid,
+    nowMs: Date.now,
+    wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    holderAlive: fileLockHolderAlive,
+    ...overrides,
+  };
+  return { locked: (hold) => fileLocked(`${path}.lock`, bounds, ports, hold) };
+}
 
 async function pathOf(t) {
-  const directory = await fsp.mkdtemp(join(tmpdir(), "local-token-race-"));
+  const directory = await fsp.mkdtemp(join(tmpdir(), "file-lock-race-"));
   t.after(() => realRm(directory, { recursive: true, force: true }));
   return join(directory, "renewal");
 }
@@ -62,7 +79,7 @@ test("where creating a file is slow, no server judges a lock before it names its
   let overlapped = false;
   await Promise.all(
     Array.from({ length: 2 }, () =>
-      localTokenStore(path, {
+      lockOf(path, {
         holderAlive,
         wait: (ms) => {
           if (judged.length > 0) waitedOnHolder();
@@ -92,7 +109,7 @@ test("a lock taken again after every removal is waited on no longer than the dea
     competitor.retake = false;
   });
   let nowMs = Date.now();
-  const store = localTokenStore(path, {
+  const store = lockOf(path, {
     nowMs: () => nowMs,
     holderAlive: () => {
       nowMs += 1_000;
@@ -104,6 +121,6 @@ test("a lock taken again after every removal is waited on no longer than the dea
   });
   await assert.rejects(
     store.locked(async () => "ran"),
-    /held the sign-in lock/,
+    /held past the wait/,
   );
 });

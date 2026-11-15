@@ -22,9 +22,10 @@
  * A TOKEN IS NEVER IN AN ANSWER. Not in an error, not in a page, not in a
  * line written anywhere. A refusal from the issuer is said by its status.
  *
- * Renewals run under the store's lock, one at a time per process. A renewal
- * the issuer refused, as the console reads a refusal, clears the store; any
- * other failure keeps it for the next call. A renewal whose answer is lost
+ * Renewals run under the store's lock, which every program renewing the same
+ * sign-in takes, so one runs at a time on the machine. A renewal the issuer
+ * refused, as the console reads a refusal, clears the store; any other failure
+ * keeps it for the next call. A renewal whose answer is lost
  * after the issuer replaced the token leaves a spent one stored, and the next
  * renewal ends the sign-in: the console has the same exposure.
  */
