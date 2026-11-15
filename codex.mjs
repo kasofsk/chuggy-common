@@ -113,6 +113,16 @@ function codexEffortArguments(task) {
 export function codexInvocation(task, run) {
   return [
     "exec",
+    ...codexOptions(task, run),
+    ...configuredArguments(task),
+    "--",
+    task.briefing.text,
+  ];
+}
+
+/** The options the core gives a run and a resumed one. */
+function codexOptions(task, run) {
+  return [
     "--json",
     "--ignore-user-config",
     "--ignore-rules",
@@ -125,9 +135,25 @@ export function codexInvocation(task, run) {
     "--output-schema",
     run.resultSchema,
     ...run.shellArguments,
+  ];
+}
+
+/**
+ * The same run carrying on in the thread `session` named, told `run.prompt`.
+ * Every option goes to `exec`, ahead of `resume`, since `resume` reads its
+ * parent's options and takes few of its own: `--add-dir` is `exec`'s alone. The worker's configured options come first, so one that
+ * takes every word after it, as `--image` does, ends at the core's own and
+ * never takes `resume` as a value.
+ */
+export function codexResumeInvocation(task, session, run) {
+  return [
+    "exec",
     ...configuredArguments(task),
+    ...codexOptions(task, run),
+    "resume",
     "--",
-    task.briefing.text,
+    session,
+    run.prompt,
   ];
 }
 
@@ -336,9 +362,9 @@ function codexFrame(folded = {}, event) {
   return folded;
 }
 
-/** What the stream said of how the run ended: Codex's own message, quoted and never read. */
+/** What the stream said of how the run ended: Codex's own message, quoted and never read, and the thread it ran in. */
 function codexEnded(_resultEvent, folded) {
-  return { sentence: folded?.sentence, session: undefined };
+  return { sentence: folded?.sentence, session: folded?.thread };
 }
 
 /** What the run's rollout, under the Codex home it was started with, declared of its usage and a limit. */
@@ -356,6 +382,10 @@ export const codexAgent = {
   executable: coreRuntime.codex,
   credential: "codex-auth",
   invocation: codexInvocation,
+  resumeInvocation: codexResumeInvocation,
+  // A limit is not waited out: a resumed thread's rollout may still hold the
+  // limit that stopped it, which the run after would read as its own.
+  resumesHeld: false,
   result: codexResult,
   frame: codexFrame,
   ended: codexEnded,

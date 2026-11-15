@@ -44,6 +44,7 @@ export const workerFeaturesImplemented = [
   "RunCredentialAbsent",
   "SessionCapabilitiesNamed",
   "ChatSessionThreads",
+  "TargetMerge",
 ];
 
 /**

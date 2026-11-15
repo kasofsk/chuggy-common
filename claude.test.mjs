@@ -122,9 +122,11 @@ test("a resumed run given a prompt is told that prompt alone, as its first messa
   assert.equal(claudeBrief(task, undefined, "-resolve it"), "briefing");
 });
 
-/** Which runtime may resume is what decides whether a limit can be waited out. */
-test("a Codex run has no conversation to resume, so no limit of its is waited out", () => {
-  assert.equal(codexAgent.resumeInvocation, undefined);
+/** Which runtime may resume a held run is what decides whether a limit can be waited out. */
+test("a Codex run resumes its thread for a merge, but no limit of its is waited out", () => {
+  assert.notEqual(codexAgent.resumeInvocation, undefined);
+  assert.equal(codexAgent.resumesHeld, false);
+  assert.equal(claudeAgent.resumesHeld, undefined);
 });
 
 test("a result frame says what the runtime said and which conversation it ended", () => {

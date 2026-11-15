@@ -53,6 +53,7 @@ export const pushed = workTaskDocumentSchema.strict().parse({
     files: [],
   },
   targetRef: "refs/heads/main",
+  targetMerge: { ref: "refs/heads/main", pipelinesWritable: true },
   workerPlane: {
     url: "http://worker-plane.test:3001",
     capabilityFile: "/run/worker-plane.test/bearer",

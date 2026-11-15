@@ -48,6 +48,9 @@ const sourceTargetPrefix = "chuggy-target-";
 /** Where a fetched target's tip is held, in the repository it is fetched into and then in the workspace. */
 const sourceTargetSeenRef = "refs/chuggy/target";
 
+/** Where a repository's GitHub workflows are, which a push needs the forge's leave to change. */
+const sourcePipelinesPath = ".github/workflows/";
+
 /** Where the index a target's merge stopped with is kept, in the workspace's git directory. */
 const sourceTargetStoppedIndex = "chuggy-target-merge-index";
 
@@ -1006,8 +1009,9 @@ async function sourceMergeRefused(command, local) {
 }
 
 /**
- * The tip of `targetRef` on `repository`, fetched into the workspace at
- * `directory` and held there as `refs/chuggy/target`.
+ * The tip of `ref` on `repository`, fetched into the workspace at `directory`
+ * and held there as `refs/chuggy/target`; `HEAD` is the branch the remote
+ * defaults to.
  *
  * THE REMOTE IS REACHED FROM A REPOSITORY OF THE CORE'S OWN, made as a push's
  * is and borrowing the workspace's objects, so no configuration the attempt
@@ -1018,7 +1022,7 @@ async function sourceMergeRefused(command, local) {
  */
 export async function sourceTargetFetched({
   repository,
-  targetRef,
+  ref,
   directory,
   command,
   environment,
@@ -1052,7 +1056,7 @@ export async function sourceTargetFetched({
               "--quiet",
               "--no-tags",
               repository,
-              `+${targetRef}:${sourceTargetSeenRef}`,
+              `+${ref}:${sourceTargetSeenRef}`,
             ],
             { cwd: places.root, env: fetching },
           ),
@@ -1082,6 +1086,23 @@ export async function sourceTargetFetched({
   return tip.trim();
 }
 
+/** Whether the workspace at `directory` holds `commit` as a commit. */
+export async function sourceCommitHeld({
+  commit,
+  directory,
+  command,
+  git = [],
+}) {
+  return command(
+    "git",
+    ["cat-file", "-e", `${commit}^{commit}`],
+    sourceLocal(directory, git),
+  ).then(
+    () => true,
+    () => false,
+  );
+}
+
 /** Whether `HEAD` already holds `tip` among its ancestors. */
 export async function sourceTargetContained({
   tip,
@@ -1100,6 +1121,55 @@ export async function sourceTargetContained({
       throw failure;
     },
   );
+}
+
+/**
+ * The paths under `.github/workflows/` that merging `tip` into `HEAD` would
+ * change, and that would then differ from `base`, the commit the push
+ * replaces: what a job that may not write pipelines cannot push. It is read
+ * from the tree git would merge to, so nothing in the workspace moves, and a
+ * path the merge would leave conflicted counts.
+ */
+export async function sourcePipelinesBrought({
+  base,
+  tip,
+  directory,
+  command,
+  git = [],
+}) {
+  const local = sourceLocal(directory, git);
+  const written = await command(
+    "git",
+    ["merge-tree", "--write-tree", "--no-messages", "HEAD", tip],
+    local,
+  ).then(
+    ({ stdout }) => stdout,
+    (failure) => {
+      if (failure?.code === 1 && typeof failure.stdout === "string")
+        return failure.stdout;
+      throw failure;
+    },
+  );
+  const [merged] = written.split("\n");
+  const changed = async (from) => {
+    const { stdout } = await command(
+      "git",
+      [
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        from,
+        merged,
+        "--",
+        sourcePipelinesPath,
+      ],
+      local,
+    );
+    return stdout.split("\0").filter((path) => path !== "");
+  };
+  const replaced = new Set(await changed(base));
+  return (await changed("HEAD")).filter((path) => replaced.has(path));
 }
 
 /**
@@ -1123,8 +1193,8 @@ export async function sourceWorkCommitted({
 }
 
 /**
- * `tip`, the target `targetRef` named, merged into `HEAD` with `--no-ff`, as
- * the core and with no hook of the project's (`sourceWithoutHooks`). It
+ * `tip`, what `named` names, merged into `HEAD` with `--no-ff`, as the core
+ * and with no hook of the project's (`sourceWithoutHooks`). It
  * answers `{conflicted}`, the paths the merge left unmerged, where it stopped
  * on conflicts and left the merge in progress, and `{conflicted: []}` where it
  * committed. A merge that neither committed nor stopped in progress, as one
@@ -1132,7 +1202,7 @@ export async function sourceWorkCommitted({
  */
 export async function sourceTargetMerged({
   task,
-  targetRef,
+  named,
   tip,
   directory,
   command,
@@ -1148,7 +1218,7 @@ export async function sourceTargetMerged({
           "--no-ff",
           "--no-edit",
           "-m",
-          `Merge ${targetRef} into ticket ${String(task.ticket)} attempt ${task.attempt}`,
+          `Merge ${named} into ticket ${String(task.ticket)} attempt ${task.attempt}`,
           tip,
         ],
         { ...local, env: { ...local.env, ...sourceCheckpointIdentity } },
@@ -1203,15 +1273,36 @@ export async function sourceConflictsLeft({
 
 /**
  * A merge in progress whose conflicts are resolved, committed as the core and
- * with no hook of the project's; nothing where no merge is in progress. The
- * commit is the index the merge stopped with, each path it left unmerged taken
- * from the tree, so the commit holds the merge and its resolution alone. The
- * rest of what the tree changed is left uncommitted, for a commit the
- * project's hooks run on.
+ * with no hook of the project's; nothing where no merge is in progress. Where
+ * it is the merge of `tip` that `sourceTargetMerged` stopped, the commit is the
+ * index it stopped with, each path it left unmerged taken from the tree, so the
+ * commit holds the merge and its resolution alone, and the rest of what the
+ * tree changed is left uncommitted, for a commit the project's hooks run on.
+ * A merge of anything else is the agent's own, and is committed as its index
+ * holds it.
  */
-export async function sourceMergeConcluded({ directory, command, git = [] }) {
+export async function sourceMergeConcluded({
+  tip,
+  directory,
+  command,
+  git = [],
+}) {
   const local = sourceLocal(directory, git);
   if (!(await sourceMerging(command, local))) return;
+  const { stdout: merging } = await command(
+    "git",
+    ["rev-parse", "MERGE_HEAD"],
+    local,
+  );
+  if (merging.trim() !== tip) {
+    await sourceWithoutHooks(command, (hookless) =>
+      hookless("git", ["commit", "--no-edit", "--quiet"], {
+        ...local,
+        env: { ...local.env, ...sourceCheckpointIdentity },
+      }),
+    );
+    return;
+  }
   const stopped = await sourceGitPath(command, local, sourceTargetStoppedIndex);
   await sourceWithoutHooks(command, async (hookless, made) => {
     const index = join(made, "index");

@@ -26,6 +26,7 @@ import {
   codexConfiguration,
   codexInvocation,
   codexResult,
+  codexResumeInvocation,
   codexShellArguments,
   prepareCodexCredential,
   prepareCodexEnvironment,
@@ -94,6 +95,38 @@ test("a Codex briefing is the prompt whatever options precede it", () => {
     assert.deepEqual(argv.slice(-2), ["--", "briefing"]);
     assert.equal(argv.indexOf("--"), argv.length - 2);
   }
+});
+
+/**
+ * Catches a resumed run that starts a new thread, takes the prompt as a value
+ * of an option before it, or drops the options the first run had, such as its
+ * result schema; and one that hands `resume` an option only `exec` reads, as
+ * `--add-dir` is, or lets `--image` take `resume` as one of its files.
+ */
+test("a Codex run resumed is `exec <options> resume` of its thread, told its prompt", () => {
+  const shelled = { ...run, shellArguments: ["--config", "shell"] };
+  const configured = ["--add-dir", "/extra", "--image", "a.png"];
+  const argv = codexResumeInvocation(
+    {
+      ...task,
+      worker: { mode: { ...task.worker.mode, arguments: configured } },
+    },
+    "thread-1",
+    { ...shelled, prompt: "resolve it" },
+  );
+  const own = codexInvocation(task, shelled).slice(1, -2);
+
+  assert.deepEqual(argv, [
+    "exec",
+    ...configured,
+    ...own,
+    "resume",
+    "--",
+    "thread-1",
+    "resolve it",
+  ]);
+  assert.match(own[0], /^--/);
+  assert.equal(codexAgent.resumeInvocation, codexResumeInvocation);
 });
 
 /** Catches a worker's `--` making the run's own `--` and briefing two prompts. */
@@ -303,7 +336,7 @@ test("ticket configuration cannot make a Codex run ephemeral", () => {
  * dropped from the text a person reads, which is the only place it says when
  * the limit resets.
  */
-test("a Codex stream says its thread and the message its failed turn ended with", () => {
+test("a Codex stream says its thread, which is the session it resumes, and the message its failed turn ended with", () => {
   const sentence =
     "You've hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at Nov 5th, 2026 1:26 AM.";
   const folded = [
@@ -322,7 +355,7 @@ test("a Codex stream says its thread and the message its failed turn ended with"
   });
   assert.deepEqual(codexAgent.ended(undefined, folded), {
     sentence,
-    session: undefined,
+    session: "019a4f4e-1c2b-7d3e-8f40-a1b2c3d4e5f6",
   });
   assert.deepEqual(codexAgent.ended(undefined, undefined), {
     sentence: undefined,

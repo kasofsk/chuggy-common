@@ -165,6 +165,7 @@ import { jobRepositoryDirectory } from "./job.mjs";
 import { workerCredentialPath } from "./planeCredential.mjs";
 import { gitRemotePauseMs, gitRemoteTriesMax } from "./gitRemote.mjs";
 import {
+  targetMergeChangeNudge,
   targetMergeConflictNudge,
   targetMergeMovedNudge,
   targetMergeNudgesMax,
@@ -8022,40 +8023,52 @@ test("a hook setup installs refuses neither a keep nor the restore after it", as
   });
 });
 
-/** The ref every work task below names as where its finalizer lands. */
-const targetRef = fetchedAnswer.targetRef;
+/** The ref every work task below names as what its core merges in. */
+const targetRef = fetchedAnswer.targetMerge.ref;
 
 /**
- * `path` written as `content` and committed on top of the remote's target,
- * from `checkout`'s own directory: the target moving on, as another ticket's
- * landing moves it. Its commit.
+ * `path` written as `content` and committed on top of the remote's `ref`, the
+ * target where named no other, from `checkout`'s own directory: the target
+ * moving on, as another ticket's landing moves it. Its commit.
  */
-async function targetMoved({ remote, directory }, path, content) {
-  await git("git", ["fetch", "--quiet", remote, targetRef], { cwd: directory });
+async function targetMoved(
+  { remote, directory },
+  path,
+  content,
+  ref = targetRef,
+) {
+  await git("git", ["fetch", "--quiet", remote, ref], { cwd: directory });
   await git("git", ["checkout", "--quiet", "--detach", "FETCH_HEAD"], {
     cwd: directory,
   });
+  await mkdir(dirname(join(directory, path)), { recursive: true });
   await writeFile(join(directory, path), content);
   await git("git", ["add", path], { cwd: directory });
   await git("git", [...author, "commit", "--quiet", "-m", "target"], {
     cwd: directory,
   });
-  await git("git", ["push", "--quiet", remote, `HEAD:${targetRef}`], {
+  await git("git", ["push", "--quiet", remote, `HEAD:${ref}`], {
     cwd: directory,
   });
   return headOf(directory);
 }
 
 /** The shell lines a stand-in's work runs to move the target as `targetMoved` does. */
-function targetMovedWork({ remote, directory }, path, content) {
+function targetMovedWork(
+  { remote, directory },
+  path,
+  content,
+  ref = targetRef,
+) {
   const at = (args) => `git -C ${shellWord(directory)} ${args}`;
   return [
-    at(`fetch --quiet ${shellWord(remote)} ${targetRef}`),
+    at(`fetch --quiet ${shellWord(remote)} ${ref}`),
     at("checkout --quiet --detach FETCH_HEAD"),
+    `mkdir -p ${shellWord(dirname(join(directory, path)))}`,
     `printf %s ${shellWord(content)} > ${shellWord(join(directory, path))}`,
     at(`add ${shellWord(path)}`),
     at(`${author.join(" ")} commit --quiet -m target`),
-    at(`push --quiet ${shellWord(remote)} HEAD:${targetRef}`),
+    at(`push --quiet ${shellWord(remote)} HEAD:${ref}`),
   ].join(" && ");
 }
 
@@ -8314,7 +8327,14 @@ test("a target that cannot be fetched is logged at the start and the end, and th
       t,
       checkout,
       [verdictRun()],
-      { answer: agentAnswer({ targetRef: "refs/heads/never-pushed" }) },
+      {
+        answer: agentAnswer({
+          targetMerge: {
+            ...fetchedAnswer.targetMerge,
+            ref: "refs/heads/never-pushed",
+          },
+        }),
+      },
     );
 
     passStands(failure, plane);
@@ -8391,7 +8411,7 @@ test("an end merge that conflicts resumes the agent's conversation, naming the t
     assert.deepEqual(resumed.argv.slice(-2), ["--resume", limitSession]);
     assert.equal(
       resumed.brief,
-      targetMergeMovedNudge({ targetRef, tip, paths: ["README.md"] }),
+      targetMergeMovedNudge({ named: targetRef, tip, paths: ["README.md"] }),
     );
     const { commit, merges } = await candidatePushed(
       checkout.remote,
@@ -8495,7 +8515,11 @@ test("an end conflict the agent never resolves resumes it up to the cap and then
     const tip = await targetTip(checkout.remote);
     assert.equal(
       starts[2].brief,
-      targetMergeConflictNudge({ targetRef, tip, paths: ["README.md"] }),
+      targetMergeConflictNudge({
+        named: targetRef,
+        tip,
+        paths: ["README.md"],
+      }),
     );
   });
 });
@@ -8517,30 +8541,95 @@ test("an end conflict whose resumed turn does not pass loses the attempt, pushin
   });
 });
 
+/** The thread a Codex stand-in's runs say they run in. */
+const codexThread = "019a0000-0000-7000-8000-0000000000aa";
+
+/** A Codex process's frames: its thread started, then `verdict`. */
+function codexThreadFrames(verdict = "Pass") {
+  return [
+    { type: "thread.started", thread_id: codexThread },
+    codexVerdict(verdict),
+  ];
+}
+
 /**
- * Catches a runtime with no conversation to resume pushing its conflict, or
- * waiting on a resume it cannot make.
+ * Catches a Codex thread lost to an end conflict, resumed in a new thread or
+ * told nothing, or its resumed turn's resolution not pushed.
  */
-test("a Codex run whose end merge conflicts cannot be resumed, so the attempt is lost and pushes nothing", async (t) => {
+test("a Codex run whose end merge conflicts resumes its thread with the nudge, and the resumed turn resolves it", async (t) => {
   await inCheckout(async (checkout) => {
     await targetPushed(checkout);
+    const { ran, runtime } = await launchedStandIn(
+      t,
+      checkout,
+      [
+        { frames: ["codex-cli 0.169.0"] },
+        {
+          work: `echo ours > README.md && ${targetMovedWork(checkout, "README.md", "theirs\n")}`,
+          frames: codexThreadFrames(),
+        },
+        { work: readmeResolved, frames: codexThreadFrames() },
+      ],
+      envelopeCarried(),
+      codexLaunched,
+    );
+
+    assert.equal(ran.code, 0, ran.stderr);
+    const tip = await targetTip(checkout.remote);
+    const starts = await runtime.starts();
+    assert.equal(starts.length, 3);
+    const { argv } = starts[2];
+    assert.equal(argv[0], "exec");
+    assert.deepEqual(argv.slice(-4), [
+      "resume",
+      "--",
+      codexThread,
+      targetMergeMovedNudge({ named: targetRef, tip, paths: ["README.md"] }),
+    ]);
+    assert.ok(argv.includes("--output-schema"), argv.join(" "));
+    const { commit, merges } = await candidatePushed(
+      checkout.remote,
+      checkout.base,
+    );
+    assert.deepEqual(merges, [commit]);
+    assert.equal(
+      await remoteFile(checkout.remote, commit, "README.md"),
+      "both\n",
+    );
+  });
+});
+
+/** Catches a Codex thread resumed past the cap, or its unresolved conflict pushed. */
+test("a Codex end conflict the agent never resolves resumes it up to the cap and then loses the attempt, pushing nothing", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const idle = Array.from({ length: targetMergeNudgesMax }, () => ({
+      frames: codexThreadFrames(),
+    }));
     const { ran, plane, runtime } = await launchedStandIn(
       t,
       checkout,
       [
-        { frames: ["codex-cli 0.165.0"] },
+        { frames: ["codex-cli 0.169.0"] },
         {
           work: `echo ours > README.md && ${targetMovedWork(checkout, "README.md", "theirs\n")}`,
-          frames: [codexVerdict("Pass")],
+          frames: codexThreadFrames(),
         },
+        ...idle,
       ],
       envelopeCarried(),
       codexLaunched,
     );
 
     assert.notEqual(ran.code, 0);
-    assert.match(ran.stderr, /cannot be resumed to resolve it/u);
-    assert.equal((await runtime.starts()).length, 2);
+    assert.match(
+      ran.stderr,
+      new RegExp(
+        `unresolved in README\\.md after ${String(targetMergeNudgesMax)} resumed turns`,
+        "u",
+      ),
+    );
+    assert.equal((await runtime.starts()).length, 2 + targetMergeNudgesMax);
     await lostPushingNothing(new Error(ran.stderr), plane, checkout.remote);
   });
 });
@@ -8567,13 +8656,14 @@ test("a workspace already holding the target's tip merges nothing, at the start 
   });
 });
 
-/** Catches a task naming no target fetching one anyway, or merging the remote's default branch in its place. */
-test("a work task naming no target fetches and merges nothing", async (t) => {
+/** Catches a task naming no `targetMerge` merging its `targetRef`, or the remote's default branch, in its place. */
+test("a work task naming only a targetRef fetches and merges nothing", async (t) => {
   await inCheckout(async (checkout) => {
     await targetPushed(checkout);
     await targetMoved(checkout, "target.txt", "landed\n");
     const unnamed = agentAnswer();
-    delete unnamed.targetRef;
+    delete unnamed.targetMerge;
+    assert.equal(unnamed.targetRef, targetRef);
 
     const { failure, plane, workspace } = await standInAttempt(
       t,
@@ -8598,6 +8688,531 @@ test("a work task naming no target fetches and merges nothing", async (t) => {
       { cwd: jobRepositoryDirectory(workspace) },
     );
     assert.equal(fetched, "");
+  });
+});
+
+/** A work task whose `targetMerge` is the fixture's over `fields`. */
+function mergeAnswer(fields) {
+  return agentAnswer({
+    targetMerge: { ...fetchedAnswer.targetMerge, ...fields },
+  });
+}
+
+/** A path GitHub refuses a push changing where the job may not write pipelines. */
+const workflowPath = ".github/workflows/ci.yml";
+
+/** How a worker's own merge of a commit is run, as a briefing tells the agent to. */
+const workerMerge = "git -c user.name=worker -c user.email=worker@invalid";
+
+/**
+ * A failed landing's change: `path` written as `content` on top of `from`, on
+ * a branch of its own the remote holds, as the attempt that made it left it.
+ * Its commit.
+ */
+async function landingChange({ remote, directory }, from, path, content) {
+  await git("git", ["checkout", "--quiet", "--detach", from], {
+    cwd: directory,
+  });
+  await mkdir(dirname(join(directory, path)), { recursive: true });
+  await writeFile(join(directory, path), content);
+  await git("git", ["add", path], { cwd: directory });
+  await git("git", [...author, "commit", "--quiet", "-m", "the change"], {
+    cwd: directory,
+  });
+  await git(
+    "git",
+    ["push", "--quiet", remote, "HEAD:refs/heads/earlier-attempt"],
+    { cwd: directory },
+  );
+  return headOf(directory);
+}
+
+/** The parent `commit` merged in, on `remote`. */
+async function mergedIn(remote, commit) {
+  const { stdout } = await git("git", ["rev-parse", `${commit}^2`], {
+    cwd: remote,
+  });
+  return stdout.trim();
+}
+
+/**
+ * Catches `targetRef` merged where `targetMerge.ref` names another ref, and
+ * `HEAD` read as a branch of that name rather than the one the remote
+ * defaults to, at the start or the end, or named as `HEAD` in the log.
+ */
+test("a targetMerge naming HEAD merges origin's default branch at the start and the end, whatever targetRef names", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const trunk = "refs/heads/trunk";
+    await git(
+      "git",
+      ["push", "--quiet", checkout.remote, `${checkout.base}:${trunk}`],
+      { cwd: checkout.directory },
+    );
+    await git("git", ["symbolic-ref", "HEAD", trunk], { cwd: checkout.remote });
+    const first = await targetMoved(checkout, "first.txt", "first\n", trunk);
+    const logged = [];
+    t.mock.method(process.stderr, "write", (text) => logged.push(text));
+
+    const { failure, plane } = await standInAttempt(
+      t,
+      checkout,
+      [
+        {
+          work: `echo done > done.txt && ${targetMovedWork(checkout, "second.txt", "second\n", trunk)}`,
+          frames: [verdictFrame()],
+        },
+      ],
+      { answer: mergeAnswer({ ref: "HEAD" }) },
+    );
+
+    passStands(failure, plane);
+    const { stdout: second } = await git("git", ["rev-parse", trunk], {
+      cwd: checkout.remote,
+    });
+    const { commit, merges } = await candidatePushed(
+      checkout.remote,
+      checkout.base,
+    );
+    assert.equal(merges.length, 2);
+    assert.ok(await remoteHolds(checkout.remote, first, commit));
+    assert.ok(await remoteHolds(checkout.remote, second.trim(), commit));
+    const said = logged.join("");
+    assert.ok(
+      said.includes(
+        `merged origin's default branch at ${first} into the workspace`,
+      ),
+      said,
+    );
+    assert.ok(
+      said.includes(
+        `merged origin's default branch at ${second.trim()}, which moved past the work`,
+      ),
+      said,
+    );
+  });
+});
+
+/** Catches a review merging the target its task names, which it evaluates as it was handed. */
+test("an evaluation naming a targetMerge whose target moved fetches and merges nothing", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    await targetMoved(checkout, "target.txt", "landed\n");
+
+    const { runtime, workspace } = await standInAttempt(
+      t,
+      checkout,
+      [verdictRun()],
+      { answer: agentAnswer({ taskKind: "Evaluation" }) },
+    );
+
+    const [{ brief }] = await runtime.starts();
+    assert.doesNotMatch(brief, /## A merge of/u);
+    const { stdout: fetched } = await git(
+      "git",
+      ["for-each-ref", "refs/chuggy/"],
+      { cwd: jobRepositoryDirectory(workspace) },
+    );
+    assert.equal(fetched, "");
+  });
+});
+
+/**
+ * Catches a workflow change merged into a job that cannot push one, at the
+ * start or the end, which would have GitHub refuse the push whole, and an
+ * agent not told why its target is missing.
+ */
+test("a target holding a workflow change an unwritable job cannot push is merged neither at the start, which the briefing says, nor at the end, and the work is pushed", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const first = await targetMoved(checkout, workflowPath, "on: push\n");
+    const logged = [];
+    t.mock.method(process.stderr, "write", (text) => logged.push(text));
+
+    const { failure, plane, runtime } = await standInAttempt(
+      t,
+      checkout,
+      [
+        {
+          work: `echo done > done.txt && ${targetMovedWork(checkout, ".github/workflows/second.yml", "on: pull_request\n")}`,
+          frames: [verdictFrame()],
+        },
+      ],
+      { answer: mergeAnswer({ pipelinesWritable: false }) },
+    );
+
+    passStands(failure, plane);
+    const [{ brief }] = await runtime.starts();
+    assert.match(brief, /## The target branch was not merged/u);
+    assert.ok(brief.includes(`${targetRef} at ${first}`), brief);
+    assert.ok(brief.includes(`- ${workflowPath}`), brief);
+    assert.match(brief, /Say in your report that the target holds/u);
+    const { commit, merges } = await candidatePushed(
+      checkout.remote,
+      checkout.base,
+    );
+    assert.deepEqual(merges, []);
+    assert.equal(
+      await remoteFile(checkout.remote, commit, "done.txt"),
+      "done\n",
+    );
+    assert.equal(
+      await remoteFile(checkout.remote, commit, workflowPath),
+      undefined,
+    );
+    assert.match(
+      logged.join(""),
+      /second\.yml under \.github\/workflows\/, which this job cannot push, so the work is pushed without merging it/u,
+    );
+  });
+});
+
+/**
+ * Catches the workflow check withholding a target from a job that may write
+ * pipelines, or one whose change is elsewhere from a job that may not.
+ */
+test("a target is merged where the job may write pipelines, or where its change is outside .github/workflows/", async (t) => {
+  for (const [path, pipelinesWritable] of [
+    [workflowPath, true],
+    ["target.txt", false],
+  ])
+    await inCheckout(async (checkout) => {
+      await targetPushed(checkout);
+      const tip = await targetMoved(checkout, path, "landed\n");
+
+      const { failure, plane } = await standInAttempt(
+        t,
+        checkout,
+        [verdictRun()],
+        { answer: mergeAnswer({ pipelinesWritable }) },
+      );
+
+      passStands(failure, plane);
+      const { commit, merges } = await candidatePushed(
+        checkout.remote,
+        checkout.base,
+      );
+      assert.equal(merges.length, 1, path);
+      assert.ok(await remoteHolds(checkout.remote, tip, commit), path);
+      assert.equal(
+        await remoteFile(checkout.remote, commit, path),
+        "landed\n",
+        path,
+      );
+    });
+});
+
+/**
+ * Catches a failed landing's rework that cannot push the tree it needs run
+ * anyway, or ended as anything but the push step, with a reason naming
+ * neither the files nor the setting.
+ */
+test("a failed landing whose target or change carries a workflow change an unwritable job cannot push ends at the push step before its agent runs", async (t) => {
+  for (const [changed, moved] of [
+    [workflowPath, "target.txt"],
+    ["change.txt", workflowPath],
+  ])
+    await inCheckout(async (checkout) => {
+      await targetPushed(checkout);
+      const change = await landingChange(
+        checkout,
+        checkout.base,
+        changed,
+        "change\n",
+      );
+      await targetMoved(checkout, moved, "landed\n");
+
+      const { failure, runtime } = await standInAttempt(
+        t,
+        checkout,
+        [verdictRun()],
+        { answer: mergeAnswer({ pipelinesWritable: false, change }) },
+      );
+
+      assert.ok(failure instanceof RunStepFailure, String(failure));
+      assert.equal(failure.evidence, runPushFailed);
+      assert.ok(failure.message.includes(workflowPath), failure.message);
+      assert.match(failure.message, /Workflow files setting/u);
+      assert.equal((await runtime.starts()).length, 0);
+      const refs = await remoteRefs(checkout.remote);
+      assert.ok(!refs.includes("/attempts/"), refs);
+    });
+});
+
+/** Catches a failed landing's change left for the agent to merge, merged before the target, or merged without its own commit. */
+test("a failed landing's change is merged at the start, after the target, keeping its commits", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const change = await landingChange(
+      checkout,
+      checkout.base,
+      "change.txt",
+      "change\n",
+    );
+    const tip = await targetMoved(checkout, "target.txt", "landed\n");
+
+    const { failure, plane, runtime } = await standInAttempt(
+      t,
+      checkout,
+      [{ work: "cp change.txt seen.txt", frames: [verdictFrame()] }],
+      { answer: mergeAnswer({ change }) },
+    );
+
+    passStands(failure, plane);
+    const [{ brief }] = await runtime.starts();
+    assert.doesNotMatch(brief, /## A merge of/u);
+    const { commit, merges } = await candidatePushed(
+      checkout.remote,
+      checkout.base,
+    );
+    assert.equal(merges.length, 2);
+    assert.equal(await mergedIn(checkout.remote, merges[0]), change);
+    assert.equal(await mergedIn(checkout.remote, merges[1]), tip);
+    assert.equal(
+      await remoteFile(checkout.remote, commit, "seen.txt"),
+      "change\n",
+    );
+  });
+});
+
+/** Catches a failed landing's change whose merge conflicts aborted, or left to an agent never told what it is. */
+test("a failed landing's change whose merge conflicts is left in progress for the agent, briefed with its commit and files", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    const change = await landingChange(
+      checkout,
+      checkout.base,
+      "README.md",
+      "change\n",
+    );
+    const tip = await targetMoved(checkout, "README.md", "target\n");
+
+    const { failure, plane, runtime } = await standInAttempt(
+      t,
+      { remote: checkout.remote, base: tip },
+      [{ work: readmeResolved, frames: [verdictFrame()] }],
+      { answer: mergeAnswer({ change }) },
+    );
+
+    passStands(failure, plane);
+    const [{ brief }] = await runtime.starts();
+    assert.match(
+      brief,
+      /## A merge of the failed landing's change is in progress/u,
+    );
+    assert.ok(brief.includes(`at commit ${change}`), brief);
+    assert.match(brief, /^- README\.md$/mu);
+    const { commit, merges } = await candidatePushed(checkout.remote, tip);
+    assert.equal(merges.length, 1);
+    assert.equal(await mergedIn(checkout.remote, merges[0]), change);
+    assert.equal(
+      await remoteFile(checkout.remote, commit, "README.md"),
+      "both\n",
+    );
+  });
+});
+
+/**
+ * Catches a failed landing's change the clone does not hold ending the
+ * attempt on a git error, rather than the attempt running on the target
+ * without it, whether or not the job may write pipelines.
+ */
+test("a failed landing's change the clone does not hold is logged and the attempt runs on the target without it", async (t) => {
+  const change = "0123456789abcdef0123456789abcdef01234567";
+  for (const pipelinesWritable of [true, false])
+    await inCheckout(async (checkout) => {
+      await targetPushed(checkout);
+      const tip = await targetMoved(checkout, "target.txt", "landed\n");
+      const logged = [];
+      t.mock.method(process.stderr, "write", (text) => logged.push(text));
+
+      const { failure, plane, runtime } = await standInAttempt(
+        t,
+        checkout,
+        [verdictRun()],
+        { answer: mergeAnswer({ pipelinesWritable, change }) },
+      );
+
+      passStands(failure, plane);
+      const [{ brief }] = await runtime.starts();
+      assert.doesNotMatch(brief, /## A merge of/u);
+      const { merges } = await candidatePushed(checkout.remote, checkout.base);
+      assert.equal(merges.length, 1);
+      assert.equal(await mergedIn(checkout.remote, merges[0]), tip);
+      assert.ok(
+        logged
+          .join("")
+          .includes(
+            `the failed landing's change ${change} is not in the clone, so this attempt runs without merging it`,
+          ),
+        logged.join(""),
+      );
+    });
+});
+
+/**
+ * Catches a failed landing's change merged on top of a target merge still in
+ * progress, or left unmerged with no word of it to the agent.
+ */
+test("a target merge that conflicts leaves a failed landing's change unmerged, the briefing naming it as the agent's to merge", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { base, tip } = await reworkConflicting(checkout);
+    const change = await landingChange(
+      checkout,
+      base,
+      "change.txt",
+      "change\n",
+    );
+    const concluded = `${workerMerge} commit --quiet --no-edit`;
+    const merged = `${workerMerge} merge --quiet --no-ff --no-edit ${change}`;
+
+    const { failure, plane, runtime } = await standInAttempt(
+      t,
+      { remote: checkout.remote, base },
+      [
+        {
+          work: `${readmeResolved} && ${concluded} && ${merged}`,
+          frames: [verdictFrame()],
+        },
+      ],
+      { answer: mergeAnswer({ change }) },
+    );
+
+    passStands(failure, plane);
+    const [{ brief }] = await runtime.starts();
+    assert.match(brief, /## A merge of the target branch is in progress/u);
+    assert.ok(
+      brief.includes(
+        `The failed landing's change, at commit ${change}, is not merged: it is yours to merge once this merge is concluded.`,
+      ),
+      brief,
+    );
+    assert.ok(brief.includes(`merge --no-ff --no-edit ${change}`), brief);
+    const { commit } = await candidatePushed(checkout.remote, base);
+    assert.ok(await remoteHolds(checkout.remote, tip, commit));
+    assert.ok(await remoteHolds(checkout.remote, change, commit));
+    assert.equal(
+      await remoteFile(checkout.remote, commit, "README.md"),
+      "both\n",
+    );
+  });
+});
+
+/**
+ * Catches a failed landing's change the start left to the agent pushed
+ * without, where the agent left the target's conflict to the end's nudge and
+ * so never merged the change.
+ */
+test("a failed landing's change left to an agent that resolved the target's conflict only when nudged is merged by the core at the end", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { base, tip } = await reworkConflicting(checkout);
+    const change = await landingChange(
+      checkout,
+      base,
+      "change.txt",
+      "change\n",
+    );
+
+    const { failure, plane, runtime } = await standInAttempt(
+      t,
+      { remote: checkout.remote, base },
+      [verdictRun(), { work: readmeResolved, frames: [verdictFrame()] }],
+      { answer: mergeAnswer({ change }) },
+    );
+
+    passStands(failure, plane);
+    const [, resumed] = await runtime.starts();
+    assert.equal(
+      resumed.brief,
+      targetMergeConflictNudge({
+        named: targetRef,
+        tip,
+        paths: ["README.md"],
+      }),
+    );
+    assert.equal((await runtime.starts()).length, 2);
+    const { commit } = await candidatePushed(checkout.remote, base);
+    assert.ok(await remoteHolds(checkout.remote, tip, commit));
+    assert.ok(await remoteHolds(checkout.remote, change, commit));
+    assert.equal(
+      await remoteFile(checkout.remote, commit, "change.txt"),
+      "change\n",
+    );
+  });
+});
+
+/**
+ * Catches a failed landing's change the start left to the agent pushed
+ * without, where the agent concluded the target's merge and passed without
+ * merging the change.
+ */
+test("a failed landing's change left to an agent that concluded the target's merge alone is merged by the core at the end, with no turn of the agent's", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { base, tip } = await reworkConflicting(checkout);
+    const change = await landingChange(
+      checkout,
+      base,
+      "change.txt",
+      "change\n",
+    );
+    const concluded = `${workerMerge} commit --quiet --no-edit`;
+
+    const { failure, plane, runtime } = await standInAttempt(
+      t,
+      { remote: checkout.remote, base },
+      [{ work: `${readmeResolved} && ${concluded}`, frames: [verdictFrame()] }],
+      { answer: mergeAnswer({ change }) },
+    );
+
+    passStands(failure, plane);
+    assert.equal((await runtime.starts()).length, 1);
+    const { commit, merges } = await candidatePushed(checkout.remote, base);
+    assert.ok(await remoteHolds(checkout.remote, tip, commit));
+    assert.ok(await remoteHolds(checkout.remote, change, commit));
+    assert.ok(
+      (
+        await Promise.all(
+          merges.map((merge) => mergedIn(checkout.remote, merge)),
+        )
+      ).includes(change),
+    );
+  });
+});
+
+/**
+ * Catches a failed landing's change the core merges at the end pushed with its
+ * conflict's markers, or left to an agent not told what it is merging.
+ */
+test("a failed landing's change the core merges at the end that conflicts resumes the agent with the change's nudge, and pushes what it resolved", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { base, tip } = await reworkConflicting(checkout);
+    const change = await landingChange(checkout, base, "README.md", "change\n");
+    const concluded = `${workerMerge} commit --quiet --no-edit`;
+    const settled = "printf 'all\\n' > README.md && git add README.md";
+
+    const { failure, plane, runtime } = await standInAttempt(
+      t,
+      { remote: checkout.remote, base },
+      [
+        { work: `${readmeResolved} && ${concluded}`, frames: [verdictFrame()] },
+        { work: settled, frames: [verdictFrame()] },
+      ],
+      { answer: mergeAnswer({ change }) },
+    );
+
+    passStands(failure, plane);
+    const [, resumed] = await runtime.starts();
+    assert.equal(
+      resumed.brief,
+      targetMergeChangeNudge({ tip: change, paths: ["README.md"] }),
+    );
+    const { commit } = await candidatePushed(checkout.remote, base);
+    assert.ok(await remoteHolds(checkout.remote, tip, commit));
+    assert.ok(await remoteHolds(checkout.remote, change, commit));
+    assert.equal(
+      await remoteFile(checkout.remote, commit, "README.md"),
+      "all\n",
+    );
   });
 });
 
