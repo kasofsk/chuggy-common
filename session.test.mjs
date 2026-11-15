@@ -1508,6 +1508,8 @@ test("a thread is served origination, revocation and the thread reads, and no de
   for (const tool of [
     "create_draft",
     "revoke_ticket",
+    "take_ticket",
+    "return_ticket",
     "update_ticket",
     "dispatch_ticket",
     "list_threads",
@@ -1553,6 +1555,8 @@ test("a lead is served neither origination nor revocation, and each is disallowe
   for (const tool of [
     "create_draft",
     "revoke_ticket",
+    "take_ticket",
+    "return_ticket",
     "update_ticket",
     "dispatch_ticket",
   ]) {

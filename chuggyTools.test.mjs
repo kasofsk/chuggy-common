@@ -3090,6 +3090,134 @@ test("a revocation the machine refuses is relayed unaltered and never asked agai
   assert.equal(api.calls.length, 1);
 });
 
+test("a take and a return post to their ticket's own route and send nothing else, a member named included", async () => {
+  for (const [tool, route, outcome] of [
+    ["take_ticket", "take", "Taken"],
+    ["return_ticket", "return", "Returned"],
+  ]) {
+    const body = JSON.stringify({ outcome, owner: "member-ada" });
+    const { api, call } = toolsOf({}, () => ({ status: 200, body }));
+
+    const answer = await call(tool, { ticket: 26, owner: "member-bob" });
+
+    assert.equal(api.calls.length, 1, tool);
+    assert.equal(api.calls[0].method, "POST", tool);
+    assert.equal(
+      api.calls[0].path,
+      `/api/v1/tenants/vteng/projects/chuggy/tickets/26/${route}`,
+      tool,
+    );
+    assert.equal(api.calls[0].init.body, undefined, tool);
+    assert.equal(textOf(answer), `HTTP 200\n${body}`, tool);
+    assert.ok(answer.isError === undefined, tool);
+  }
+});
+
+test("a take of a ticket the caller owns already answers AlreadyOwner as a success", async () => {
+  const body = JSON.stringify({ outcome: "AlreadyOwner", owner: "member-ada" });
+  const { call } = toolsOf({}, () => ({ status: 200, body }));
+
+  const answer = await call("take_ticket", { ticket: 26 });
+
+  assert.equal(textOf(answer), `HTTP 200\n${body}`);
+  assert.ok(answer.isError === undefined);
+});
+
+test("every refusal of a take or a return is relayed as the API answers it and never asked again", async () => {
+  const refusals = [
+    [404, "NotFound"],
+    [403, "Forbidden"],
+    [403, "TakerNotAPerson"],
+    [409, "Unreleased"],
+    [409, "TicketDone"],
+    [409, "TicketRevoked"],
+    [409, "NotTaker"],
+  ];
+  for (const tool of ["take_ticket", "return_ticket"])
+    for (const [status, code] of refusals) {
+      const body = JSON.stringify({ error: { code, message: "m" } });
+      const { api, call } = toolsOf({}, () => ({ status, body }));
+
+      const answer = await call(tool, { ticket: 26 });
+
+      assert.equal(textOf(answer), `HTTP ${String(status)}\n${body}`, code);
+      assert.equal(answer.isError, true, code);
+      assert.equal(api.calls.length, 1, code);
+    }
+});
+
+test("one call takes or returns one ticket: a list, a ticket that is no number and no ticket at all reach nothing", async () => {
+  const { api, call } = toolsOf();
+
+  for (const tool of ["take_ticket", "return_ticket"])
+    for (const args of [
+      { ticket: [26, 27] },
+      { ticket: 0 },
+      { ticket: "26" },
+      {},
+    ])
+      assert.equal((await call(tool, args)).isError, true, tool);
+  assert.equal(api.calls.length, 0);
+});
+
+test("a take or a return takes a ticket alone, so it names no member", () => {
+  for (const tool of ["take_ticket", "return_ticket"])
+    assert.deepEqual(
+      Object.keys(
+        chuggyProjectTools.find(({ name }) => name === tool).shape(z),
+      ),
+      ["ticket"],
+      tool,
+    );
+});
+
+test("the take and return tools say the act is the caller's own and which permit answers whether it may", () => {
+  const described = (tool) =>
+    chuggyProjectTools.find(({ name }) => name === tool).description;
+
+  for (const tool of ["take_ticket", "return_ticket"])
+    for (const said of [
+      /on your owner's word only/,
+      /is the caller's own/,
+      /read_abilities' `mutate` answers whether the caller may take/,
+      /403 Forbidden/,
+      /403 TakerNotAPerson/,
+      /\(Unreleased\)/,
+      /\(TicketDone\)/,
+      /\(TicketRevoked\)/,
+    ])
+      assert.match(described(tool), said, tool);
+  assert.match(described("take_ticket"), /names no other member/);
+  assert.match(described("take_ticket"), /AlreadyOwner/);
+  assert.match(described("return_ticket"), /409 NotTaker/);
+});
+
+test("list_tickets filters by owner, and it and read_ticket say what owner is beside creator", async () => {
+  const { api, call } = toolsOf({}, () => ({ status: 200, body: "{}" }));
+
+  await call("list_tickets", { owner: "member-ada" });
+
+  assert.equal(
+    api.calls[0].path,
+    "/api/v1/tenants/vteng/projects/chuggy?owner=member-ada",
+  );
+  for (const tool of ["list_tickets", "read_ticket"]) {
+    const { description } = chuggyProjectTools.find(
+      ({ name }) => name === tool,
+    );
+    assert.match(
+      description,
+      /`creator` is the member who filed it|`creator`, the member who filed it/,
+      tool,
+    );
+    assert.match(description, /the member who took it, else its creator/, tool);
+  }
+  assert.match(
+    parameterDescribed("list_tickets", "owner"),
+    /read_abilities' `principal` for your own/,
+  );
+});
+
 /**
  * A session learns what revoking does from the description alone, and the two
  * things it cannot learn anywhere else are that a revocation is final and that
@@ -4022,6 +4150,8 @@ const projectToolArguments = {
   },
   create_draft: origination,
   revoke_ticket: { ticket: 26 },
+  take_ticket: { ticket: 26 },
+  return_ticket: { ticket: 26 },
   dispatch_ticket: { ticket: 26 },
   update_ticket: {
     ticket: 26,
@@ -4118,6 +4248,8 @@ test("origination, revocation, updating and dispatching are registered for a thr
   assert.deepEqual(registered(["DraftOriginate"]), [
     "create_draft",
     "revoke_ticket",
+    "take_ticket",
+    "return_ticket",
     "update_ticket",
     "create_epic",
     "revise_epic",
@@ -4128,6 +4260,8 @@ test("origination, revocation, updating and dispatching are registered for a thr
   for (const tool of [
     "create_draft",
     "revoke_ticket",
+    "take_ticket",
+    "return_ticket",
     "update_ticket",
     "create_epic",
     "revise_epic",
