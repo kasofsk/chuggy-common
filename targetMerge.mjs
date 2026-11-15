@@ -34,7 +34,11 @@
  * what was merged, its commit and the files. Every nudge shares
  * `targetMergeNudgesMax`. Once that is spent, or where the runtime cannot
  * resume, the attempt ends as `TargetMergeUnresolved` and nothing is pushed.
- * A resolved merge is committed by the core, and the target fetched again.
+ * A resolved merge is committed by the core. A failed landing's change the
+ * start left to the agent, and the work does not hold once that merge is
+ * concluded, is then merged by the core as the target is, since the work
+ * cannot land without it; one that cannot be merged ends the attempt the same
+ * way. The target is then fetched again.
  */
 
 import { gitFailureLine } from "./gitRemote.mjs";
@@ -94,6 +98,15 @@ export function targetMergeMovedNudge({ named, tip, paths }) {
 export function targetMergeConflictNudge({ named, tip, paths }) {
   return [
     `The merge of ${named} at ${tip} into your work still has unresolved conflicts in:`,
+    targetMergePaths(paths),
+    targetMergeResolveInstruction,
+  ].join("\n\n");
+}
+
+/** What a resumed agent is told when merging a failed landing's change it did not merge stopped on conflicts. */
+export function targetMergeChangeNudge({ tip, paths }) {
+  return [
+    `Your work does not hold ${targetMergeChangeName}, at commit ${tip}, and merging it into your work stopped on conflicts in:`,
     targetMergePaths(paths),
     targetMergeResolveInstruction,
   ].join("\n\n");
@@ -343,7 +356,7 @@ function targetMergeLeft(started) {
       named: started.named,
       tip: started.tip,
       paths: started.conflicted,
-      told: true,
+      nudge: targetMergeConflictNudge,
     };
   const change = started.change;
   if ((change?.conflicted?.length ?? 0) > 0)
@@ -351,7 +364,7 @@ function targetMergeLeft(started) {
       named: targetMergeChangeName,
       tip: change.commit,
       paths: change.conflicted,
-      told: true,
+      nudge: targetMergeConflictNudge,
     };
   return undefined;
 }
@@ -360,8 +373,10 @@ function targetMergeLeft(started) {
  * The end's merge, as `targetMergedAtStart` is handed it, beside `started`, what
  * that answered, and `resume`, which runs the agent's conversation on with a
  * prompt and answers its result, or nothing where the runtime cannot resume.
- * A fetch or merge that fails, or a target bringing in a workflow change the
- * job cannot push, is logged, and the work is pushed as it stands.
+ * A fetch or merge of the target that fails, or a target bringing in a
+ * workflow change the job cannot push, is logged, and the work is pushed as it
+ * stands; a failed landing's change left to the agent is not
+ * (`targetMergeOwed`).
  */
 export async function targetMergedAtEnd({
   where,
@@ -376,7 +391,9 @@ export async function targetMergedAtEnd({
   const named = targetMergeName(merge.ref);
   const nudges = { spent: 0 };
   let pending = targetMergeLeft(started);
-  const roundsMax = 3 * (targetMergeNudgesMax + 2);
+  let owed =
+    started?.change?.pending === true ? started.change.commit : undefined;
+  const roundsMax = 3 * (targetMergeNudgesMax + 3);
   for (let round = 0; round < roundsMax; round += 1) {
     if (pending !== undefined) {
       pending = await targetMergeSettled({
@@ -386,6 +403,11 @@ export async function targetMergedAtEnd({
         resume,
         log,
       });
+      continue;
+    }
+    if (owed !== undefined) {
+      pending = await targetMergeOwed({ where, change: owed, log, said });
+      owed = undefined;
       continue;
     }
     const merged = await targetMergeMoved({ where, named, fetched, log, said });
@@ -442,7 +464,53 @@ async function targetMergeMoved({ where, named, fetched, log, said }) {
   log(
     `merging ${named} at ${tip} stopped on conflicts in ${conflicted.join(", ")}`,
   );
-  return { named, tip, paths: conflicted, told: false };
+  return { named, tip, paths: conflicted, nudge: targetMergeMovedNudge };
+}
+
+/**
+ * A failed landing's `change` the start left to the agent, merged on top of
+ * the work committed where the work does not hold it: the conflict left, as
+ * `targetMergedAtEnd` holds one, or nothing where it merged or was held.
+ * Raised as the push step where it would bring in a workflow change the job
+ * cannot push, and as `TargetMergeUnresolved` where it cannot be merged.
+ */
+async function targetMergeOwed({ where, change, log, said }) {
+  if (await sourceTargetContained({ ...where, tip: change })) return undefined;
+  const named = `${targetMergeChangeName} ${change}`;
+  await runStep(
+    runCommitFailed,
+    () => sourceWorkCommitted(where),
+    gitFailureLine,
+  );
+  const brought = await targetMergePipelines(where, change);
+  if (brought.length > 0)
+    throw new RunStepFailure(
+      runPushFailed,
+      `merging ${named} would change ${brought.join(", ")} under .github/workflows/, which this job cannot push. The repository's Workflow files setting does not let its jobs change workflow files, and this ticket cannot land without them.`,
+    );
+  let conflicted;
+  try {
+    ({ conflicted } = await sourceTargetMerged({
+      ...where,
+      named,
+      tip: change,
+    }));
+  } catch (failure) {
+    throw new TargetMergeUnresolved(
+      `${named}, which the agent did not merge, could not be merged, so the attempt pushes nothing: ${said(failure)}`,
+    );
+  }
+  if (conflicted.length === 0) {
+    log(`merged ${named}, which the agent did not merge`);
+    return undefined;
+  }
+  log(`merging ${named} stopped on conflicts in ${conflicted.join(", ")}`);
+  return {
+    named: targetMergeChangeName,
+    tip: change,
+    paths: conflicted,
+    nudge: targetMergeChangeNudge,
+  };
 }
 
 /**
@@ -470,14 +538,10 @@ async function targetMergeSettled({ where, pending, nudges, resume, log }) {
     );
   const asked = { named, tip, paths: left };
   nudges.spent += 1;
-  const { result } = await resume(
-    pending.told
-      ? targetMergeConflictNudge(asked)
-      : targetMergeMovedNudge(asked),
-  );
+  const { result } = await resume(pending.nudge(asked));
   if (result.verdict !== "Pass")
     throw new TargetMergeUnresolved(
       `${unresolved}, and the agent's resumed turn ended ${result.verdict}, so the attempt pushes nothing`,
     );
-  return { ...pending, told: true };
+  return { ...pending, nudge: targetMergeConflictNudge };
 }

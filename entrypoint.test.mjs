@@ -165,6 +165,7 @@ import { jobRepositoryDirectory } from "./job.mjs";
 import { workerCredentialPath } from "./planeCredential.mjs";
 import { gitRemotePauseMs, gitRemoteTriesMax } from "./gitRemote.mjs";
 import {
+  targetMergeChangeNudge,
   targetMergeConflictNudge,
   targetMergeMovedNudge,
   targetMergeNudgesMax,
@@ -9093,6 +9094,124 @@ test("a target merge that conflicts leaves a failed landing's change unmerged, t
     assert.equal(
       await remoteFile(checkout.remote, commit, "README.md"),
       "both\n",
+    );
+  });
+});
+
+/**
+ * Catches a failed landing's change the start left to the agent pushed
+ * without, where the agent left the target's conflict to the end's nudge and
+ * so never merged the change.
+ */
+test("a failed landing's change left to an agent that resolved the target's conflict only when nudged is merged by the core at the end", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { base, tip } = await reworkConflicting(checkout);
+    const change = await landingChange(
+      checkout,
+      base,
+      "change.txt",
+      "change\n",
+    );
+
+    const { failure, plane, runtime } = await standInAttempt(
+      t,
+      { remote: checkout.remote, base },
+      [verdictRun(), { work: readmeResolved, frames: [verdictFrame()] }],
+      { answer: mergeAnswer({ change }) },
+    );
+
+    passStands(failure, plane);
+    const [, resumed] = await runtime.starts();
+    assert.equal(
+      resumed.brief,
+      targetMergeConflictNudge({
+        named: targetRef,
+        tip,
+        paths: ["README.md"],
+      }),
+    );
+    assert.equal((await runtime.starts()).length, 2);
+    const { commit } = await candidatePushed(checkout.remote, base);
+    assert.ok(await remoteHolds(checkout.remote, tip, commit));
+    assert.ok(await remoteHolds(checkout.remote, change, commit));
+    assert.equal(
+      await remoteFile(checkout.remote, commit, "change.txt"),
+      "change\n",
+    );
+  });
+});
+
+/**
+ * Catches a failed landing's change the start left to the agent pushed
+ * without, where the agent concluded the target's merge and passed without
+ * merging the change.
+ */
+test("a failed landing's change left to an agent that concluded the target's merge alone is merged by the core at the end, with no turn of the agent's", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { base, tip } = await reworkConflicting(checkout);
+    const change = await landingChange(
+      checkout,
+      base,
+      "change.txt",
+      "change\n",
+    );
+    const concluded = `${workerMerge} commit --quiet --no-edit`;
+
+    const { failure, plane, runtime } = await standInAttempt(
+      t,
+      { remote: checkout.remote, base },
+      [{ work: `${readmeResolved} && ${concluded}`, frames: [verdictFrame()] }],
+      { answer: mergeAnswer({ change }) },
+    );
+
+    passStands(failure, plane);
+    assert.equal((await runtime.starts()).length, 1);
+    const { commit, merges } = await candidatePushed(checkout.remote, base);
+    assert.ok(await remoteHolds(checkout.remote, tip, commit));
+    assert.ok(await remoteHolds(checkout.remote, change, commit));
+    assert.ok(
+      (
+        await Promise.all(
+          merges.map((merge) => mergedIn(checkout.remote, merge)),
+        )
+      ).includes(change),
+    );
+  });
+});
+
+/**
+ * Catches a failed landing's change the core merges at the end pushed with its
+ * conflict's markers, or left to an agent not told what it is merging.
+ */
+test("a failed landing's change the core merges at the end that conflicts resumes the agent with the change's nudge, and pushes what it resolved", async (t) => {
+  await inCheckout(async (checkout) => {
+    const { base, tip } = await reworkConflicting(checkout);
+    const change = await landingChange(checkout, base, "README.md", "change\n");
+    const concluded = `${workerMerge} commit --quiet --no-edit`;
+    const settled = "printf 'all\\n' > README.md && git add README.md";
+
+    const { failure, plane, runtime } = await standInAttempt(
+      t,
+      { remote: checkout.remote, base },
+      [
+        { work: `${readmeResolved} && ${concluded}`, frames: [verdictFrame()] },
+        { work: settled, frames: [verdictFrame()] },
+      ],
+      { answer: mergeAnswer({ change }) },
+    );
+
+    passStands(failure, plane);
+    const [, resumed] = await runtime.starts();
+    assert.equal(
+      resumed.brief,
+      targetMergeChangeNudge({ tip: change, paths: ["README.md"] }),
+    );
+    const { commit } = await candidatePushed(checkout.remote, base);
+    assert.ok(await remoteHolds(checkout.remote, tip, commit));
+    assert.ok(await remoteHolds(checkout.remote, change, commit));
+    assert.equal(
+      await remoteFile(checkout.remote, commit, "README.md"),
+      "all\n",
     );
   });
 });
