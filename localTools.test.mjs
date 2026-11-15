@@ -7,6 +7,11 @@ import {
   chuggyToolServerName,
   chuggyToolTimeoutMs,
 } from "@chuggy/worker-contract/sessionTools";
+import {
+  signInStoreDirectory,
+  signInStoreFileName,
+  signInStoreText,
+} from "@chuggy/worker-contract/signInStore";
 import { z } from "zod";
 
 import {
@@ -14,10 +19,10 @@ import {
   chuggySubmissionRepeatDescription,
 } from "./chuggyTools.mjs";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath, URL } from "node:url";
+import { fileURLToPath, URL, URLSearchParams } from "node:url";
 
 import {
   localToolAskRefusal,
@@ -401,23 +406,25 @@ test("the end of the agent's input closes the server", async () => {
   assert.ok(closed[0] instanceof StdioServerTransport);
 });
 
-test("served with the global fetch, a call with no sign-in is answered with a page, and the end of input ends it", async (t) => {
-  const signIns = await mkdtemp(join(tmpdir(), "local-tools-"));
-  t.after(() => rm(signIns, { recursive: true, force: true }));
-  t.mock.method(globalThis, "fetch", async (url) => {
-    const asked = String(url);
-    if (asked === "https://chuggy.test/config.json")
+/**
+ * The tools served with the global fetch answering the site's configuration
+ * and its issuer's discovery, and `answered` every other request.
+ */
+async function servedOf(t, asked, answered) {
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    const requested = String(url);
+    if (requested === "https://chuggy.test/config.json")
       return globalThis.Response.json({
         issuer: "https://auth.test",
         audience: "https://chuggy.test/api",
       });
-    if (asked === "https://auth.test/.well-known/openid-configuration")
+    if (requested === "https://auth.test/.well-known/openid-configuration")
       return globalThis.Response.json({
         issuer: "https://auth.test",
         authorization_endpoint: "https://auth.test/oauth2/auth",
         token_endpoint: "https://auth.test/oauth2/token",
       });
-    return new globalThis.Response("", { status: 404 });
+    return answered(requested, init);
   });
   const stdin = new EventEmitter();
   const handlers = new Map();
@@ -439,21 +446,79 @@ test("served with the global fetch, a call with no sign-in is answered with a pa
       workspace: "vteng",
       project: "chuggy",
       version: "1",
-      signIns,
+      ...asked,
     },
     { McpServer, StdioServerTransport: class {}, z },
     stdin,
   );
   await new Promise((resolve) => setImmediate(resolve));
-  const answer = await handlers.get("read_ticket")({ ticket: 7 });
+  return {
+    called: (name, input) => handlers.get(name)(input),
+    ended: async () => {
+      stdin.emit("end");
+      await served;
+    },
+  };
+}
+
+test("served with the global fetch, a call with no sign-in is answered with a page, and the end of input ends it", async (t) => {
+  const signIns = await mkdtemp(join(tmpdir(), "local-tools-"));
+  t.after(() => rm(signIns, { recursive: true, force: true }));
+  const served = await servedOf(
+    t,
+    { signIns, surroundings: { home: signIns, configHome: undefined } },
+    async () => new globalThis.Response("", { status: 404 }),
+  );
+  const answer = await served.called("read_ticket", { ticket: 7 });
   assert.equal(answer.isError, true);
   const text = answer.content.map(({ text }) => text).join("");
   assert.match(
     text,
     /not signed in to https:\/\/chuggy\.test: this call needs the person signed in, so give them this address, in full, in your next message, whatever else you are doing: https:\/\/auth\.test\/oauth2\/auth\?\S+ Call the tool again once they say they have signed in\./,
   );
-  stdin.emit("end");
-  await served;
+  await served.ended();
+});
+
+test("served, a sign-in kept in the contract's store is renewed with no sign-in page, and one an earlier copy kept is moved there", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "local-tools-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const surroundings = { home, configHome: join(home, "config") };
+  const store = signInStoreDirectory(surroundings);
+  const kept = join(store, signInStoreFileName("https://chuggy.test"));
+  const signIns = join(home, "earlier");
+  const earlier = localToolSignInFile(signIns, "https://chuggy.test");
+  const sites = [
+    { formerly: undefined, stored: "renewal-setup" },
+    { formerly: "renewal-earlier", stored: undefined },
+  ];
+  for (const { formerly, stored } of sites) {
+    await rm(kept, { force: true });
+    await mkdir(store, { recursive: true });
+    await mkdir(signIns, { recursive: true });
+    if (stored !== undefined) await writeFile(kept, signInStoreText(stored));
+    if (formerly !== undefined) await writeFile(earlier, `${formerly}\n`);
+    const spent = [];
+    const served = await servedOf(
+      t,
+      { signIns, surroundings },
+      async (requested, init) => {
+        if (requested !== "https://auth.test/oauth2/token")
+          return globalThis.Response.json({ ticket: 7 });
+        spent.push(new URLSearchParams(init.body).get("refresh_token"));
+        return globalThis.Response.json({
+          access_token: "access-1",
+          refresh_token: "renewal-mcp",
+          expires_in: 3_600,
+        });
+      },
+    );
+    const answer = await served.called("read_ticket", { ticket: 7 });
+    assert.equal(answer.isError, undefined);
+    assert.deepEqual(spent, [stored ?? formerly]);
+    assert.equal(await readFile(kept, "utf8"), signInStoreText("renewal-mcp"));
+    await assert.rejects(readFile(earlier), { code: "ENOENT" });
+    await served.ended();
+  }
 });
 
 test("an ask names a site a credential may be sent to, and a workspace and project", () => {
@@ -752,6 +817,7 @@ test("served with updates on, the site's pin goes to the runner updater once con
       project: "chuggy",
       version: "0.4.0",
       signIns,
+      surroundings: { home: signIns, configHome: undefined },
       fetch: async (url) => {
         asked.push({ url: String(url), connected });
         return globalThis.Response.json({ releases: [pinOf("0.5.0")] });
