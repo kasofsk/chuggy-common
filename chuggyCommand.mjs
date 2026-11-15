@@ -6,10 +6,11 @@
  *
  * THE TOOLS ARE THE POD'S, unchanged: `chuggyToolDefinitions`, their input
  * shapes and `chuggyToolHandler`, under a context of the command's own built
- * from the variables. The shell is told no capabilities, so every tool that
- * reaches the API is offered, and the API is the control: it confines the
- * bearer to the session's scope and capabilities. No decision tool is offered,
- * since a decision is staged for a lead's turn and nothing here is one.
+ * from the variables. Every tool that reaches the API is offered, and the API
+ * is the control: it confines the bearer to the session's scope and
+ * capabilities. No decision tool is offered, since a decision is staged for a
+ * lead's turn and nothing here is one, and no offer tool, since an offer is the
+ * call standing in the transcript and a shell's call stands in none.
  *
  * A CALL IS ITS OWN TURN, as it is in `./localTools.mjs`: nothing in a shell
  * says which turn of the session a call belongs to, so each submitted command
@@ -37,6 +38,7 @@ import {
   chuggyToolContext,
   chuggyToolDefinitions,
   chuggyToolHandler,
+  chuggyOfferTools,
   chuggyToolImageFiles,
   chuggyToolSignal,
   sessionCapabilityTools,
@@ -54,6 +56,16 @@ const chuggyCommandVariables = {
   tenant: sessionTenantVariable,
   project: sessionProjectVariable,
 };
+
+const chuggyOfferToolNames = new Set(chuggyOfferTools.map((each) => each.name));
+
+/** The capabilities whose tools all reach the API: none admitting an offer. */
+const chuggyCommandCapabilities = Object.keys(sessionCapabilityTools).filter(
+  (capability) =>
+    !sessionCapabilityTools[capability].some((tool) =>
+      chuggyOfferToolNames.has(tool),
+    ),
+);
 
 /** The tools' context for the session `environment`'s four variables name. */
 function chuggyCommandContext(environment) {
@@ -76,7 +88,7 @@ function chuggyCommandContext(environment) {
       },
       named.bearer,
       {
-        capabilities: Object.keys(sessionCapabilityTools),
+        capabilities: chuggyCommandCapabilities,
         request: (task, bearer, path, init = {}) =>
           chuggyRequest(task, bearer, path, {
             ...init,

@@ -62,7 +62,7 @@ docker run --rm -v chuggy-chat-<digest>-sessions:/sessions <image> rm -rf /sessi
 
 ## The `chuggy` command
 
-`chuggy <tool> '<json input>'`, this package's `bin`, runs one of the session's `chuggy` tools from a thread's shell, against the session its shell was handed, and prints the tool's answer as the agent reads it: a route's status line and its body. The input defaults to `{}`. It exits 1 on a refusal or a failed call, and 2 where a shell variable is unset, the tool is unknown or the input is not JSON. It offers every tool but a lead's decisions, and the API refuses what the session's bearer may not do. Each submitted command is an operation of its own, so one run again is a second submission.
+`chuggy <tool> '<json input>'`, this package's `bin`, runs one of the session's `chuggy` tools from a thread's shell, against the session its shell was handed, and prints the tool's answer as the agent reads it: a route's status line and its body. The input defaults to `{}`. It exits 1 on a refusal or a failed call, and 2 where a shell variable is unset, the tool is unknown or the input is not JSON. It offers every tool that reaches the API, so neither a lead's decisions nor an owner's offers, and the API refuses what the session's bearer may not do. Each submitted command is an operation of its own, so one run again is a second submission.
 
 ## A person's own agent
 
