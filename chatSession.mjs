@@ -33,7 +33,7 @@
  * `stopGraceMs` to end its turn as a plane's stop ends one; then every process
  * of its user is killed, as its user, which reaches what it left running in
  * the background and nothing of any other session's. Its deadline is a stop
- * that ends it `Failed`.
+ * that ends it `Failed`, and one whose envelope names none has no timer.
  *
  * A THREAD'S SESSIONS KEEP ONE WORKSPACE, a directory named for the thread
  * in `chatSessionThreads` of `sessionsRoot`, the tree checked out in it
@@ -1031,13 +1031,17 @@ function chatSessionRunning(state, place, child, launch) {
     draining = true;
     if (!holding) stop();
   };
-  const deadline = globalThis.setTimeout(
-    () => {
-      expired = true;
-      stop();
-    },
-    Math.min(launch.envelope.timeoutSecsMax * 1_000, chatTimerMsMax),
-  );
+  const { timeoutSecsMax } = launch.envelope;
+  const deadline =
+    timeoutSecsMax === undefined
+      ? undefined
+      : globalThis.setTimeout(
+          () => {
+            expired = true;
+            stop();
+          },
+          Math.min(timeoutSecsMax * 1_000, chatTimerMsMax),
+        );
   const ended = new Promise((resolve) => {
     child.once("exit", (code) => {
       globalThis.clearTimeout(deadline);

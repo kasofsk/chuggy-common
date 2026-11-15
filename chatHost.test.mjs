@@ -449,6 +449,25 @@ test("a host polls with the idle bound its settings name, and with none where th
   }
 });
 
+/** Catches a session on a member's machine run under the site's deadline for its pods rather than its host's. */
+test("a host's Start names the deadline its settings name, and none where they name none", async (t) => {
+  for (const [given, named] of [
+    [{ deadlineSecs: 7_200 }, 7_200],
+    [{}, undefined],
+  ]) {
+    const run = await hostOf(t, {
+      answers: [
+        { chatImage: one },
+        { chatImage: one, sessions: [sessionOf("a")] },
+      ],
+      given,
+    });
+    await run.host.run();
+    const [{ envelope }] = run.supervisors[0].frames;
+    assert.equal(envelope.timeoutSecsMax, named);
+  }
+});
+
 test("a host names its threads' capabilities on each poll once the plane has answered a release that reads them, and one naming none names none", async (t) => {
   for (const [given, named] of [
     [
@@ -1150,6 +1169,7 @@ test("a host's settings from a runner's file are its defaults where the file nam
         sessionsMax: 3,
         sessionMemoryMib: 1_024,
         idleSecs: 60,
+        deadlineSecs: 7_200,
         outputBytesMax: 5,
       }),
       1_000,
@@ -1158,6 +1178,7 @@ test("a host's settings from a runner's file are its defaults where the file nam
       sessionsMax: 3,
       sessionMemoryBytes: gib,
       idleSecs: 60,
+      deadlineSecs: 7_200,
       outputBytesMax: 5,
       image,
     },
@@ -1184,6 +1205,8 @@ test("a host's settings refuse too little memory a session, and keys they do not
     { image: { image: one, pull: "sometimes" } },
     { sessionCapabilities: ["Root"] },
     { sessionCapabilities: ["RunCommands", "RunCommands"] },
+    { deadlineSecs: 0 },
+    { deadlineSecs: 1.5 },
   ])
     assert.equal(chatHostConfigSchema.safeParse(config).success, false);
   assert.throws(
@@ -1202,6 +1225,10 @@ test("a host's settings refuse too little memory a session, and keys they do not
         sessionMemoryBytes: 2 ** 30,
       }),
     /memory must be a positive integer/u,
+  );
+  assert.throws(
+    () => checkedChatHostSettings({ ...settings, deadlineSecs: 0 }),
+    /deadlineSecs must be a positive integer/u,
   );
 });
 
@@ -1679,14 +1706,20 @@ test("a supervisor's container is asked of the engine: none, its state and wheth
 test("a host's settings and its service's status are said in lines a CLI prints", () => {
   assert.equal(
     chatHostSettingsLine(chatHostConfigured(undefined, 4_096)),
-    "sessionsMax 4, sessionMemoryMib 2048, so the supervisor is capped at 8192 MiB, idleSecs none, outputBytesMax 4096, image the one chuggy names",
+    "sessionsMax 4, sessionMemoryMib 2048, so the supervisor is capped at 8192 MiB, idleSecs none, deadlineSecs none, sessionCapabilities every capability of the roster, outputBytesMax 4096, image the one chuggy names",
   );
   assert.equal(
     chatHostSettingsLine({
       ...settings,
+      deadlineSecs: 7_200,
+      sessionCapabilities: ["ProjectRead", "RunCommands"],
       image: { image: "ghcr.io/geoff/chat:dev", pull: "always" },
     }),
-    "sessionsMax 2, sessionMemoryMib 3072, so the supervisor is capped at 6144 MiB, idleSecs 600, outputBytesMax 4096, image ghcr.io/geoff/chat:dev, pulled before each start",
+    "sessionsMax 2, sessionMemoryMib 3072, so the supervisor is capped at 6144 MiB, idleSecs 600, deadlineSecs 7200, sessionCapabilities ProjectRead RunCommands, outputBytesMax 4096, image ghcr.io/geoff/chat:dev, pulled before each start",
+  );
+  assert.match(
+    chatHostSettingsLine({ ...settings, sessionCapabilities: [] }),
+    /, sessionCapabilities none, /u,
   );
   assert.deepEqual(chatHostStatusLines(undefined), ["service: not running"]);
   assert.deepEqual(

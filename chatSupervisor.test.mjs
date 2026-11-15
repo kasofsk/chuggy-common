@@ -36,6 +36,10 @@ const envelope = {
   outputBytesMax: 4_096,
 };
 
+/** The envelope of a host that sets no deadline. */
+const unbounded = { ...envelope };
+delete unbounded.timeoutSecsMax;
+
 /** A session a suite ends by hand: `stops` and `drains` count the asks, `end` ends it in `phase`. */
 function runningOf() {
   let end;
@@ -130,11 +134,11 @@ const refused = (assignment, reason) => ({
 test("the supervisor speaks first, naming every protocol of its window, its sessions and its contract", () => {
   const supervisor = supervisorOf(3);
 
-  assert.equal(chatProtocolVersion, 3);
+  assert.equal(chatProtocolVersion, 4);
   assert.deepEqual(supervisor.written, [
     {
       frame: "Ready",
-      protocols: [1, 2, 3],
+      protocols: [1, 2, 3, 4],
       sessionsMax: 3,
       contractRelease: workerContractRelease,
     },
@@ -628,6 +632,43 @@ test("a host speaking protocol 2 that names a thread or forgets one is not follo
   }
 });
 
+/** Catches a supervisor that refuses a Start naming no deadline from a host that may send one, or prepares one under a deadline it was not given. */
+test("a Start naming no deadline is prepared with none from a host speaking protocol 4", async () => {
+  const supervisor = supervisorOf(2, 4);
+
+  supervisor.send({ ...start("a"), envelope: unbounded });
+  await settled();
+
+  assert.deepEqual(supervisor.preparations[0].envelope, unbounded);
+});
+
+/** Catches a supervisor that stops speaking to a host a release behind it, or reads that host's frames in protocol 4's shape. */
+test("a host speaking protocol 3 is served as before, and one of its Starts naming no deadline is not followed", async () => {
+  const served = supervisorOf(2, 3);
+  served.send({ ...start("a"), thread });
+  await settled();
+  assert.deepEqual(served.preparations[0].envelope, envelope);
+  const running = runningOf();
+  served.preparations[0].resolve(running);
+  await settled();
+  running.end();
+  await settled();
+  assert.deepEqual(served.frames(), [
+    { frame: "Started", assignment: "a" },
+    { frame: "Ended", assignment: "a", phase: "Succeeded" },
+  ]);
+
+  const unfollowed = supervisorOf(2, 3);
+  unfollowed.send({ ...start("b"), envelope: unbounded });
+  await settled();
+  assert.equal(unfollowed.preparations.length, 0);
+  assert.equal(await unfollowed.done, 1);
+  assert.match(
+    unfollowed.logged.join(""),
+    /speaks protocol 3 and wrote a Start naming no deadline/u,
+  );
+});
+
 /** Catches the end of the host's stream leaving a preparation unanswered or a session running. */
 test("at the end of its input every preparation is refused Stopped and every session stopped and Ended, and the supervisor exits", async () => {
   const supervisor = supervisorOf();
@@ -730,13 +771,13 @@ const credentialed = {
  * fails every session it is handed.
  */
 test("a supervisor refuses a host that names no protocol or one it does not speak, saying which side to update", () => {
-  assert.deepEqual(chatSupervisorProtocols, [1, 2, 3]);
-  for (const named of ["1", "2", "3"])
+  assert.deepEqual(chatSupervisorProtocols, [1, 2, 3, 4]);
+  for (const named of ["1", "2", "3", "4"])
     assert.equal(
       chatSupervisorProtocolRefusal({ CHUG_CHAT_PROTOCOL: named }),
       undefined,
     );
-  const spoken = "this image's supervisor speaks protocol(s) [1, 2, 3]";
+  const spoken = "this image's supervisor speaks protocol(s) [1, 2, 3, 4]";
   for (const [named, said, side] of [
     [undefined, "none", "the host's runner"],
     ["", "none", "the host's runner"],

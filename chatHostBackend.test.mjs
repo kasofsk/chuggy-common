@@ -207,7 +207,6 @@ test("a session is placed once its Start is written, carrying its bearer to the 
       envelope: {
         callbackUrl: "https://worker-plane.invalid/v1/session",
         bearer,
-        timeoutSecsMax: 1_800,
         outputBytesMax: 4_096,
       },
     },
@@ -226,6 +225,23 @@ test("a session is placed once its Start is written, carrying its bearer to the 
   host.say({ frame: "Started", assignment: "a" });
   await settled();
   bearerUnlogged(host);
+});
+
+/** Catches a session on a member's machine run under the site's deadline for its pods rather than its host's own. */
+test("a Start names the host's own deadline where it sets one, and none where it sets none, never the assignment's", async () => {
+  for (const [given, named] of [
+    [{ ...settings, deadlineSecs: 600 }, 600],
+    [settings, undefined],
+  ]) {
+    const host = await readyHost(given);
+    await host.backend.place(sessionOf("a"), "Session");
+    const [{ envelope }] = host.frames();
+    assert.equal(envelope.timeoutSecsMax, named);
+    assert.equal(
+      Object.hasOwn(envelope, "timeoutSecsMax"),
+      named !== undefined,
+    );
+  }
 });
 
 test("a Start longer than a frame is refused, naming nothing of it, and nothing is written", async () => {
