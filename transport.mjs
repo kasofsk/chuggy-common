@@ -2,10 +2,57 @@ import { setTimeout as wait } from "node:timers/promises";
 import { URL } from "node:url";
 
 import {
+  workerContractFeaturesHeader,
+  workerContractFeaturesText,
   workerContractHeader,
   workerContractRelease,
   workerContractVersionOf,
 } from "@chuggy/worker-contract/workerContract";
+
+/**
+ * The features this package implements, which every request to a plane
+ * lists, written out rather than read off the contract's roster, which names
+ * features whether or not they are built here.
+ *
+ * @type {readonly import("@chuggy/worker-contract/workerContract").WorkerContractFeature[]}
+ */
+export const workerFeaturesImplemented = [
+  "RunnerSessions",
+  "LiveStops",
+  "ProjectReads",
+  "RunnerReleases",
+  "RunnerProjects",
+  "RunDiskLow",
+  "TicketDispatch",
+  "MemoryRoom",
+  "ChatHost",
+  "RunnerReport",
+  "UnscopedChat",
+  "RunUsage",
+  "TargetRef",
+  "EvaluatedTree",
+  "ThreadOffer",
+  "RunContext",
+  "SessionContext",
+  "CredentialOutcome",
+  "RunnerAgentsAdvertised",
+  "SystemPromptOwn",
+  "CredentialBundles",
+  "RunCredential",
+  "CredentialPauses",
+  "ChatThreadsClosed",
+  "RunCredentialAbsent",
+  "SessionCapabilitiesNamed",
+  "ChatSessionThreads",
+];
+
+/**
+ * The features of the contract's roster this package does not implement, and
+ * so does not list.
+ *
+ * @type {readonly import("@chuggy/worker-contract/workerContract").WorkerContractFeature[]}
+ */
+export const workerFeaturesUnimplemented = [];
 
 /**
  * How long a plane may go without answering one request before the request
@@ -36,8 +83,8 @@ export function workerPlaneRetryPause(tries) {
 export class WorkerPlaneRefusal extends Error {}
 
 /**
- * Whether the plane itself gave an answer, which names the release it was
- * built with. A proxy or an edge in front of a plane it cannot reach answers
+ * Whether the plane itself gave an answer, which names the release it speaks.
+ * A proxy or an edge in front of a plane it cannot reach answers
  * statuses of its own, naming none.
  */
 export function workerPlaneAnswered(response) {
@@ -45,12 +92,15 @@ export function workerPlaneAnswered(response) {
   return release !== null && workerContractVersionOf(release) !== undefined;
 }
 
-/** The headers every worker-plane request carries: the caller's own, its bearer, and the contract release this image was built with. */
+/** The headers every worker-plane request carries: the caller's own, its bearer, the contract release it speaks and the features it implements. */
 export function workerPlaneHeaders(bearer, headers = {}) {
   return {
     authorization: `Bearer ${bearer}`,
     ...headers,
     [workerContractHeader]: workerContractRelease,
+    [workerContractFeaturesHeader]: workerContractFeaturesText(
+      workerFeaturesImplemented,
+    ),
   };
 }
 

@@ -1,14 +1,17 @@
 /**
  * What the pod reads off the contract's tables rather than writing out: a
  * route's path, the statuses a route answers with one body, a label a roster
- * carries, a public API path filled in from its pattern, and the version a
- * plane's answer names. Each raises where the contract no longer has what was
+ * carries, a public API path filled in from its pattern, and the release and
+ * features a plane's answer names. Each raises where the contract no longer has what was
  * asked for, so a pod built against one that dropped it fails as it loads
  * rather than on the wire.
  */
 
 import {
+  workerContractFeaturesHeader,
+  workerContractFeaturesOf,
   workerContractHeader,
+  workerContractImplements,
   workerContractVersionOf,
 } from "@chuggy/worker-contract/workerContract";
 
@@ -47,19 +50,28 @@ export function routeFilled(pattern, values) {
   });
 }
 
-/** The version a plane's answer names in its release header, or nothing where it names none. */
-export function answeredVersion(response) {
+/**
+ * The plane that gave an answer, as its headers name it: the release it
+ * speaks and the features it lists, or nothing where it names no release.
+ *
+ * @returns {import("@chuggy/worker-contract/workerContract").WorkerContractPeer | undefined}
+ */
+export function answeredPeer(response) {
   const release = response?.headers?.get?.(workerContractHeader);
-  return typeof release === "string"
-    ? workerContractVersionOf(release)
-    : undefined;
+  if (
+    typeof release !== "string" ||
+    workerContractVersionOf(release) === undefined
+  )
+    return undefined;
+  return {
+    release,
+    features: workerContractFeaturesOf(
+      response.headers.get(workerContractFeaturesHeader) ?? undefined,
+    ),
+  };
 }
 
-/** Whether a plane speaking `version` speaks `first` or a later version of its major. */
-export function versionReaches(version, first) {
-  return (
-    version !== undefined &&
-    version.major === first.major &&
-    version.minor >= first.minor
-  );
+/** Whether `peer` implements `feature`, which nothing does where nothing is known of it. */
+export function peerImplements(peer, feature) {
+  return peer !== undefined && workerContractImplements(feature, peer);
 }

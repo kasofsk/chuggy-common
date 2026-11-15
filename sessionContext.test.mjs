@@ -12,9 +12,10 @@ import {
   runContextItemsMax,
   runContextPathCharsMax,
 } from "@chuggy/worker-contract/workerPlane";
-import { workerContractHeader } from "@chuggy/worker-contract/workerContract";
+import { workerContractFeaturesHeader } from "@chuggy/worker-contract/workerContract";
 
 import { contextUsage } from "./contextUsage.fixture.mjs";
+import { planeHeaders, planeNamed, planesDeciding } from "./peer.fixture.mjs";
 import { sessionContextUsageWaitMs } from "./session.mjs";
 import {
   facts,
@@ -61,12 +62,19 @@ function usageQueryOf(script, usage) {
   };
 }
 
-/** A plane's request whose every answer names `release` instead of this pod's. */
-function answeringUnder(request, release) {
+/**
+ * A plane's request whose every answer names `release` instead of this pod's,
+ * and lists `features`, nothing where they are none.
+ */
+function answeringUnder(request, release, features) {
   return async (...asked) => {
     const answer = await request(...asked);
     const headers = new globalThis.Headers(answer.headers);
-    headers.set(workerContractHeader, release);
+    headers.delete(workerContractFeaturesHeader);
+    for (const [name, value] of Object.entries(
+      planeHeaders({ release, features }),
+    ))
+      headers.set(name, value);
     return new globalThis.Response(answer.body, {
       status: answer.status,
       headers,
@@ -134,6 +142,38 @@ test("a plane from before session readings is answered with none, and the runtim
   assert.equal(answer.result, "ok");
   assert.equal(Object.hasOwn(answer, "readings"), false);
   assert.deepEqual(asked, []);
+});
+
+/**
+ * Catches readings answered to a plane whose list leaves `SessionContext` out,
+ * which refuses the whole answer over the field, or withheld from one that
+ * lists it, and a plane listing nothing read otherwise than by its release.
+ */
+test("a turn's readings are answered to a plane listing SessionContext, never to one leaving it out, and by its release to one listing nothing", async () => {
+  await Promise.all(
+    planesDeciding("SessionContext").map(async (decided) => {
+      const plane = planeOf([turnOne], facts);
+      const { query } = usageQueryOf(answered, async () => contextUsage);
+
+      assert.equal(
+        await run({
+          request: answeringUnder(
+            plane.request,
+            decided.release,
+            decided.features,
+          ),
+          query,
+        }),
+        0,
+      );
+
+      assert.equal(
+        Object.hasOwn(answerOf(plane), "readings"),
+        decided.takes,
+        planeNamed(decided),
+      );
+    }),
+  );
 });
 
 test("a runtime that fails to say what its window holds still answers the turn", async () => {

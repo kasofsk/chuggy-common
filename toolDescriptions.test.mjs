@@ -22,6 +22,7 @@ import {
   chuggyProjectTools,
   chuggyToolContext,
   chuggyToolServer,
+  chuggyToolsUnbuilt,
   sessionCapabilityTools,
 } from "./chuggyTools.mjs";
 import { leadDecisionStaging } from "./leadDecision.mjs";
@@ -125,7 +126,11 @@ function toolDescriptionFaults({ name, description, inputSchema }) {
 }
 
 for (const [server, built, roster] of [
-  ["the pod's server", podServer, allChuggyTools],
+  [
+    "the pod's server",
+    podServer,
+    allChuggyTools.filter((tool) => !chuggyToolsUnbuilt.includes(tool)),
+  ],
   ["the local server", localServer, chuggyProjectTools.map(({ name }) => name)],
 ])
   test(`${server} lists every tool opening with a short sentence and every parameter described`, async () => {

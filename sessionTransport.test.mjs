@@ -3,6 +3,8 @@ import test from "node:test";
 import { clearTimeout, setTimeout } from "node:timers";
 
 import {
+  workerContractFeaturesHeader,
+  workerContractFeaturesText,
   workerContractHeader,
   workerContractRelease,
 } from "@chuggy/worker-contract/workerContract";
@@ -13,7 +15,17 @@ import {
   sessionRequestOnce,
   sessionStopped,
 } from "./sessionTransport.mjs";
-import { workerPlaneAwayMillisecondsMax } from "./transport.mjs";
+import {
+  workerFeaturesImplemented,
+  workerPlaneAwayMillisecondsMax,
+} from "./transport.mjs";
+
+/** The features header every request lists this package's features in. */
+const featuresListed = {
+  [workerContractFeaturesHeader]: workerContractFeaturesText(
+    workerFeaturesImplemented,
+  ),
+};
 
 const task = { workerPlane: { url: "http://worker-plane.test:3001" } };
 
@@ -50,7 +62,7 @@ function transportOf(answers) {
   };
 }
 
-test("the bearer, the release and the plane's base url are what the request is made against", async () => {
+test("the bearer, the release, the features and the plane's base url are what the request is made against", async () => {
   const { calls, transport } = transportOf([{ status: 204 }]);
 
   await sessionRequest(task, "chgs_secret", "/v1/session/turn", {}, transport);
@@ -59,6 +71,7 @@ test("the bearer, the release and the plane's base url are what the request is m
   assert.deepEqual(calls[0].init.headers, {
     authorization: "Bearer chgs_secret",
     [workerContractHeader]: workerContractRelease,
+    ...featuresListed,
   });
 });
 
@@ -218,6 +231,7 @@ test("a request asked once is asked once, whatever the plane answers, under the 
       "content-type": "application/json",
       authorization: "Bearer chgs_secret",
       [workerContractHeader]: workerContractRelease,
+      ...featuresListed,
     });
   }
 });

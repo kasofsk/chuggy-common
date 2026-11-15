@@ -21,6 +21,7 @@ import {
   heldCredentials,
   heldCredentialsUnmounted,
 } from "./heldCredentials.mjs";
+import { planeNamed, planeTakes, planesDeciding } from "./peer.fixture.mjs";
 import { overPlane, planeFetch, planes } from "./plane.fixture.mjs";
 import { RunStepFailure, runCredentialAbsent } from "./runEvidence.mjs";
 import { WorkerPlaneRefusal, workerRequest } from "./transport.mjs";
@@ -455,7 +456,7 @@ async function seamed(plane, listed) {
 }
 
 /** Catches a shape read from a plane whose version does not serve it, which a bundle's or a secret's fields would be misread from. */
-test("the plane's version chooses the shape read, and the other shape fails the ask, keeping and writing nothing", async () => {
+test("the plane's release chooses the shape read, and the other shape fails the ask, keeping and writing nothing", async () => {
   const bundle = oneFileBundle("token");
   for (const [body, release] of [
     [{ credentials: [bundle] }, releaseBeforeBundles],
@@ -467,7 +468,7 @@ test("the plane's version chooses the shape read, and the other shape fails the 
     ]);
     assert.match(
       String(seen.error),
-      /in a shape its version does not serve/u,
+      /in a shape it does not implement/u,
       release,
     );
     assert.deepEqual(
@@ -491,6 +492,77 @@ test("the plane's version chooses the shape read, and the other shape fails the 
     ["track-record"],
   );
   assert.deepEqual(single.written, ["/m/held-track-record"]);
+});
+
+/**
+ * Catches a bundle read from a plane whose list leaves `CredentialBundles`
+ * out, or a single secret from one that lists it, and a plane listing nothing
+ * read otherwise than by its release.
+ */
+test("bundles are read from a plane listing CredentialBundles, single secrets from one leaving it out, and by its release from one listing nothing", async () => {
+  for (const decided of planesDeciding("CredentialBundles")) {
+    const { release, features, takes } = decided;
+    const named = planeNamed(decided);
+    const [served, other] = takes
+      ? [oneFileBundle("token"), trackRecord]
+      : [trackRecord, oneFileBundle("token")];
+    const read = await seamed(
+      heldPlane({
+        status: 200,
+        body: { credentials: [served] },
+        release,
+        features,
+      }),
+      ["forge", "track-record"],
+    );
+    assert.equal(read.error, undefined, named);
+    const refused = await seamed(
+      heldPlane({
+        status: 200,
+        body: { credentials: [other] },
+        release,
+        features,
+      }),
+      ["forge", "track-record"],
+    );
+    assert.match(
+      String(refused.error),
+      /in a shape it does not implement/u,
+      named,
+    );
+  }
+});
+
+/**
+ * Catches an absence that ends the attempt to a plane whose list leaves
+ * `RunCredentialAbsent` out, which refuses the label, or that lets it run on
+ * to one that lists it, and a plane listing nothing read otherwise than by its
+ * release.
+ */
+test("an absence ends the attempt to a plane listing RunCredentialAbsent, never to one leaving it out, and by its release to one listing nothing", async () => {
+  const absent = [{ credential: "track-record", reason: "NotHeld" }];
+  for (const decided of planesDeciding("RunCredentialAbsent", [
+    "CredentialBundles",
+  ])) {
+    const { release, features, takes } = decided;
+    const bundles = planeTakes(decided, "CredentialBundles");
+    const seen = await seamed(
+      heldPlane({
+        status: 200,
+        body: bundles
+          ? { credentials: [oneFileBundle("token")], absent }
+          : { credentials: [trackRecord] },
+        release,
+        features,
+      }),
+      ["forge", "track-record"],
+    );
+    assert.equal(
+      seen.error instanceof RunStepFailure,
+      takes && bundles,
+      planeNamed(decided),
+    );
+  }
 });
 
 /**

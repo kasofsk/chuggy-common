@@ -5,6 +5,7 @@ import test from "node:test";
 import { resultReportCharsMax } from "@chuggy/worker-contract/workerDocuments";
 import { workerPlaneAnswers } from "@chuggy/worker-contract/workerPlane";
 
+import { planeNamed, planesDeciding } from "./peer.fixture.mjs";
 import { planeFetch, planes } from "./plane.fixture.mjs";
 import {
   checkedPoolJobPlaneClientSettings,
@@ -29,13 +30,18 @@ const ended = {
 
 /**
  * A job plane answering `ending` to the end and `left` to the error text,
- * that one under `release`, recording each request as the contract reads it
- * and the bearer it came under.
+ * that one under `release` and listing `features`, recording each request as
+ * the contract reads it and the bearer it came under.
  */
-function jobPlane(ending, left = 204, release = undefined) {
+function jobPlane(
+  ending,
+  left = 204,
+  release = undefined,
+  features = undefined,
+) {
   const plane = planeFetch(planes.job, (route) => ({
     status: route === "runEnded" ? ending : left,
-    ...(route === "runEnded" ? {} : { release }),
+    ...(route === "runEnded" ? {} : { release, features }),
   }));
   const authorized = [];
   return {
@@ -93,7 +99,7 @@ test("a workload its backend killed for low disk is ended so where its error tex
     ["1.17.0", "RunDiskLow"],
     ["1.18.2", "RunDiskLow"],
     ["1.16.0", "RunFailed"],
-    ["2.0.0", "RunFailed"],
+    ["2.0.0", "RunDiskLow"],
     ["not a release", "RunFailed"],
     [null, "RunFailed"],
   ]) {
@@ -114,6 +120,23 @@ test("a workload its backend killed for low disk is ended so where its error tex
     return plane.fetch(url, init);
   }).end(diskLow);
   assert.deepEqual(plane.asked.at(-1)?.body, { evidence: "RunFailed" });
+});
+
+/**
+ * Catches a low-disk end sent to a plane whose list leaves `RunDiskLow` out,
+ * which refuses the label, or withheld from one that lists it, and a plane
+ * listing nothing read otherwise than by its release.
+ */
+test("a workload killed for low disk is ended so where its plane lists RunDiskLow, never where its list leaves it out, and by its release where it lists nothing", async () => {
+  for (const decided of planesDeciding("RunDiskLow")) {
+    const plane = jobPlane(204, 204, decided.release, decided.features);
+    await poolJobPlaneClient(settings, plane.fetch).end(diskLow);
+    assert.deepEqual(
+      plane.asked.at(-1)?.body,
+      { evidence: decided.takes ? "RunDiskLow" : "RunFailed" },
+      planeNamed(decided),
+    );
+  }
 });
 
 test("an attempt the plane will not end is refused, and one it could not be asked about is unavailable", async () => {

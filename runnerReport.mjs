@@ -24,10 +24,10 @@
  * `-`, and with nothing before its first letter or digit; a name of none is
  * `unnamed`.
  *
- * A REPORT IS SENT ONLY TO A PLANE THAT TAKES ONE, as the version the last
- * poll's answer naming one says: one at once after the first poll whose
- * answer names `workerContractRunnerReport` or later, and then every
- * `runnerReportIntervalMs` while the latest named still does. It is sent
+ * A REPORT IS SENT ONLY TO A PLANE THAT TAKES ONE, as the last poll's answer
+ * naming a release says: one at once after the first poll whose answer says
+ * the plane implements `RunnerReport`, and then every
+ * `runnerReportIntervalMs` while the latest such answer still does. It is sent
  * under the token the last poll the plane did not reject was made under, by
  * the plane client that made it, behind the passes, which never wait on it.
  * A body the contract's schema does not read, or that weighs more than
@@ -38,7 +38,6 @@
 import { setTimeout as waitDefault } from "node:timers/promises";
 import { TextEncoder } from "node:util";
 
-import { workerContractRunnerReport } from "@chuggy/worker-contract/workerContract";
 import {
   workerRunnerHostCharsMax,
   workerRunnerImagePullBoundsSecs,
@@ -47,9 +46,11 @@ import {
   workerRunnerRunBoundsSecs,
 } from "@chuggy/worker-contract/workerPool";
 
+import { peerImplements } from "./wire.mjs";
+
 /**
  * @typedef {import("@chuggy/worker-contract/workerPool").WorkerRunnerReport} WorkerRunnerReport
- * @typedef {import("@chuggy/worker-contract/workerContract").WorkerContractVersion} WorkerContractVersion
+ * @typedef {import("@chuggy/worker-contract/workerContract").WorkerContractPeer} WorkerContractPeer
  * @typedef {import("./poolLoop.mjs").WorkerPoolClient} WorkerPoolClient
  * @typedef {import("./poolLoop.mjs").WorkerPoolBackend} WorkerPoolBackend
  * @typedef {import("./poolLoop.mjs").WorkerPoolPlane} WorkerPoolPlane
@@ -182,16 +183,12 @@ export function runnerReportHost(name) {
 }
 
 /**
- * Whether a plane whose answers name `version` takes a report.
+ * Whether the plane `peer` takes a report.
  *
- * @param {WorkerContractVersion | undefined} version
+ * @param {WorkerContractPeer | undefined} peer
  */
-export function runnerReportTaken(version) {
-  return (
-    version !== undefined &&
-    version.major === workerContractRunnerReport.major &&
-    version.minor >= workerContractRunnerReport.minor
-  );
+export function runnerReportTaken(peer) {
+  return peerImplements(peer, "RunnerReport");
 }
 
 /**
@@ -211,7 +208,7 @@ export function runnerReportTaken(version) {
  * @property {Required<Pick<WorkerPoolPlane, "report">>} plane
  * @property {RunnerReportingSeams} seams
  * @property {RunnerReportCounts} counts
- * @property {WorkerContractVersion | undefined} version the latest a poll's answer named
+ * @property {WorkerContractPeer | undefined} peer the plane the latest poll's answer naming a release came from
  * @property {string | undefined} token
  * @property {boolean} ticking
  * @property {boolean} failing
@@ -286,7 +283,7 @@ function runnerReportStopped(counts, assignment, stopped) {
 
 /**
  * The plane, counting each poll and settlement and starting the reports
- * once a poll's answer names a version that takes them.
+ * once a poll's answer comes from a plane that takes them.
  *
  * @param {RunnerReportState} state
  * @param {WorkerPoolPlane} plane
@@ -298,10 +295,10 @@ function runnerReportPlane(state, plane) {
     ...plane,
     poll: async (token, ...asked) => {
       const polled = await plane.poll(token, ...asked);
-      const version = plane.polledVersion?.();
+      const peer = plane.polledPeer?.();
       counts.polls += 1;
-      if (version === undefined) counts.pollsFailed += 1;
-      else state.version = version;
+      if (peer === undefined) counts.pollsFailed += 1;
+      else state.peer = peer;
       if (polled.polled !== "Stale") state.token = token;
       runnerReportStarted(state);
       return polled;
@@ -483,7 +480,7 @@ async function runnerReportFailure(state, token) {
  */
 async function runnerReportSent(state) {
   const { token } = state;
-  if (!runnerReportTaken(state.version) || token === undefined) return;
+  if (!runnerReportTaken(state.peer) || token === undefined) return;
   const failure = await runnerReportFailure(state, token);
   if (failure !== undefined && !state.failing)
     state.seams.log(
@@ -516,14 +513,14 @@ async function runnerReportTicks(state) {
 }
 
 /**
- * Starts the reports, once, at the first poll whose answer names a version
+ * Starts the reports, once, at the first poll whose answer comes from a plane
  * that takes them.
  *
  * @param {RunnerReportState} state
  */
 function runnerReportStarted(state) {
   if (state.ticking || state.cut.signal.aborted) return;
-  if (!runnerReportTaken(state.version) || state.token === undefined) return;
+  if (!runnerReportTaken(state.peer) || state.token === undefined) return;
   state.ticking = true;
   void runnerReportTicks(state);
 }
@@ -538,9 +535,9 @@ function runnerReportStarted(state) {
  */
 export function runnerReporting(client, seams) {
   const { report } = client.plane;
-  if (report === undefined || client.plane.polledVersion === undefined)
+  if (report === undefined || client.plane.polledPeer === undefined)
     throw new TypeError(
-      "a runner that reports needs a plane that takes reports and names the version each poll's answer named",
+      "a runner that reports needs a plane that takes reports and names the plane each poll's answer came from",
     );
   /** @type {RunnerReportState} */
   const state = {
@@ -558,7 +555,7 @@ export function runnerReporting(client, seams) {
       held: new Map(),
       counted: new Set(),
     },
-    version: undefined,
+    peer: undefined,
     token: undefined,
     ticking: false,
     failing: false,

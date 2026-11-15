@@ -5,10 +5,7 @@ import { setImmediate } from "node:timers/promises";
 import { URL } from "node:url";
 
 import { sessionContainerEnds } from "@chuggy/worker-contract/sessionPlane";
-import {
-  workerContractHeader,
-  workerContractRelease,
-} from "@chuggy/worker-contract/workerContract";
+import { workerContractRelease } from "@chuggy/worker-contract/workerContract";
 import {
   workerPoolSettlementOutcomes,
   workerRunnerHostCharsMax,
@@ -22,6 +19,7 @@ import {
   workerRunnerRunKinds,
 } from "@chuggy/worker-contract/workerPool";
 
+import { planeHeaders, planeNamed, planesDeciding } from "./peer.fixture.mjs";
 import { workerPoolClientPass } from "./poolLoop.mjs";
 import { poolRunnerClient, poolRunnerLoop } from "./poolRunner.mjs";
 import {
@@ -69,12 +67,15 @@ function attempt(id) {
 
 /**
  * A pool plane over fetch, answering each poll as `answer` says under the
- * release `release` names, each settlement 204, and each report as `report`
- * says; every report it takes is held to the contract's schema and bound.
+ * release `release` names and listing the features `features` names, each
+ * settlement 204, and each report as `report` says; every report it takes is
+ * held to the contract's schema and bound.
  */
 function fakePlane() {
   const plane = {
     release: releaseReporting,
+    /** @type {string[] | undefined} */
+    features: undefined,
     /** @type {() => Response | Promise<Response>} */
     answer: () => plane.reconciled({}),
     /** @type {() => Response | Promise<Response>} */
@@ -89,7 +90,7 @@ function fakePlane() {
     answered: (status, body = null) =>
       new globalThis.Response(body, {
         status,
-        headers: { [workerContractHeader]: plane.release },
+        headers: planeHeaders(plane),
       }),
     /** @param {Record<string, unknown>} reconciliation */
     reconciled: (reconciliation) =>
@@ -448,10 +449,30 @@ test("a report is sent under the bearer of the last poll the plane did not rejec
   assert.equal(plane.reports[1]?.bearer, "Bearer pool-token-2");
 });
 
+/**
+ * Catches a report sent to a plane whose list leaves `RunnerReport` out, or
+ * withheld from one that lists it, and a plane listing nothing read otherwise
+ * than by its release.
+ */
+test("a report is sent to a plane listing RunnerReport, never to one leaving it out, and by its release to one listing nothing", async (t) => {
+  for (const decided of planesDeciding("RunnerReport")) {
+    const { client, plane, pass } = harness();
+    t.after(() => client.reporting?.ended());
+    plane.release = decided.release;
+    plane.features = decided.features;
+    await pass();
+    assert.equal(
+      plane.reports.length,
+      decided.takes ? 1 : 0,
+      planeNamed(decided),
+    );
+  }
+});
+
 test("a plane naming a version before the reports' is sent none, and one naming it again is sent them again", async (t) => {
   const { client, plane, clock, pass } = harness();
   t.after(() => client.reporting?.ended());
-  for (const release of [releaseBefore, "0.99.0", "2.28.0"]) {
+  for (const release of [releaseBefore, "0.99.0"]) {
     plane.release = release;
     await pass();
   }
