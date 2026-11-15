@@ -45,7 +45,7 @@ A member's personal runner is a pool file of kind `Personal`: it names its tenan
 
 ## A chat host
 
-A member's chat host is a pool file of kind `ChatHost`, registered by `register.mjs` when the ask is `chat`, from a token minted at `POST /api/v1/tenants/:tenant/chat-host-registration-tokens`. It takes the member's sessions alone, all in one container running `chatSupervisor.mjs`, in the image chuggy names on each poll unless the host's own setting names one. `chatHost.mjs` is its loop and that container's spec, and `chatHostBackend.mjs` the pool loop's backend over the supervisor's stream; each CLI brings the engine that runs the container. Its `idleSecs` setting is optional: unset, its sessions have no idle limit; set, each poll names it and chuggy caps it. Its `deadlineSecs` setting is optional: unset, its sessions have no deadline and run until they end or are stopped; set, each is stopped at it. Its `sessionCapabilities` setting is optional too: set, it narrows each of its threads' rosters, and it is named only to a plane whose answers say it implements `SessionCapabilitiesNamed`, the host claiming no session before then; a thread so narrowed hands its shell the API's origin and its bearer.
+A member's chat host is a pool file of kind `ChatHost`, registered by `register.mjs` when the ask is `chat`, from a token minted at `POST /api/v1/tenants/:tenant/chat-host-registration-tokens`. It takes the member's sessions alone, all in one container running `chatSupervisor.mjs`, in the image chuggy names on each poll unless the host's own setting names one. `chatHost.mjs` is its loop and that container's spec, and `chatHostBackend.mjs` the pool loop's backend over the supervisor's stream; each CLI brings the engine that runs the container. Its `idleSecs` setting is optional: unset, its sessions have no idle limit; set, each poll names it and chuggy caps it. Its `deadlineSecs` setting is optional: unset, its sessions have no deadline and run until they end or are stopped; set, each is stopped at it. Its `sessionCapabilities` setting is optional too: set, it narrows each of its threads' rosters, and it is named only to a plane whose answers say it implements `SessionCapabilitiesNamed`, the host claiming no session before then; a thread so narrowed hands its shell the API's origin, its bearer, its tenant and its project.
 
 A thread on a chat host whose agent has a shell holds a job host, `jobHost.mjs`: jobs, watches and timers it sets through tools of its `chuggy` server, each waking the thread only through chuggy's thread wake. Their state is kept in the thread's workspace and restored by its next session, which starts a job set to restart again and tells chuggy the thread is standing while one runs.
 
@@ -59,6 +59,10 @@ printf '["%s","%s"]' <project> <session> | sha256sum
 # Remove it.
 docker run --rm -v chuggy-chat-<digest>-sessions:/sessions <image> rm -rf /sessions/threads/<name>
 ```
+
+## The `chuggy` command
+
+`chuggy <tool> '<json input>'`, this package's `bin`, runs one of the session's `chuggy` tools from a thread's shell, against the session its shell was handed, and prints the tool's answer as the agent reads it: a route's status line and its body. The input defaults to `{}`. It exits 1 on a refusal or a failed call, and 2 where a shell variable is unset, the tool is unknown or the input is not JSON. It offers every tool that reaches the API, so neither a lead's decisions nor an owner's offers, and the API refuses what the session's bearer may not do. Each submitted command is an operation of its own, so one run again is a second submission.
 
 ## A person's own agent
 
