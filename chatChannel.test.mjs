@@ -23,6 +23,10 @@ const envelope = {
   providerCredentialFile: "/minted/session-1/claude-code",
 };
 
+/** The envelope of a host that sets no deadline. */
+const unbounded = { ...envelope };
+delete unbounded.timeoutSecsMax;
+
 /** Every line a reader of `bytesMax` hands on of `chunks`, and how many it dropped. */
 function readOf(bytesMax, chunks) {
   const lines = [];
@@ -94,6 +98,16 @@ test("the channel's envelope is read, and its end then stops the session", async
   await new Promise((resolve) =>
     channel.stopped.addEventListener("abort", resolve),
   );
+  channel.close();
+});
+
+/** Catches a session refusing the envelope of a host that sets no deadline. */
+test("an envelope naming no deadline crosses the channel and is read without one", async () => {
+  const input = new PassThrough();
+  const channel = chatChannelOpened(input);
+
+  input.write(chatChannelLine(unbounded));
+  assert.deepEqual(await channel.envelope, unbounded);
   channel.close();
 });
 

@@ -26,9 +26,11 @@
  * A `Start` IS NEVER LOGGED, NOR WRITTEN ANYWHERE BUT THE SUPERVISOR'S
  * INPUT: it carries the session's bearer. It names the credential the host's
  * selector chose for its session, where the host gives one, and a session it
- * chose none for is refused, and the thread its assignment names, where it
- * names one. Each poll then names the credentials the
- * selector would choose from, and each answer's pauses are handed to it.
+ * chose none for is refused, the thread its assignment names, where it
+ * names one, and the host's own deadline, where it sets one, never the
+ * assignment's, which is the site's for its pods. Each poll then names the
+ * credentials the selector would choose from, and each answer's pauses are
+ * handed to it.
  * What the supervisor writes on its error stream is its log, and each line
  * of it naming a session this host started, as `chatSessionLabel` writes
  * one, goes to that session's log; every other line, one naming a session
@@ -77,6 +79,7 @@ import { poolSessionPhase } from "./poolSessionPlane.mjs";
  *
  * @typedef {object} ChatHostBackendSettings
  * @property {number} outputBytesMax what a session may write of its output, which its envelope names
+ * @property {number} [deadlineSecs] how long a session may run, which its envelope names; none where absent
  * @property {number} readyWaitMs how long a supervisor started has to say it is ready
  * @property {number} exitWaitMs how long a supervisor whose input was ended has to exit before it is killed, and one that exited has for its output to end
  * @property {number} stopWaitMs how long a supervisor has to end a session it was told to stop before it is killed
@@ -479,7 +482,9 @@ function chatHostStartLine(settings, assignment, credential) {
         envelope: {
           callbackUrl: assignment.callbackUrl,
           bearer: assignment.bearer,
-          timeoutSecsMax: assignment.deadlineSecs,
+          ...(settings.deadlineSecs === undefined
+            ? {}
+            : { timeoutSecsMax: settings.deadlineSecs }),
           outputBytesMax: settings.outputBytesMax,
         },
         ...(credential === undefined ? {} : { credential }),

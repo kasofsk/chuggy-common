@@ -36,6 +36,12 @@
  * every session runs on that file, as each did under protocol 1, whose
  * `Start` names none.
  *
+ * A SESSION RUNS UNTIL THE DEADLINE ITS `Start` NAMES, and one naming none
+ * until it ends by itself, by `Stop`, by `Drain` or at the end of the host's
+ * stream. A host of a protocol before `chatSupervisorDeadlineFreeProtocol`
+ * names one in every `Start`, and one whose `Start` names none is a host this
+ * supervisor cannot follow.
+ *
  * THE END OF ITS INPUT ENDS EVERYTHING. Every preparation is cancelled and
  * refused `Stopped`, every session is stopped and its `Ended` written, every
  * `Forget` held is answered once its thread's sessions have ended, and the
@@ -141,6 +147,9 @@ const chatSupervisorCredentialProtocol = 2;
 
 /** The first protocol whose `Start` may name a thread, which has `Forget`, and whose `Drain` ends what holds no claimed turn. */
 const chatSupervisorThreadProtocol = 3;
+
+/** The first protocol whose `Start` may name no deadline, its session then running until it ends otherwise. */
+const chatSupervisorDeadlineFreeProtocol = 4;
 
 /** Where the host names the protocol it speaks, which it sets beside every other variable. */
 export const chatSupervisorProtocolVariable = "CHUG_CHAT_PROTOCOL";
@@ -540,6 +549,11 @@ function chatSupervisorUnspoken(protocol, frame) {
     return "a Start naming a credential";
   if (frame.thread !== undefined && protocol < chatSupervisorThreadProtocol)
     return "a Start naming a thread";
+  if (
+    frame.envelope.timeoutSecsMax === undefined &&
+    protocol < chatSupervisorDeadlineFreeProtocol
+  )
+    return "a Start naming no deadline";
   return undefined;
 }
 

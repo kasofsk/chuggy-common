@@ -663,6 +663,63 @@ test("a session still running at its deadline is stopped, and ends Failed howeve
   assert.equal(await running.ended, "Failed");
 });
 
+/** The delay of each timer `started` sets, and what it settles to. */
+async function timersSetBy(started) {
+  const setTimeout = globalThis.setTimeout;
+  const delays = [];
+  globalThis.setTimeout = (callback, delay, ...rest) => {
+    delays.push(delay);
+    return setTimeout(callback, delay, ...rest);
+  };
+  try {
+    return { delays, value: await started() };
+  } finally {
+    globalThis.setTimeout = setTimeout;
+  }
+}
+
+/** Catches a session whose envelope names no deadline being given one anyway, the longest timer or one of no length. */
+test("a session whose envelope names no deadline sets no timer, and is still ended by a stop, by a drain and by its own end", async () => {
+  const system = systemOf();
+  const { sessions } = await sessionsOf(system);
+  const { timeoutSecsMax, ...unbounded } = envelope;
+  const bounded = await timersSetBy(() =>
+    sessions.prepared(assignment, envelope, live()),
+  );
+  const stopped = await timersSetBy(() =>
+    sessions.prepared(assignment, unbounded, live()),
+  );
+  assert.deepEqual(bounded.delays, [timeoutSecsMax * 1_000]);
+  assert.deepEqual(stopped.delays, []);
+  const [, stoppedChild] = system.children.map(({ child }) => child);
+  assert.equal(JSON.parse(stoppedChild.written).timeoutSecsMax, undefined);
+
+  const stopping = new Promise((resolve) =>
+    stoppedChild.channel.once("finish", resolve),
+  );
+  stopped.value.stop();
+  await stopping;
+  stoppedChild.emit("exit", 0, null);
+  assert.equal(await stopped.value.ended, "Succeeded");
+
+  bounded.value.stop();
+  system.children[0].child.emit("exit", 0, null);
+  await bounded.value.ended;
+  const drained = await sessions.prepared(assignment, unbounded, live());
+  const drainedChild = system.children[2].child;
+  const draining = new Promise((resolve) =>
+    drainedChild.channel.once("finish", resolve),
+  );
+  drained.drain();
+  await draining;
+  drainedChild.emit("exit", 0, null);
+  assert.equal(await drained.ended, "Succeeded");
+
+  const finished = await sessions.prepared(assignment, unbounded, live());
+  system.children[3].child.emit("exit", 0, null);
+  assert.equal(await finished.ended, "Succeeded");
+});
+
 /**
  * Catches a refused preparation that leaves what it made, or holds its user,
  * or that says nothing of why.
