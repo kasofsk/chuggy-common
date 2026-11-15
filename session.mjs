@@ -103,7 +103,9 @@ import {
   sessionBearerVariable,
   sessionConfigDirectoryVariable,
   sessionModelVariable,
+  sessionProjectVariable,
   sessionTaskVariable,
+  sessionTenantVariable,
   workerCredentialFilesVariable,
   workerRepositoriesVariable,
   workerWorkspaceDirectory,
@@ -709,9 +711,11 @@ function sessionTakesStops(facts) {
  * the site's. `CLAUDE_CODE_EFFORT_LEVEL` outranks `effort`, so the runtime's
  * environment leaves it out wherever the facts name an effort.
  *
- * THE SHELL IS HANDED THE API'S ORIGIN AND `bearer` ONLY WHERE THE FACTS SAY
- * `shellCredentialHanded`, under `sessionApiOriginVariable` and
- * `sessionBearerVariable`, and neither otherwise, whatever the pod inherited.
+ * THE SHELL IS HANDED THE API'S ORIGIN, `bearer` AND THE FACTS' TENANT AND
+ * PROJECT ONLY WHERE THE FACTS SAY `shellCredentialHanded`, under
+ * `sessionApiOriginVariable`, `sessionBearerVariable`, `sessionTenantVariable`
+ * and `sessionProjectVariable`, and none of them otherwise, whatever the pod
+ * inherited.
  * The bearer is the attempt's own, the one its chuggy tools present, so it
  * ends with the attempt as theirs does.
  *
@@ -801,6 +805,8 @@ function sessionRuntimeEnvironment(
       ...(facts.effort === undefined ? [] : [sessionEffortVariable]),
       sessionApiOriginVariable,
       sessionBearerVariable,
+      sessionTenantVariable,
+      sessionProjectVariable,
     ]),
     ...credential.environment,
     ...sessionShellCredential(task, facts, bearer),
@@ -813,8 +819,9 @@ function sessionRuntimeEnvironment(
 }
 
 /**
- * What the session's shell is handed of the API: its origin and the bearer,
- * where the facts say `shellCredentialHanded`, and nothing otherwise.
+ * What the session's shell is handed of the API: its origin, the bearer and
+ * the session's tenant and project, where the facts say
+ * `shellCredentialHanded`, and nothing otherwise.
  */
 function sessionShellCredential(task, facts, bearer) {
   if (facts.shellCredentialHanded !== true) return {};
@@ -823,9 +830,14 @@ function sessionShellCredential(task, facts, bearer) {
     throw new Error("the session's shell is to be handed no API origin");
   if (typeof bearer !== "string" || bearer.length === 0)
     throw new Error("the session's shell is to be handed no bearer");
+  for (const named of ["tenant", "project"])
+    if (typeof facts[named] !== "string" || facts[named].length === 0)
+      throw new Error(`the session's shell is to be handed no ${named}`);
   return {
     [sessionApiOriginVariable]: origin,
     [sessionBearerVariable]: bearer,
+    [sessionTenantVariable]: facts.tenant,
+    [sessionProjectVariable]: facts.project,
   };
 }
 

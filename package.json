@@ -6,6 +6,9 @@
     "node": ">=24"
   },
   "private": true,
+  "bin": {
+    "chuggy": "chuggyCommand.mjs"
+  },
   "dependencies": {
     "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.115.0/chuggy-worker-contract-1.115.0.tgz"
   },
@@ -37,6 +40,7 @@
     "check.sh",
     "checks.mjs",
     "chuggyApi.mjs",
+    "chuggyCommand.mjs",
     "chuggyTools.mjs",
     "claude.mjs",
     "claudeControl.mjs",

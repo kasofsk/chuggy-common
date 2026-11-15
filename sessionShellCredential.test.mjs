@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   sessionApiOriginVariable,
   sessionBearerVariable,
+  sessionProjectVariable,
+  sessionTenantVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
 
 import {
@@ -19,6 +21,13 @@ import {
 
 const thread = { ...facts, kind: "Thread", capabilities: [...threadRoster] };
 
+const handedOnly = [
+  sessionApiOriginVariable,
+  sessionBearerVariable,
+  sessionTenantVariable,
+  sessionProjectVariable,
+];
+
 async function environmentOf(sessionFacts, services = {}) {
   const plane = planeOf([], sessionFacts);
   const { seen, query } = queryOf(() => []);
@@ -26,23 +35,28 @@ async function environmentOf(sessionFacts, services = {}) {
   return seen.options.env;
 }
 
-test("a session its facts mark shellCredentialHanded hands its shell the API's origin and its own bearer", async () => {
-  const env = await environmentOf({ ...thread, shellCredentialHanded: true });
+test("a session its facts mark shellCredentialHanded hands its shell the API's origin, its own bearer and its facts' tenant and project", async () => {
+  const env = await environmentOf({
+    ...thread,
+    tenant: "shell-tenant",
+    project: "shell-project",
+    shellCredentialHanded: true,
+  });
 
   assert.equal(env[sessionApiOriginVariable], task.api.url);
   assert.equal(env[sessionBearerVariable], bearer);
+  assert.equal(env[sessionTenantVariable], "shell-tenant");
+  assert.equal(env[sessionProjectVariable], "shell-project");
 });
 
-test("a session told nothing hands its shell neither, and the fact changes nothing else of its environment", async () => {
+test("a session told nothing hands its shell none of them, and the fact changes nothing else of its environment", async () => {
   const handed = await environmentOf({
     ...thread,
     shellCredentialHanded: true,
   });
   const told = await environmentOf(thread);
 
-  assert.ok(!(sessionApiOriginVariable in told));
-  assert.ok(!(sessionBearerVariable in told));
-  const handedOnly = [sessionApiOriginVariable, sessionBearerVariable];
+  for (const name of handedOnly) assert.ok(!(name in told), name);
   assert.deepEqual(
     Object.fromEntries(
       Object.entries(handed).filter(([name]) => !handedOnly.includes(name)),
@@ -51,15 +65,32 @@ test("a session told nothing hands its shell neither, and the fact changes nothi
   );
 });
 
-test("a session told nothing hands its shell neither even where the pod inherited them", async () => {
+test("a session told nothing hands its shell none of them even where the pod inherited them", async () => {
   const told = await environmentOf(thread, {
     environment: {
       ...environment,
       [sessionApiOriginVariable]: "http://elsewhere.test",
       [sessionBearerVariable]: "chgs_inherited",
+      [sessionTenantVariable]: "inherited-tenant",
+      [sessionProjectVariable]: "inherited-project",
     },
   });
 
-  assert.ok(!(sessionApiOriginVariable in told));
-  assert.ok(!(sessionBearerVariable in told));
+  for (const name of handedOnly) assert.ok(!(name in told), name);
+});
+
+test("a session handed its shell credential hands its facts' tenant and project over what the pod inherited", async () => {
+  const handed = await environmentOf(
+    { ...thread, shellCredentialHanded: true },
+    {
+      environment: {
+        ...environment,
+        [sessionTenantVariable]: "inherited-tenant",
+        [sessionProjectVariable]: "inherited-project",
+      },
+    },
+  );
+
+  assert.equal(handed[sessionTenantVariable], thread.tenant);
+  assert.equal(handed[sessionProjectVariable], thread.project);
 });
