@@ -38,11 +38,6 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 
 import {
-  workerContractCredentialOutcome,
-  workerContractRunContext,
-  workerContractRunCredential,
-} from "@chuggy/worker-contract/workerContract";
-import {
   nativeHttpPageItemsMax,
   runContextPageReadingsMax,
   runContextReadingsMax,
@@ -72,10 +67,10 @@ import {
 } from "./rateLimit.mjs";
 import { workerRequest } from "./transport.mjs";
 import {
-  answeredVersion,
+  answeredPeer,
+  peerImplements,
   rosterLabel,
   routePath,
-  versionReaches,
 } from "./wire.mjs";
 
 /** The interval a run's transcript is shipped on, whether or not anyone reads. */
@@ -506,17 +501,14 @@ function runTotalsSoFar(state) {
  * as a hold is `rateLimit.mjs`'s, folded from the frames as they went past.
  *
  * Exhausted credits outrank a hold, since no reset brings them back, and are
- * labelled so only to a plane whose answers named `version` at or past the
- * one that takes the label; to another, the run is labelled as though its
+ * labelled so only to a plane `peer` that implements `CredentialOutcome`,
+ * which takes the label; to another, the run is labelled as though its
  * credits had not run out.
  */
-export function endedEvidence(result, planeRefused, sightings, step, version) {
+export function endedEvidence(result, planeRefused, sightings, step, peer) {
   const subtype = typeof result?.subtype === "string" ? result.subtype : "";
   if (step !== undefined) return step;
-  if (
-    creditsExhausted(sightings) &&
-    versionReaches(version, workerContractCredentialOutcome)
-  )
+  if (creditsExhausted(sightings) && peerImplements(peer, "CredentialOutcome"))
     return runCreditsExhausted;
   if (rateLimited(sightings)) return runRateLimited;
   if (subtype === turnsExhaustedSubtype) return runTurnsExhausted;
@@ -556,9 +548,9 @@ export function runLimit(reset, credential) {
   };
 }
 
-/** The credential the run was told it runs on, named only to a plane whose answers name the version that takes it. */
+/** The credential the run was told it runs on, named only to a plane whose answers say it implements `RunCredential`. */
 function runCredentialNamed(state) {
-  return versionReaches(state.version, workerContractRunCredential)
+  return peerImplements(state.peer, "RunCredential")
     ? state.credential
     : undefined;
 }
@@ -573,7 +565,7 @@ function runEndedBody(state, step, absent) {
     state.planeRefused,
     state.sightings,
     step,
-    state.version,
+    state.peer,
   );
   const limit =
     evidence === runRateLimited
@@ -622,7 +614,7 @@ function evidenceState(scrub, credential) {
     messages: new Set(),
     turns: [],
     pending: [],
-    version: undefined,
+    peer: undefined,
     contextRecorded: 0,
     contextPending: [],
     contextRefused: false,
@@ -692,7 +684,7 @@ function foldContext(state, { cause, afterTurn, compaction, window }) {
 
 /** A turn row as the plane is offered it: without the subagent it names where the plane does not take that. */
 function offeredTurn(state, turn) {
-  if (versionReaches(state.version, workerContractRunContext)) return turn;
+  if (peerImplements(state.peer, "RunContext")) return turn;
   const offered = { ...turn };
   delete offered.parentToolUseId;
   return offered;
@@ -787,12 +779,12 @@ function refuse(state, warn, what, failure) {
 }
 
 /**
- * The readings waiting, in pages, to a plane whose answers name the version
- * that takes them. One refused drops those waiting and stops the readings, and
+ * The readings waiting, in pages, to a plane whose answers say it implements
+ * `RunContext`. One refused drops those waiting and stops the readings, and
  * nothing else of the run's evidence.
  */
 async function deliverReadings(state, call, warn) {
-  if (!versionReaches(state.version, workerContractRunContext)) return;
+  if (!peerImplements(state.peer, "RunContext")) return;
   try {
     for (
       let page = 0;
@@ -885,11 +877,12 @@ export function runEvidenceRecorder(task, bearer, scrub, services = {}) {
     credential,
   } = services;
   const state = evidenceState(scrub, credential);
-  // Every answer names the plane's release, and the latest named is what the
-  // optional evidence is offered to.
+  // Every answer names the plane's release and may list its features, and
+  // the latest answer naming a release is what the optional evidence is
+  // offered to.
   const call = async (path, init) => {
     const answer = await request(task, bearer, path, init);
-    state.version = answeredVersion(answer) ?? state.version;
+    state.peer = answeredPeer(answer) ?? state.peer;
     return answer;
   };
   // One flush at a time: a tick that finds one in flight starts no other, and

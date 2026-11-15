@@ -249,7 +249,7 @@ function chatHostReady(state, supervisor, ready) {
   supervisor.phase = "Ready";
   supervisor.ready = ready;
   state.seams.log(
-    `the supervisor is ready for ${String(ready.sessionsMax)} sessions, built against contract ${ready.contractRelease}`,
+    `the supervisor is ready for ${String(ready.sessionsMax)} sessions, speaking contract ${ready.contractRelease}`,
   );
   supervisor.answered({ ready });
 }

@@ -22,8 +22,8 @@
  * A poll may name the memory room the pool offers jobs and its ceiling for
  * one, each only where the contract reads it, since a plane refuses a poll
  * naming one it cannot read; and how long the plane may wait before it
- * answers. A plane whose answers name `workerContractMemoryRoom` or later
- * gives only jobs that fit the room, and says whether one waits that would.
+ * answers. A plane whose answers say it implements `MemoryRoom` gives only
+ * jobs that fit the room, and says whether one waits that would.
  * The client keeps whether the last answer said so, which is how its pool
  * knows to claim by room.
  *
@@ -31,11 +31,11 @@
  * sit idle, where its client is given that, and the answer names it the
  * image its sessions run in, which is passed on. A host given the
  * capabilities its threads may hold names them only to a plane whose last
- * answer named `workerContractSessionCapabilitiesNamed` or later, and asks
- * any other for no session, so none is claimed without them.
+ * answer said it implements `SessionCapabilitiesNamed`, and asks any other
+ * for no session, so none is claimed without them.
  *
- * A member's personal runner names on every poll, whatever version the plane
- * last answered, the credentials its terms name for each agent, and only as a
+ * A member's personal runner names on every poll, whatever the plane last
+ * answered, the credentials its terms name for each agent, and only as a
  * header `workerRunnerCredentialsOf` reads back as those names, since the
  * plane reads one it does not as naming none. An answer may name how the
  * credential stopped each job it stops, and which credentials the poll named
@@ -44,10 +44,10 @@
  * answers it none yet.
  *
  * A runner's report of itself is posted under the token it is given, and is
- * taken only where the plane answers 204; the client keeps the version the
- * last poll's answer named, none where it named none, which is how its
- * runner knows whether a poll reached the plane and whether the plane takes a
- * report.
+ * taken only where the plane answers 204; the client keeps the release and
+ * the features the last poll's answer named, nothing where it named no
+ * release, which is how its runner knows whether a poll reached the plane and
+ * whether the plane takes a report.
  */
 
 import { TextDecoder, isDeepStrictEqual } from "node:util";
@@ -56,11 +56,7 @@ import { URL } from "node:url";
 import {
   contractVersionRefusalSchema,
   contractVersionRefusalStatus,
-  workerContractHeader,
-  workerContractMemoryRoom,
   workerContractRelease,
-  workerContractSessionCapabilitiesNamed,
-  workerContractVersionOf,
 } from "@chuggy/worker-contract/workerContract";
 import {
   workerPoolCapabilitiesMax,
@@ -84,8 +80,8 @@ import {
 } from "@chuggy/worker-contract/workerPool";
 
 import { boundedResponseBytes } from "./boundedResponse.mjs";
-import { workerPlaneHeaders } from "./transport.mjs";
-import { versionReaches } from "./wire.mjs";
+import { workerPlaneAnswered, workerPlaneHeaders } from "./transport.mjs";
+import { answeredPeer, peerImplements } from "./wire.mjs";
 
 /**
  * @typedef {import("@chuggy/worker-contract/workerPool").AssignmentOutcome} AssignmentOutcome
@@ -95,7 +91,7 @@ import { versionReaches } from "./wire.mjs";
  * @typedef {import("./poolLoop.mjs").WorkerPoolPolled} WorkerPoolPolled
  * @typedef {import("./poolLoop.mjs").WorkerPoolSettled} WorkerPoolSettled
  * @typedef {import("./poolLoop.mjs").WorkerPoolReported} WorkerPoolReported
- * @typedef {import("@chuggy/worker-contract/workerContract").WorkerContractVersion} WorkerContractVersion
+ * @typedef {import("@chuggy/worker-contract/workerContract").WorkerContractPeer} WorkerContractPeer
  *
  * @typedef {object} PoolPlaneClientSettings
  * @property {string} baseUrl
@@ -205,22 +201,16 @@ function poolPlaneUrl(settings, route) {
 
 /**
  * The poll's address. Where the settings name session capabilities it names
- * them only to a plane whose last answer, `version`, reads them, and asks any
- * other for no session.
+ * them only to a plane whose last answer, `peer`, says it reads them, and asks
+ * any other for no session.
  *
  * @param {PoolPlaneClientSettings} settings
  * @param {readonly string[]} held
  * @param {number} wanted
  * @param {number} wantedSessions
- * @param {WorkerContractVersion | undefined} version
+ * @param {WorkerContractPeer | undefined} peer
  */
-function poolPlaneAssignmentsUrl(
-  settings,
-  held,
-  wanted,
-  wantedSessions,
-  version,
-) {
+function poolPlaneAssignmentsUrl(settings, held, wanted, wantedSessions, peer) {
   const url = poolPlaneUrl(settings, workerPoolPollRoute);
   for (const assignment of held)
     url.searchParams.append(workerPoolPollQuery.held, assignment);
@@ -228,7 +218,7 @@ function poolPlaneAssignmentsUrl(
   const { sessionCapabilities } = settings;
   const named =
     sessionCapabilities !== undefined &&
-    versionReaches(version, workerContractSessionCapabilitiesNamed);
+    peerImplements(peer, "SessionCapabilitiesNamed");
   url.searchParams.set(
     workerPoolPollQuery.wantedSessions,
     String(sessionCapabilities === undefined || named ? wantedSessions : 0),
@@ -247,38 +237,12 @@ function poolPlaneAssignmentsUrl(
 }
 
 /**
- * The version the plane that gave an answer was built with, as the answer
- * names it, or nothing where it names none.
- *
- * @param {Response} answered
- */
-function poolPlaneVersion(answered) {
-  const release = answered.headers.get(workerContractHeader);
-  return release === null ? undefined : workerContractVersionOf(release);
-}
-
-/**
- * Whether the plane itself gave an answer, which names the release it was
- * built with.
- *
- * @param {Response} answered
- */
-function poolPlaneAnswered(answered) {
-  return poolPlaneVersion(answered) !== undefined;
-}
-
-/**
  * Whether the plane that gave an answer claims by the room a poll names.
  *
  * @param {Response} answered
  */
 function poolPlaneClaimsByRoom(answered) {
-  const version = poolPlaneVersion(answered);
-  return (
-    version !== undefined &&
-    version.major === workerContractMemoryRoom.major &&
-    version.minor >= workerContractMemoryRoom.minor
-  );
+  return peerImplements(answeredPeer(answered), "MemoryRoom");
 }
 
 /**
@@ -336,7 +300,7 @@ async function poolPlaneRefusal(answered) {
       polled: "Denied",
       evidence: `the plane does not serve worker contract ${workerContractRelease}`,
     };
-  if ((status === 404 || status === 400) && !poolPlaneAnswered(answered))
+  if ((status === 404 || status === 400) && !workerPlaneAnswered(answered))
     return {
       polled: "Unavailable",
       evidence: `the plane's address answered ${String(status)}, naming no release`,
@@ -409,15 +373,15 @@ async function poolPlaneReconciled(answered) {
  * @param {typeof fetch} fetcher
  * @param {string} token
  * @param {{held: readonly string[], wanted: number, wantedSessions: number, terms: WorkerPoolPollTerms}} asked
- * @param {WorkerContractVersion | undefined} version the version the last answer named
- * @returns {Promise<{polled: WorkerPoolPolled, version: WorkerContractVersion | undefined}>}
+ * @param {WorkerContractPeer | undefined} peer the plane the last answer named
+ * @returns {Promise<{polled: WorkerPoolPolled, peer: WorkerContractPeer | undefined}>}
  */
 async function poolPlanePolled(
   settings,
   fetcher,
   token,
   { held, wanted, wantedSessions, terms },
-  version,
+  peer,
 ) {
   let answered;
   try {
@@ -426,7 +390,7 @@ async function poolPlanePolled(
       held,
       wanted,
       wantedSessions,
-      version,
+      peer,
     );
     const { runner } = settings;
     const withheld = new Set(terms.withheld);
@@ -453,14 +417,14 @@ async function poolPlanePolled(
         polled: "Unavailable",
         evidence: "the plane could not be reached",
       },
-      version: undefined,
+      peer: undefined,
     };
   }
   return {
     polled: await (answered.status === 200
       ? poolPlaneReconciled(answered)
       : poolPlaneRefusal(answered)),
-    version: poolPlaneVersion(answered),
+    peer: answeredPeer(answered),
   };
 }
 
@@ -503,7 +467,7 @@ function poolPlaneSettlement(answered) {
   if (status === 204) return "Settled";
   if (status === 409) return "Lost";
   if (status === 401) return "Stale";
-  if ((status === 404 || status === 400) && poolPlaneAnswered(answered))
+  if ((status === 404 || status === 400) && workerPlaneAnswered(answered))
     return "Denied";
   return "Unavailable";
 }
@@ -581,24 +545,24 @@ export function poolPlaneClient(input, fetcher = globalThis.fetch) {
   const settings = checkedPoolPlaneClientSettings(input);
   /** @type {boolean | undefined} */
   let byRoom;
-  /** @type {WorkerContractVersion | undefined} */
-  let polledVersion;
+  /** @type {WorkerContractPeer | undefined} */
+  let polledPeer;
   return {
     poll: async (token, held, wanted, wantedSessions = 0, terms = {}) => {
-      const { polled, version } = await poolPlanePolled(
+      const { polled, peer } = await poolPlanePolled(
         settings,
         fetcher,
         token,
         { held, wanted, wantedSessions, terms },
-        polledVersion,
+        polledPeer,
       );
-      polledVersion = version;
+      polledPeer = peer;
       if (polled.polled === "Reconciled")
         byRoom = polled.jobsWaiting !== undefined;
       return polled;
     },
     claimsByRoom: () => byRoom,
-    polledVersion: () => polledVersion,
+    polledPeer: () => polledPeer,
     settle: (token, assignment, outcome) =>
       poolPlaneSettled(settings, fetcher, token, assignment, outcome),
     report: (token, body) => poolPlaneReported(settings, fetcher, token, body),

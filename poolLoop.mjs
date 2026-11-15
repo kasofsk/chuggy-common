@@ -148,11 +148,11 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @property {(token: string, held: readonly string[], wanted: number, wantedSessions: number, terms?: WorkerPoolPollTerms) => Promise<WorkerPoolPolled>} poll
  * @property {(token: string, assignment: string, outcome: AssignmentOutcome) => Promise<WorkerPoolSettled>} settle
  * @property {() => boolean | undefined} [claimsByRoom] whether its last reconciled answer said whether a job waits, undefined before it has one; none, and it never does
- * @property {() => WorkerContractVersion | undefined} [polledVersion] the version its last poll's answer named, undefined where it named none or never came
+ * @property {() => WorkerContractPeer | undefined} [polledPeer] the plane its last poll's answer came from, as the answer names its release and features, undefined where it named no release or never came
  * @property {(token: string, body: string) => Promise<WorkerPoolReported>} [report] posts a runner's report, its body as JSON
  *
  * @typedef {{reported: "Reported"} | {reported: "Failed", evidence: string}} WorkerPoolReported
- * @typedef {import("@chuggy/worker-contract/workerContract").WorkerContractVersion} WorkerContractVersion
+ * @typedef {import("@chuggy/worker-contract/workerContract").WorkerContractPeer} WorkerContractPeer
  *
  * @typedef {"Ended" | "Refused" | "Unavailable"} WorkerPoolEndAnswer
  *

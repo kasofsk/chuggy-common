@@ -65,6 +65,7 @@ import {
   chuggyToolImageFiles,
   chuggyToolServer,
   chuggyToolSignal,
+  chuggyToolsUnbuilt,
   chuggyTranscriptBodyBytesMax,
   readAtPathChildCharsMax,
   sessionAllowedTools,
@@ -139,7 +140,7 @@ test("a tool the roster does not grant is never registered", () => {
   );
   assert.deepEqual(
     registered(everyCapability).sort(),
-    [...allChuggyTools].sort(),
+    allChuggyTools.filter((tool) => !chuggyToolsUnbuilt.includes(tool)).sort(),
   );
 });
 
@@ -4638,11 +4639,13 @@ test("every subset of the capabilities admits its tools and disallows the rest",
     );
     const admitted = new Set(
       held.flatMap((name) =>
-        sessionCapabilityTools[name].map((tool) =>
-          sessionBuiltInTools.includes(tool)
-            ? tool
-            : `${chuggyToolPrefix}${tool}`,
-        ),
+        sessionCapabilityTools[name]
+          .filter((tool) => !chuggyToolsUnbuilt.includes(tool))
+          .map((tool) =>
+            sessionBuiltInTools.includes(tool)
+              ? tool
+              : `${chuggyToolPrefix}${tool}`,
+          ),
       ),
     );
 
@@ -4654,6 +4657,17 @@ test("every subset of the capabilities admits its tools and disallows the rest",
       [...every].sort(),
       held.join(","),
     );
+  }
+});
+
+test("a tool not built here is disallowed to the roster holding every capability", () => {
+  const { allowedTools, disallowedTools } =
+    sessionAllowedTools(everyCapability);
+
+  for (const tool of chuggyToolsUnbuilt) {
+    const name = `${chuggyToolPrefix}${tool}`;
+    assert.ok(disallowedTools.includes(name), `${name} was not disallowed`);
+    assert.ok(!allowedTools.includes(name), `${name} was allowed`);
   }
 });
 

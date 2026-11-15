@@ -60,7 +60,7 @@
  * than the drain is charged after any turn.
  *
  * AN ANSWERED TURN CARRIES ITS READINGS OF THE CONTEXT WINDOW, to a plane whose
- * answers name the version that takes them: one per compaction its stream
+ * answers say it implements `SessionContext`: one per compaction its stream
  * marked, and one of the window as it ended, which the runtime is asked for
  * at `summary` detail, since `full` spends a token-count call per category. A
  * reading the contract would refuse, or a window the runtime does not answer
@@ -96,7 +96,6 @@ import {
   chuggyToolPrefix,
   chuggyToolServerName,
 } from "@chuggy/worker-contract/sessionTools";
-import { workerContractSessionContext } from "@chuggy/worker-contract/workerContract";
 import { leadDecisionDocumentSchema } from "@chuggy/worker-contract/workerDocuments";
 import {
   mintedCredentialDirectory,
@@ -158,7 +157,7 @@ import {
   sessionStopped,
 } from "./sessionTransport.mjs";
 import { WorkerPlaneRefusal } from "./transport.mjs";
-import { answeredVersion, rosterLabel, versionReaches } from "./wire.mjs";
+import { answeredPeer, peerImplements, rosterLabel } from "./wire.mjs";
 
 /** The failures this pod names for a turn, each one the plane's roster carries. */
 const [
@@ -1080,7 +1079,7 @@ async function settleTurn(context, turn, result) {
  * the whole answer over the field.
  */
 async function sessionTurnReadings(context) {
-  if (!versionReaches(context.version, workerContractSessionContext)) return [];
+  if (!peerImplements(context.peer, "SessionContext")) return [];
   const window = await sessionTurnWindow(context);
   return [
     ...context.compactions.map((compaction) => ({
@@ -1730,22 +1729,22 @@ export function sessionEnvelopeServices(
 
 /**
  * What a session runs on before it learns its facts. Its `request` keeps the
- * latest release a plane's answer named, which is what a turn's readings are
- * offered to.
+ * plane the latest answer naming a release came from, with the features it
+ * listed, which is what a turn's readings are offered to.
  */
 function sessionMainContext(task, bearer, { request, ...held }) {
   const context = {
     task,
     bearer,
     ...held,
-    version: undefined,
+    peer: undefined,
     mirrored: false,
     sightings: rateLimitSightings(),
     measure: sessionMeasure(),
   };
   context.request = async (...asked) => {
     const answer = await request(...asked);
-    context.version = answeredVersion(answer) ?? context.version;
+    context.peer = answeredPeer(answer) ?? context.peer;
     return answer;
   };
   return context;

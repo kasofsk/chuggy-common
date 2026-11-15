@@ -462,6 +462,15 @@ export const sessionBuiltInTools = [
 ];
 
 /**
+ * The tools of the contract's roster this package does not build yet, which
+ * no session is allowed.
+ */
+export const chuggyToolsUnbuilt = ["take_ticket", "return_ticket"];
+
+/** The routes of the tools' table that only `chuggyToolsUnbuilt` reach. */
+export const chuggyToolRoutesUnbuilt = ["ticketTake", "ticketReturn"];
+
+/**
  * Which capability admits which tool, the runtime's own and the chuggy server's
  * alike. A capability this image does not know admits nothing.
  */
@@ -494,9 +503,14 @@ export function sessionAllowedTools(capabilities) {
     ...sessionBuiltInTools,
     ...allChuggyTools.map((tool) => `${chuggyToolPrefix}${tool}`),
   ];
+  const unbuilt = new Set(
+    chuggyToolsUnbuilt.map((tool) => `${chuggyToolPrefix}${tool}`),
+  );
   const held = new Set([
     ...sessionBuiltInTools.filter((tool) => admitted.has(tool)),
-    ...chuggyToolNames(knownCapabilities(capabilities)),
+    ...chuggyToolNames(knownCapabilities(capabilities)).filter(
+      (tool) => !unbuilt.has(tool),
+    ),
   ]);
   return {
     allowedTools: every.filter((tool) => held.has(tool)),

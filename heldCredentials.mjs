@@ -12,12 +12,13 @@
  * naming the rest absent.
  *
  * A LISTED CREDENTIAL NOT DELIVERED IS THE ATTEMPT'S FAILURE. A job holds only
- * the credentials its configuration lists, so to a plane whose answer names
- * `workerContractRunCredentialAbsent` or later, every absence is logged and the
- * first ends the attempt under its own label, carrying the credential and why.
- * A plane before it cannot say why and refuses the label, so there an absence
- * is logged and fails nothing. A refusal or an outage is the attempt's failure
- * at every version: a plane that could not say is no reason to run without it.
+ * the credentials its configuration lists, so to a plane whose answer says it
+ * implements `RunCredentialAbsent`, every absence is logged and the first ends
+ * the attempt under its own label, carrying the credential and why. Any other
+ * plane cannot say why and refuses the label, so there an absence is logged
+ * and fails nothing. A refusal or an outage is the attempt's failure whatever
+ * the plane implements: a plane that could not say is no reason to run
+ * without it.
  *
  * THE SECRET IS WRITTEN AND NEVER PASSED. Each is written to a file of its own
  * in the minted directory, which only this pod's user reads, and a job's
@@ -27,18 +28,13 @@
  * its placeholders name filled in. Each file is written under a name of its
  * own beside it and then renamed, so no reader sees part of one.
  *
- * THE PLANE'S VERSION CHOOSES THE SHAPE. A plane whose answer names
- * `workerContractCredentialBundles` or later serves bundles and names those it
- * does not serve; any other serves single secrets and names none.
+ * WHAT THE PLANE IMPLEMENTS CHOOSES THE SHAPE. A plane whose answer says it
+ * implements `CredentialBundles` serves bundles and names those it does not
+ * serve; any other serves single secrets and names none.
  */
 
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-
-import {
-  workerContractCredentialBundles,
-  workerContractRunCredentialAbsent,
-} from "@chuggy/worker-contract/workerContract";
 
 import {
   heldCredentialFilePlaceholder,
@@ -50,7 +46,7 @@ import {
 
 import { RunStepFailure, runCredentialAbsent } from "./runEvidence.mjs";
 import { workerRequest } from "./transport.mjs";
-import { answeredVersion, versionReaches } from "./wire.mjs";
+import { answeredPeer, peerImplements } from "./wire.mjs";
 
 /** The route an attempt asks for its held credentials through. */
 export const workerHeldCredentialsPath = workerPlaneRoutes.heldCredentials.path;
@@ -90,21 +86,21 @@ export async function heldCredentialFileWritten(
 }
 
 /**
- * The plane's answer, refused where it serves a shape the version `version`
- * does not, a name not asked, or one no file can be named by.
+ * The plane's answer, refused where it serves a shape the plane `peer` does
+ * not implement, a name not asked, or one no file can be named by.
  */
-function heldCredentialsRead(body, asked, version) {
+function heldCredentialsRead(body, asked, peer) {
   const answer = workerHeldCredentialsAnswerSchema.safeParse(body);
   if (!answer.success)
     throw new Error(
       "the worker plane answered held credentials this pod cannot read",
     );
-  const bundles = versionReaches(version, workerContractCredentialBundles);
+  const bundles = peerImplements(peer, "CredentialBundles");
   for (const served of answer.data.credentials) {
     const { credential } = served;
     if (Object.hasOwn(served, "files") !== bundles)
       throw new Error(
-        `the worker plane answered a held credential in a shape its version does not serve: ${credential}`,
+        `the worker plane answered a held credential in a shape it does not implement: ${credential}`,
       );
     if (!asked.includes(credential))
       throw new Error(
@@ -199,9 +195,9 @@ export async function heldCredentialPlacedWritten(
 }
 
 /**
- * The plane's answer to an ask for the names `asked`: the version it answered
- * under, each credential it serves, and each it names absent. `signal` aborts
- * the ask and `transport` is handed to `request`.
+ * The plane's answer to an ask for the names `asked`: the plane that answered
+ * as its headers name it, each credential it serves, and each it names absent.
+ * `signal` aborts the ask and `transport` is handed to `request`.
  */
 export async function heldCredentialsAsked({
   task,
@@ -225,13 +221,13 @@ export async function heldCredentialsAsked({
     },
     ...(transport === undefined ? [] : [transport]),
   );
-  const version = answeredVersion(response);
+  const peer = answeredPeer(response);
   return {
-    version,
+    peer,
     ...heldCredentialsRead(
       await response.json().catch(() => undefined),
       asked,
-      version,
+      peer,
     ),
   };
 }
@@ -276,7 +272,7 @@ export async function heldCredentials({
   const [absent] = answered.absent;
   if (
     absent !== undefined &&
-    versionReaches(answered.version, workerContractRunCredentialAbsent)
+    peerImplements(answered.peer, "RunCredentialAbsent")
   )
     throw new RunStepFailure(
       runCredentialAbsent,

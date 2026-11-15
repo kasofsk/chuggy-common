@@ -2,12 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  workerContractFeatures,
+  workerContractFeaturesHeader,
+  workerContractFeaturesOf,
   workerContractHeader,
   workerContractRelease,
 } from "@chuggy/worker-contract/workerContract";
 
 import { pausedClock } from "./clock.fixture.mjs";
 import {
+  workerFeaturesImplemented,
+  workerFeaturesUnimplemented,
   workerPlaneAwayMillisecondsMax,
   WorkerPlaneRefusal,
   workerRequest,
@@ -57,7 +62,7 @@ test("a refused connection is retried in the same worker", async () => {
   assert.equal(requests[0].init.headers.authorization, "Bearer secret");
 });
 
-test("every request names the contract release the image was built with, whatever headers its caller sets", async () => {
+test("every request names the contract release it speaks and lists the features this package implements, whatever headers its caller sets", async () => {
   const requests = [];
   await workerRequest(
     task,
@@ -68,6 +73,7 @@ test("every request names the contract release the image was built with, whateve
       headers: {
         "content-type": "text/plain",
         [workerContractHeader]: "0.0.0",
+        [workerContractFeaturesHeader]: "Unlisted",
       },
     },
     {
@@ -78,11 +84,28 @@ test("every request names the contract release the image was built with, whateve
     },
   );
 
-  assert.deepEqual(requests[0].headers, {
+  const { [workerContractFeaturesHeader]: listed, ...headers } =
+    requests[0].headers;
+  assert.deepEqual(headers, {
     authorization: "Bearer secret",
     "content-type": "text/plain",
     [workerContractHeader]: workerContractRelease,
   });
+  assert.deepEqual(workerContractFeaturesOf(listed), [
+    ...workerFeaturesImplemented,
+  ]);
+});
+
+/**
+ * Catches a move of the lock that brings a feature nobody decided about, and a
+ * feature listed that the contract no longer names.
+ */
+test("every feature the contract names is either implemented here or named as not, and no other is either", () => {
+  const roster = Object.keys(workerContractFeatures);
+  const named = [...workerFeaturesImplemented, ...workerFeaturesUnimplemented];
+
+  assert.deepEqual([...named].sort(), [...roster].sort());
+  assert.equal(new Set(named).size, named.length);
 });
 
 /**
