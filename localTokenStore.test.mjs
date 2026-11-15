@@ -1,113 +1,257 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { setTimeout } from "node:timers";
+import { fileURLToPath, URL, URLSearchParams } from "node:url";
+import { promisify } from "node:util";
+
+import {
+  signInStoreDirectory,
+  signInStoreDraftName,
+  signInStoreFileName,
+  signInStoreLockFree,
+  signInStoreLockName,
+  signInStoreLockSecsMax,
+  signInStoreLockWord,
+  signInStoreText,
+} from "@chuggy/worker-contract/signInStore";
 
 import {
   localTokenStore,
-  localTokenStoreLockHeldMsMax,
   localTokenStoreLockWaitMsMax,
 } from "./localTokenStore.mjs";
 
+const origin = "https://chuggy.test";
+const deadPid = 999_999_999;
+
 async function directoryOf(t) {
-  const directory = await mkdtemp(join(tmpdir(), "local-token-store-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  return directory;
+  const home = await mkdtemp(join(tmpdir(), "local-token-store-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  return signInStoreDirectory({ home, configHome: undefined });
 }
 
-test("a token written is read back, the person's alone, and forgotten on clear", async (t) => {
-  const path = join(await directoryOf(t), "config", "renewal");
-  const store = localTokenStore(path);
+/** A lock as the contract lays it out, saying `word`. */
+async function lockSaying(directory, word) {
+  await mkdir(join(directory, signInStoreLockName), { recursive: true });
+  await writeFile(join(directory, signInStoreLockName, word), "");
+}
+
+function lockRead(directory) {
+  return readdir(join(directory, signInStoreLockName));
+}
+
+/** Ports whose clock moves only by the waits a hold makes. */
+function pacedPorts(holderAlive) {
+  const clock = { nowMs: Date.now() };
+  return {
+    clock,
+    ports: {
+      holderAlive,
+      nowMs: () => clock.nowMs,
+      wait: async (ms) => {
+        clock.nowMs += ms;
+      },
+    },
+  };
+}
+
+test("a token is kept in the site's file in the contract's store, as the contract writes it, the person's alone", async (t) => {
+  const directory = await directoryOf(t);
+  const store = localTokenStore({ directory, origin });
   assert.equal(await store.read(), undefined);
-  await store.write("renewal-one");
-  await store.write("renewal-two");
-  assert.equal(await store.read(), "renewal-two");
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  await store.locked(() => store.write("renewal-one"));
+  await store.locked(() => store.write("renewal-two"));
+  const file = join(directory, signInStoreFileName(origin));
+  assert.equal(await readFile(file, "utf8"), signInStoreText("renewal-two"));
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  assert.equal((await stat(directory)).mode & 0o777, 0o700);
   await store.clear();
   assert.equal(await store.read(), undefined);
 });
 
-test("a second hold waits for the first to end", async (t) => {
-  const store = localTokenStore(join(await directoryOf(t), "renewal"));
-  const order = [];
-  let release;
-  let held;
-  const holding = new Promise((resolve) => {
-    held = resolve;
-  });
-  const first = store.locked(
-    () =>
-      new Promise((resolve) => {
-        order.push("first held");
-        release = resolve;
-        held();
-      }),
-  );
-  await holding;
-  const second = store.locked(async () => {
-    order.push("second held");
-  });
-  await new Promise((resolve) => setTimeout(resolve, 250));
-  assert.deepEqual(order, ["first held"]);
-  release();
-  await first;
-  await second;
-  assert.deepEqual(order, ["first held", "second held"]);
+test("a token another program wrote in the store is read, and one it did not write as the contract does is none", async (t) => {
+  const directory = await directoryOf(t);
+  await mkdir(directory, { recursive: true });
+  const file = join(directory, signInStoreFileName(origin));
+  await writeFile(file, signInStoreText("renewal-setup"));
+  const store = localTokenStore({ directory, origin });
+  assert.equal(await store.read(), "renewal-setup");
+  await writeFile(file, "two words\n");
+  assert.equal(await store.read(), undefined);
 });
 
-test("a lock whose holder is gone is taken, and one still held past the wait raises", async (t) => {
-  const path = join(await directoryOf(t), "renewal");
-  await writeFile(`${path}.lock`, "4242\n");
-  const abandoned = localTokenStore(path, { holderAlive: () => false });
-  assert.equal(await abandoned.locked(async () => "renewed"), "renewed");
-  await assert.rejects(readFile(`${path}.lock`), { code: "ENOENT" });
+test("a hold leaves the lock free as the contract says it, and names its holder while held", async (t) => {
+  const directory = await directoryOf(t);
+  const store = localTokenStore({ directory, origin });
+  const held = await store.locked(() => lockRead(directory));
+  assert.equal(held.length, 1);
+  assert.match(held[0], new RegExp(`^${String(process.pid)}\\.\\d+$`, "u"));
+  assert.deepEqual(await lockRead(directory), [signInStoreLockFree]);
+  await store.locked(async () => {});
+  assert.deepEqual(await lockRead(directory), [signInStoreLockFree]);
+});
 
-  await writeFile(`${path}.lock`, "4242\n");
-  let nowMs = Date.now();
-  const startedMs = nowMs;
-  const held = localTokenStore(path, {
-    holderAlive: () => true,
-    nowMs: () => nowMs,
-    wait: async (ms) => {
-      nowMs += ms;
-    },
-  });
+test("a lock another program holds is waited on, and given up on past the wait without running the renewal", async (t) => {
+  const directory = await directoryOf(t);
+  const word = signInStoreLockWord(process.pid, Date.now());
+  await lockSaying(directory, word);
+  const { clock, ports } = pacedPorts(() => true);
+  const startedMs = clock.nowMs;
   let ran = false;
   await assert.rejects(
-    held.locked(async () => {
+    localTokenStore({ directory, origin }, ports).locked(async () => {
       ran = true;
     }),
     /held the sign-in lock/,
   );
   assert.equal(ran, false);
-  assert.ok(nowMs - startedMs >= localTokenStoreLockWaitMsMax);
-  await readFile(`${path}.lock`);
+  assert.ok(clock.nowMs - startedMs >= localTokenStoreLockWaitMsMax);
+  assert.deepEqual(await lockRead(directory), [word]);
 });
 
-test("a lock older than any renewal holds one is taken whoever it names, and a younger one is waited on", async (t) => {
-  const path = join(await directoryOf(t), "renewal");
-  await writeFile(`${path}.lock`, `${String(process.pid)}\n`);
-  const startedMs = Date.now();
-  let nowMs = startedMs;
-  const store = localTokenStore(path, {
-    nowMs: () => nowMs,
-    wait: async (ms) => {
-      nowMs += ms;
-    },
-  });
-  await assert.rejects(
-    store.locked(async () => "taken"),
-    /held the sign-in lock/,
+test("a lock whose holder is gone, or older than any hold lasts, is taken from its word", async (t) => {
+  const directory = await directoryOf(t);
+  await lockSaying(directory, signInStoreLockWord(deadPid, Date.now()));
+  const gone = localTokenStore(
+    { directory, origin },
+    pacedPorts(() => false).ports,
   );
-  nowMs = startedMs + localTokenStoreLockHeldMsMax + 1_000;
-  assert.equal(await store.locked(async () => "taken"), "taken");
+  assert.equal(await gone.locked(async () => "renewed"), "renewed");
+  assert.deepEqual(await lockRead(directory), [signInStoreLockFree]);
+
+  await rm(join(directory, signInStoreLockName), { recursive: true });
+  const takenAtMs = Date.now();
+  await lockSaying(directory, signInStoreLockWord(process.pid, takenAtMs));
+  const { clock, ports } = pacedPorts(() => true);
+  clock.nowMs = takenAtMs + signInStoreLockSecsMax * 1_000 + 1;
+  const old = localTokenStore({ directory, origin }, ports);
+  assert.equal(await old.locked(async () => "renewed"), "renewed");
 });
 
-test("a held lock names its holder whole", async (t) => {
-  const path = join(await directoryOf(t), "renewal");
-  const store = localTokenStore(path);
-  const seen = await store.locked(async () => readFile(`${path}.lock`, "utf8"));
-  assert.equal(seen, `${String(process.pid)}\n`);
+test("a hold removes what a write cut short left in the store, whichever program's", async (t) => {
+  const directory = await directoryOf(t);
+  await mkdir(directory, { recursive: true });
+  const draft = signInStoreDraftName(signInStoreFileName(origin), deadPid);
+  await writeFile(join(directory, draft), "renewal-half");
+  const store = localTokenStore({ directory, origin });
+  await store.locked(async () => {});
+  assert.deepEqual((await readdir(directory)).toSorted(), [
+    signInStoreLockName,
+  ]);
+});
+
+test("a sign-in an earlier copy kept is moved into the store once, and kept only where the store holds none", async (t) => {
+  const directory = await directoryOf(t);
+  const formerly = join(
+    directory,
+    "..",
+    "earlier",
+    "https%3A%2F%2Fchuggy.test",
+  );
+  await mkdir(join(formerly, ".."), { recursive: true });
+  await writeFile(formerly, "renewal-earlier\n");
+  const store = localTokenStore({ directory, origin, formerly });
+  assert.equal(await store.locked(() => store.read()), "renewal-earlier");
+  await assert.rejects(readFile(formerly), { code: "ENOENT" });
+  await store.locked(() => store.write("renewal-next"));
+  assert.equal(await store.locked(() => store.read()), "renewal-next");
+
+  await writeFile(formerly, "renewal-stale\n");
+  assert.equal(await store.locked(() => store.read()), "renewal-next");
+  await assert.rejects(readFile(formerly), { code: "ENOENT" });
+});
+
+test("an earlier copy's file that is the store's own file is left where it is", async (t) => {
+  const directory = await directoryOf(t);
+  await mkdir(directory, { recursive: true });
+  const formerly = join(directory, signInStoreFileName(origin));
+  await writeFile(formerly, "renewal-earlier\n");
+  const store = localTokenStore({ directory, origin, formerly });
+  assert.equal(await store.locked(() => store.read()), "renewal-earlier");
+  assert.equal(await readFile(formerly, "utf8"), "renewal-earlier\n");
+});
+
+/** A site and issuer over HTTP whose token endpoint refuses a renewal token spent before. */
+async function issuerOf(t) {
+  const spent = new Set();
+  const outcome = { current: "renewal-0", granted: 0, replayed: [] };
+  const server = createServer((request, response) => {
+    let body = "";
+    request.on("data", (chunk) => {
+      body += chunk;
+    });
+    request.on("end", () => {
+      const base = `http://127.0.0.1:${String(server.address().port)}`;
+      const answer = (status, json) => {
+        response.writeHead(status, { "content-type": "application/json" });
+        response.end(JSON.stringify(json));
+      };
+      if (request.url === "/config.json")
+        return answer(200, { issuer: base, audience: `${base}/api` });
+      if (request.url === "/.well-known/openid-configuration")
+        return answer(200, {
+          issuer: base,
+          authorization_endpoint: `${base}/auth`,
+          token_endpoint: `${base}/token`,
+        });
+      const token = new URLSearchParams(body).get("refresh_token");
+      if (spent.has(token) || token !== outcome.current) {
+        outcome.replayed.push(token);
+        return answer(400, { error: "invalid_grant" });
+      }
+      spent.add(token);
+      outcome.granted += 1;
+      outcome.current = `renewal-${String(outcome.granted)}`;
+      return answer(200, {
+        access_token: `access-${String(outcome.granted)}`,
+        refresh_token: outcome.current,
+        expires_in: 0,
+      });
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  return { site: `http://127.0.0.1:${String(server.address().port)}`, outcome };
+}
+
+test("processes renewing one sign-in at once never spend the same token twice", async (t) => {
+  const { site, outcome } = await issuerOf(t);
+  const directory = await directoryOf(t);
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, signInStoreFileName(site)),
+    signInStoreText("renewal-0"),
+  );
+  const processes = 4;
+  const renewals = 5;
+  const fixture = fileURLToPath(
+    new URL("./localTokenStore.fixture.mjs", import.meta.url),
+  );
+  await Promise.all(
+    Array.from({ length: processes }, () =>
+      promisify(execFile)(process.execPath, [
+        fixture,
+        site,
+        directory,
+        String(renewals),
+      ]),
+    ),
+  );
+  assert.deepEqual(outcome.replayed, []);
+  assert.equal(outcome.granted, processes * renewals);
+  assert.equal(
+    await readFile(join(directory, signInStoreFileName(site)), "utf8"),
+    signInStoreText(outcome.current),
+  );
 });

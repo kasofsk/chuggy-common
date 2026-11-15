@@ -34,6 +34,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { URL } from "node:url";
 
@@ -41,6 +42,7 @@ import {
   chuggyToolServerName,
   nativeHttpMediaType,
 } from "@chuggy/worker-contract/sessionTools";
+import { signInStoreDirectory } from "@chuggy/worker-contract/signInStore";
 import {
   workerRunnerReleasesPinnedRoute,
   workerRunnerReleasesPinnedSchema,
@@ -303,24 +305,34 @@ export function localToolAskRefusal({ site, workspace, project }) {
   return undefined;
 }
 
-/** The file in `directory` one site's renewal token is kept in. */
+/** The file in `directory` an earlier copy kept one site's renewal token in. */
 export function localToolSignInFile(directory, site) {
   return join(directory, encodeURIComponent(new URL(site).origin));
 }
 
 /**
- * One project's tools served on stdio under the sign-in kept in `signIns`,
- * until the agent closes stdio and any update it started has ended. The ask is
- * `localToolAskRefusal`'s to check first; a `fetch` not given is the global
- * one, and `updates` not given installs nothing.
+ * One project's tools served on stdio under the person's sign-in in the
+ * contract's shared store, placed by `surroundings` or else by this process's
+ * home and `XDG_CONFIG_HOME`, until the agent closes stdio and any update it
+ * started has ended. A sign-in an earlier copy kept in `signIns` is moved into
+ * the store. The ask is `localToolAskRefusal`'s to check first; a `fetch` not
+ * given is the global one, and `updates` not given installs nothing.
  *
- * @param {{site: string, workspace: string, project: string, version: string, signIns: string, fetch?: typeof globalThis.fetch, updates?: LocalToolUpdates}} asked
+ * @param {{site: string, workspace: string, project: string, version: string, signIns: string, surroundings?: import("@chuggy/worker-contract/signInStore").SignInStoreSurroundings, fetch?: typeof globalThis.fetch, updates?: LocalToolUpdates}} asked
  */
 export async function localToolServed(asked, sdk, stdin = process.stdin) {
   const { site, workspace, project, version, signIns, fetch, updates } = asked;
+  const surroundings = asked.surroundings ?? {
+    home: homedir(),
+    configHome: process.env.XDG_CONFIG_HOME,
+  };
   const signIn = localSignIn(
     site,
-    localTokenStore(localToolSignInFile(signIns, site)),
+    localTokenStore({
+      directory: signInStoreDirectory(surroundings),
+      origin: new URL(site).origin,
+      formerly: localToolSignInFile(signIns, site),
+    }),
     { fetch },
   );
   try {
