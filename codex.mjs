@@ -111,8 +111,12 @@ function codexEffortArguments(task) {
  * to turn on, so it is turned off here.
  */
 export function codexInvocation(task, run) {
+  return ["exec", ...codexOptions(task, run), "--", task.briefing.text];
+}
+
+/** The options of a run and of a resumed one, which `codex exec resume` takes as `codex exec` does. */
+function codexOptions(task, run) {
   return [
-    "exec",
     "--json",
     "--ignore-user-config",
     "--ignore-rules",
@@ -126,8 +130,21 @@ export function codexInvocation(task, run) {
     run.resultSchema,
     ...run.shellArguments,
     ...configuredArguments(task),
+  ];
+}
+
+/**
+ * The same run carrying on in the thread `session` named, told `run.prompt`,
+ * which follows the thread after `--` as the briefing follows `codex exec`.
+ */
+export function codexResumeInvocation(task, session, run) {
+  return [
+    "exec",
+    "resume",
+    ...codexOptions(task, run),
     "--",
-    task.briefing.text,
+    session,
+    run.prompt,
   ];
 }
 
@@ -336,9 +353,9 @@ function codexFrame(folded = {}, event) {
   return folded;
 }
 
-/** What the stream said of how the run ended: Codex's own message, quoted and never read. */
+/** What the stream said of how the run ended: Codex's own message, quoted and never read, and the thread it ran in. */
 function codexEnded(_resultEvent, folded) {
-  return { sentence: folded?.sentence, session: undefined };
+  return { sentence: folded?.sentence, session: folded?.thread };
 }
 
 /** What the run's rollout, under the Codex home it was started with, declared of its usage and a limit. */
@@ -356,6 +373,10 @@ export const codexAgent = {
   executable: coreRuntime.codex,
   credential: "codex-auth",
   invocation: codexInvocation,
+  resumeInvocation: codexResumeInvocation,
+  // A limit is not waited out: a resumed thread's rollout may still hold the
+  // limit that stopped it, which the run after would read as its own.
+  resumesHeld: false,
   result: codexResult,
   frame: codexFrame,
   ended: codexEnded,

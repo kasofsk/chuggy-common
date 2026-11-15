@@ -686,7 +686,8 @@ function runAgentEnded(
     missing === undefined
       ? undefined
       : runHoldDecided({
-          resumable: agent.resumeInvocation !== undefined,
+          resumable:
+            agent.resumeInvocation !== undefined && agent.resumesHeld !== false,
           sightings: context.evidence.sightings(),
           credential: context.agentCredential?.name,
           session,
@@ -726,8 +727,10 @@ async function runAgentHeld(context, { untilMs, window }, clock) {
  * Processes of the agent run from `first` until one finishes: what it
  * finished with, and the conversation it finished in where its runtime named
  * one. A process held at a limit is followed by the same conversation resumed
- * once the limit is waited out. `turns` carries the environment and stream
- * every process shares and the holds counted across them.
+ * once the limit is waited out, told nothing new, where its runtime resumes
+ * one held. `turns` carries the environment, the arguments `invocation` was
+ * given and the stream every process shares, and the holds counted across
+ * them.
  */
 async function runAgentTurns(context, task, turns, first) {
   for (let next = first; ; turns.holds += 1) {
@@ -752,7 +755,7 @@ async function runAgentTurns(context, task, turns, first) {
     });
     await runAgentHeld(context, held, context.clock ?? workerClock);
     next = {
-      argv: context.agent.resumeInvocation(task, session),
+      argv: context.agent.resumeInvocation(task, session, turns.run),
       brief: context.agent.brief?.(task, session),
     };
   }
@@ -760,7 +763,8 @@ async function runAgentTurns(context, task, turns, first) {
 
 /**
  * What a finished run hands on: its account, and `resume`, which runs its
- * conversation on told `prompt` and answers what that finished with, where its
+ * conversation on told `prompt`, which `resumeInvocation` is handed beside the
+ * arguments `invocation` was, and answers what that finished with, where its
  * runtime resumes and named the conversation. A resumed turn counts on top of
  * what the run had spent, as one resumed after a hold does.
  */
@@ -774,7 +778,7 @@ function runAgentResumable(context, task, turns, { finished, session }) {
       context.evidence.resumed();
       context.keepAgain();
       const resumed = await runAgentTurns(context, task, turns, {
-        argv: resumeInvocation(task, conversation),
+        argv: resumeInvocation(task, conversation, { ...turns.run, prompt }),
         brief: context.agent.brief?.(task, conversation, prompt),
       });
       conversation = resumed.session ?? conversation;
@@ -788,9 +792,10 @@ function runAgentResumable(context, task, turns, { finished, session }) {
  * shell prepared to hand the project's commands the rest of what those shells
  * are handed, and its briefing told where each image its brief carries was
  * read to, what an earlier attempt left in the tree and what the start's merge
- * of the target left in progress. A run held at a limit is the same process
- * started again, on the same shell and environment, in the conversation it
- * left, and everything it streams is the one run's, a resumed turn's included.
+ * of the target left in progress or did not merge. A run held at a limit is
+ * the same process started again, on the same shell and environment, in the
+ * conversation it left, and everything it streams is the one run's, a resumed
+ * turn's included.
  */
 async function runAgent(context) {
   const task = ticketImagesBriefed(
@@ -809,11 +814,12 @@ async function runAgent(context) {
       git: context.git,
     }),
   );
+  const run = {
+    resultSchema: workerTemporaryFile(agentResultSchemaName),
+    shellArguments: shell.arguments,
+  };
   const launch = {
-    argv: context.agent.invocation(task, {
-      resultSchema: workerTemporaryFile(agentResultSchemaName),
-      shellArguments: shell.arguments,
-    }),
+    argv: context.agent.invocation(task, run),
     brief: context.agent.brief?.(task),
   };
   const environment = await runAgentEnvironment(context, shell);
@@ -823,7 +829,7 @@ async function runAgent(context) {
       launch,
       await context.agent.configuration(task, environment),
     );
-  const turns = { environment, stream: { captured: false }, holds: 0 };
+  const turns = { environment, run, stream: { captured: false }, holds: 0 };
   return runAgentResumable(
     context,
     task,
@@ -1205,6 +1211,7 @@ async function workCheckpointRestored(context, workspace) {
 function workTargetWhere(context, workspace) {
   return {
     task: context.task,
+    base: workspace.base,
     directory: workspace.directory,
     command: context.command ?? command,
     git: context.git,
@@ -1238,7 +1245,7 @@ async function workTargetMergedAtStart(context, workspace, attempt) {
       sourceTargetFetched({
         ...where,
         repository: workspace.repository,
-        targetRef: context.task.targetRef,
+        ref: context.task.targetMerge.ref,
         environment: workspace.environment,
       }),
     ...workTargetLogged(context),
@@ -1256,7 +1263,7 @@ async function workTargetFetchedApart(context, workspace) {
   const fetched = await sourceTargetFetched({
     ...workTargetWhere(context, workspace),
     repository: workspace.repository,
-    targetRef: context.task.targetRef,
+    ref: context.task.targetMerge.ref,
     environment: workspace.environment,
     ...(apart === undefined ? {} : { refresh: apart.refresh }),
   }).then(

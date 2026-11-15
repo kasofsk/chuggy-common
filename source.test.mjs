@@ -46,6 +46,7 @@ import {
   sourceCheckpointRestored,
   sourceCheckpointSeen,
   sourceConflictsLeft,
+  sourcePipelinesBrought,
   sourcePushPlacingVariables,
   sourceRestoredBriefed,
   sourceSecretReader,
@@ -2422,5 +2423,51 @@ test("a conflict marked resolved with its markers still in it is left, and one r
 
     await writeFile(join(directory, "README.md"), "both\n");
     assert.deepEqual(await sourceConflictsLeft(asked), []);
+  });
+});
+
+/**
+ * `path` written as `content` and committed on top of `from` in `directory`,
+ * left detached there. Its commit.
+ */
+async function committedOn(directory, from, path, content) {
+  await git("git", ["checkout", "--quiet", "--detach", from], {
+    cwd: directory,
+  });
+  await mkdir(dirname(join(directory, path)), { recursive: true });
+  await writeFile(join(directory, path), content);
+  await git("git", ["add", path], { cwd: directory });
+  await git("git", [...author, "commit", "--quiet", "-m", path], {
+    cwd: directory,
+  });
+  return headOf(directory);
+}
+
+/**
+ * Catches a merge's workflow change read off the target alone: one `HEAD`
+ * already holds counted, one the merge would leave conflicted missed, and a
+ * change elsewhere counted. Nothing in the workspace moves.
+ */
+test("the workflow paths a merge brings in are the ones it would change against the commit the push replaces", async () => {
+  await inCheckout(async ({ directory, base }) => {
+    const workflow = ".github/workflows/ci.yml";
+    const elsewhere = await committedOn(directory, base, "other.txt", "x\n");
+    const tip = await committedOn(directory, base, workflow, "on: push\n");
+    await committedOn(directory, base, workflow, "on: push\n");
+    const brought = (from, at) =>
+      sourcePipelinesBrought({ base: from, tip: at, directory, command: git });
+
+    assert.deepEqual(await brought(base, elsewhere), []);
+    assert.deepEqual(await brought(base, tip), []);
+    await git("git", ["checkout", "--quiet", "--detach", base], {
+      cwd: directory,
+    });
+    assert.deepEqual(await brought(base, tip), [workflow]);
+    await committedOn(directory, base, workflow, "on: pull_request\n");
+    assert.deepEqual(await brought(base, tip), [workflow]);
+    assert.equal(
+      await readFile(join(directory, workflow), "utf8"),
+      "on: pull_request\n",
+    );
   });
 });
