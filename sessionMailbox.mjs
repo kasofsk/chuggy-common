@@ -24,7 +24,9 @@
  * asked for anything, and a startup slower than the bound would then end the
  * iterable on its first look at an empty mailbox. Idle is time the session spent
  * with nothing to do, so it is measured from the first moment it had nothing to
- * do, and a claim closes the window again.
+ * do, and a claim closes the window again. Nor is time idle while `busy` says
+ * the session holds something that wakes it, a thread's job host
+ * (`./jobHost.mjs`) among them: the window stays shut for as long as it does.
  *
  * A TURN NEVER RUNS ONE OF THE RUNTIME'S OWN COMMANDS. The runtime reads a
  * message that opens with a slash and a name as a command for itself rather
@@ -92,6 +94,7 @@ export function sessionMailbox(task, bearer, services = {}) {
     now = Date.now,
     claim: onClaim = () => undefined,
     settle: onSettle = () => undefined,
+    busy = () => false,
   } = services;
   let held;
   let stopped = false;
@@ -141,8 +144,12 @@ export function sessionMailbox(task, bearer, services = {}) {
         const turn = await sessionMailboxClaim(task, bearer, request);
         if (turn === "Stop") return;
         if (turn === undefined) {
-          idleSince ??= now();
-          if (sessionMailboxIdled(task.bounds, now() - idleSince)) return;
+          idleSince = busy() ? undefined : (idleSince ?? now());
+          if (
+            idleSince !== undefined &&
+            sessionMailboxIdled(task.bounds, now() - idleSince)
+          )
+            return;
           await pause(task.bounds.mailboxPollMs);
           continue;
         }
