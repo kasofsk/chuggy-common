@@ -148,6 +148,53 @@ test("a job runs its command in the thread's directory on the runtime's environm
   assert.equal((await stateOf(directory)).jobs[0].status, "Exited");
 });
 
+test("a job that exits while its log is still being closed is heard: it ends Exited and wakes the thread", async (t) => {
+  const { EventEmitter } = await import("node:events");
+  const spawn = () => {
+    const child = Object.assign(new EventEmitter(), {
+      pid: 4242,
+      unref: () => undefined,
+    });
+    process.nextTick(() => {
+      child.emit("spawn");
+      child.emit("exit", 0, null);
+    });
+    return child;
+  };
+  const { directory, wakes, host, call } = await hostOf(t, { spawn });
+
+  await call(jobHostToolNames.jobStart, { name: "quick", command: "exit 0" });
+
+  await until(() => wakes.length > 0, "the job's wake");
+  await host.settled();
+  assert.deepEqual(
+    wakes.map(({ wake, resource }) => [wake, resource]),
+    [["JobExited", "quick"]],
+  );
+  assert.equal((await stateOf(directory)).jobs[0].status, "Exited");
+  assert.equal(host.busy(), false);
+});
+
+test("every job whose command exits at once ends Exited and wakes the thread", async (t) => {
+  const { wakes, host, call } = await hostOf(t);
+
+  for (let index = 0; index < jobHostJobsMax; index += 1)
+    await call(jobHostToolNames.jobStart, {
+      name: `quick-${String(index)}`,
+      command: "exit 0",
+    });
+
+  await until(() => wakes.length === jobHostJobsMax, "every job's wake");
+  await host.settled();
+  assert.ok(wakes.every(({ wake }) => wake === "JobExited"));
+  assert.ok(
+    JSON.parse(await call(jobHostToolNames.jobList)).every(
+      ({ status }) => status === "Exited",
+    ),
+  );
+  assert.equal(host.busy(), false);
+});
+
 test("a job runs in a process group of its own", async (t) => {
   const { wakes, call } = await hostOf(t);
 
@@ -422,7 +469,7 @@ async function restoredAttempt({ wakes, open, call }, file) {
   return JSON.parse(await call(jobHostToolNames.jobList, {}, before));
 }
 
-test("an attempt's restore starts a restart job again, ends any other that was running, fires a timer that fell due, and wakes for each", async (t) => {
+test("an attempt's restore starts a restart job again, ends any other that was running, fires a timer that fell due, and wakes for each but the job started again", async (t) => {
   const hosted = await hostOf(t);
   const { directory, clock, wakes, standings, open, call } = hosted;
   const file = join(directory, "out.log");
@@ -440,7 +487,6 @@ test("an attempt's restore starts a restart job again, ends any other that was r
   assert.deepEqual(
     wakes.map(({ wake, resource }) => [wake, resource]),
     [
-      ["AttemptEnded", "kept"],
       ["AttemptEnded", "plain"],
       ["TimerDue", "due"],
     ],

@@ -16,8 +16,9 @@
  * is written to `jobHostStateName` in the thread's directory, written whole
  * and renamed into place, and `restore` reads it back before the attempt's
  * first turn. A job that was running is started again where it was started
- * with `restart`, and recorded `AttemptEnded` otherwise; each one the restore
- * found running is offered as an `AttemptEnded` wake naming it. A watch
+ * with `restart`, and recorded `AttemptEnded` otherwise; each one not started
+ * again is offered as an `AttemptEnded` wake naming it, so a routine restart
+ * of a thread whose jobs all restart wakes nobody. A watch
  * resumes at its file's end, and a timer that fell due meanwhile fires at
  * once. State that cannot be read is taken to be empty, which is said.
  *
@@ -386,12 +387,17 @@ async function jobHostSpawned(host, job) {
   await jobHostLogTurned(log);
   const handle = await open(log, "w", 0o600);
   let child;
+  let exited;
   try {
     child = host.spawn("/bin/sh", ["-c", job.command], {
       cwd: job.cwd,
       env: host.environment,
       detached: true,
       stdio: ["ignore", handle.fd, handle.fd],
+    });
+    // Heard before any await, so an exit that comes while the log closes is kept.
+    exited = new Promise((heard) => {
+      child.once("exit", (code, signal) => heard({ code, signal }));
     });
     await new Promise((resolved, refused) => {
       child.once("error", refused);
@@ -406,13 +412,10 @@ async function jobHostSpawned(host, job) {
   child.on("error", () => undefined);
   child.unref();
   const running = { ...job, status: jobRunning, pid: child.pid, child };
-  running.ended = new Promise((ended) => {
-    child.once("exit", (code, signal) => {
-      jobHostExited(host, running, code, signal);
-      ended();
-    });
-  });
   host.jobs.set(job.name, running);
+  running.ended = exited.then(({ code, signal }) => {
+    jobHostExited(host, running, code, signal);
+  });
   return running;
 }
 
@@ -713,7 +716,7 @@ async function jobHostWakeCancel(host, { reason }) {
   return `the timer for ${reason} is cancelled`;
 }
 
-/** One job the restore found running: started again where it was started with `restart`, `AttemptEnded` otherwise. */
+/** One job the restore found running: started again where it was started with `restart`, `AttemptEnded` otherwise, and whether it was started again. */
 async function jobHostJobRestored(host, job) {
   if (job.restart)
     try {
@@ -723,7 +726,7 @@ async function jobHostJobRestored(host, job) {
         cwd: jobHostInside(host.directory, job.cwd),
         restart: true,
       });
-      return;
+      return true;
     } catch (failure) {
       host.warn(
         `the job ${job.name} could not be started again: ${failure instanceof Error ? failure.message : String(failure)}\n`,
@@ -736,6 +739,7 @@ async function jobHostJobRestored(host, job) {
     code: undefined,
     signal: undefined,
   });
+  return false;
 }
 
 /**
@@ -745,18 +749,19 @@ async function jobHostJobRestored(host, job) {
  */
 async function jobHostRestore(host) {
   const read = await jobHostStateRead(host.places.state, host.warn);
-  const found = [];
+  let changed = false;
+  const ended = [];
   for (const job of read.jobs)
     if (job.status === jobRunning) {
-      found.push(job.name);
-      await jobHostJobRestored(host, job);
+      changed = true;
+      if (!(await jobHostJobRestored(host, job))) ended.push(job.name);
     } else host.jobs.set(job.name, job);
   for (const watch of read.watches) await jobHostWatchOpened(host, watch);
   const due = read.timers.filter(({ dueAtMs }) => dueAtMs <= host.now());
   for (const timer of read.timers)
     if (!due.includes(timer)) jobHostTimerArmed(host, { ...timer });
-  if (found.length > 0 || due.length > 0) await jobHostPersist(host);
-  for (const name of found) jobHostWake(host, attemptEnded, name);
+  if (changed || due.length > 0) await jobHostPersist(host);
+  for (const name of ended) jobHostWake(host, attemptEnded, name);
   for (const { reason } of due) jobHostWake(host, timerDue, reason);
   host.told = jobHostStanding(host);
   await host.standing(host.told);
