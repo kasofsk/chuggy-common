@@ -9,14 +9,14 @@
  * the commit the attempt started from and the target's commits keep their
  * names. A workspace already holding what is merged does not merge it.
  *
- * NO MERGE BRINGS IN A WORKFLOW CHANGE THE JOB CANNOT PUSH. Where
- * `pipelinesWritable` is false, each merge is checked first for a path under
- * `.github/workflows/` it would change against the commit the attempt started
- * from (`sourcePipelinesBrought`), since GitHub refuses such a push whole. At
- * the start the target is then not merged and the briefing says so; at the
- * end the work is pushed without it; and where a failed landing's change is
- * named, which cannot land without that tree, the attempt ends at the push
- * step before its agent runs.
+ * NO MERGE BRINGS IN A CHANGE THE JOB CANNOT PUSH. Each merge is checked
+ * first for a path it would change against the commit the attempt started
+ * from (`sourcePathsBrought`), under the task's `pushPathsRefused`, or, where
+ * it names none and `pipelinesWritable` is false, under `.github/workflows/`,
+ * since the forge refuses such a push whole. At the start the target is then
+ * not merged and the briefing says so; at the end the work is pushed without
+ * it; and where a failed landing's change is named, which cannot land without
+ * that tree, the attempt ends at the push step before its agent runs.
  *
  * AT THE START a clean merge is what the agent builds on, and a conflict is
  * left in progress for the agent, its briefing saying what it is looking at.
@@ -52,7 +52,7 @@ import {
   sourceCommitHeld,
   sourceConflictsLeft,
   sourceMergeConcluded,
-  sourcePipelinesBrought,
+  sourcePathsBrought,
   sourceTargetContained,
   sourceTargetMerged,
   sourceWorkCommitted,
@@ -112,13 +112,13 @@ export function targetMergeChangeNudge({ tip, paths }) {
   ].join("\n\n");
 }
 
-/** The briefing's lines where the start did not merge the target for a workflow change. */
+/** The briefing's lines where the start did not merge the target for a change this job cannot push. */
 function targetMergeWithheldLines({ named, tip, withheld }) {
   return [
     "## The target branch was not merged",
-    `This checkout did not merge ${named} at ${tip}, the branch this work lands on: it holds a change to .github/workflows/ that this job cannot push, in:`,
+    `This checkout did not merge ${named} at ${tip}, the branch this work lands on: it holds a change that this job cannot push, in:`,
     targetMergePaths(withheld),
-    "Say in your report that the target holds a workflow change this job cannot push, so it was not merged.",
+    "Say in your report that the target holds a change this job cannot push, so it was not merged.",
   ];
 }
 
@@ -176,26 +176,33 @@ export class TargetMergeUnresolved extends Error {
   name = "TargetMergeUnresolved";
 }
 
-/**
- * The paths under `.github/workflows/` merging `tip` would bring in that this
- * job cannot push, none where its pipelines are writable.
- */
-async function targetMergePipelines(where, tip) {
-  if (where.task.targetMerge.pipelinesWritable) return [];
-  return sourcePipelinesBrought({ ...where, tip });
+/** Where a GitHub repository's workflows are, refused where a task names no `pushPathsRefused` and its pipelines are not writable. */
+const targetMergePipelinesPath = ".github/workflows/";
+
+/** The pathspecs a push of `task`'s may change nothing under. */
+function targetMergePathsRefused(task) {
+  if (task.pushPathsRefused !== undefined) return task.pushPathsRefused;
+  return task.targetMerge.pipelinesWritable ? [] : [targetMergePipelinesPath];
+}
+
+/** The paths merging `tip` would bring in that this job cannot push, none where its push is refused no path. */
+async function targetMergeRefused(where, tip) {
+  const paths = targetMergePathsRefused(where.task);
+  if (paths.length === 0) return [];
+  return sourcePathsBrought({ ...where, tip, paths });
 }
 
 /**
  * The start's merge: `{named, tip, conflicted, withheld, change}`, where the
  * target was fetched, `tip` its commit, `conflicted` the paths its merge left
- * unmerged and `withheld` the workflow paths it was not merged for; `change`,
- * where the task names one, is `{commit, conflicted}` once merged and
+ * unmerged and `withheld` the paths this job cannot push it was not merged
+ * for; `change`, where the task names one, is `{commit, conflicted}` once merged and
  * `{commit, pending: true}` where the target's merge stopped. Nothing where
  * the task names no `targetMerge`, or neither could be fetched, found or
  * merged, which `log` is told. `where` is the `task`, `base`, `directory`, `command`
  * and `git` the workspace's git is run with, `fetched` answers the target's
  * tip, and `said` a failure as it is logged. A failed landing that would bring
- * in a workflow change the job cannot push is raised as the push step.
+ * in a change the job cannot push is raised as the push step.
  */
 export async function targetMergedAtStart({ where, fetched, log, said }) {
   const merge = where.task.targetMerge;
@@ -254,18 +261,18 @@ async function targetMergeChangeHeld(where, change, log) {
 
 /**
  * Refuses, as the push step, a failed landing's rework whose target or change
- * would bring in a workflow change the job cannot push: the ticket cannot land
- * without that tree, so its agent is not run.
+ * would bring in a change the job cannot push: the ticket cannot land without
+ * that tree, so its agent is not run.
  */
 async function targetMergeLandable(where, { named, tip, change }) {
   const brought = new Set([
-    ...(tip === undefined ? [] : await targetMergePipelines(where, tip)),
-    ...(await targetMergePipelines(where, change)),
+    ...(tip === undefined ? [] : await targetMergeRefused(where, tip)),
+    ...(await targetMergeRefused(where, change)),
   ]);
   if (brought.size === 0) return;
   throw new RunStepFailure(
     runPushFailed,
-    `merging ${named} and ${targetMergeChangeName} ${change} would change ${[...brought].join(", ")} under .github/workflows/, which this job cannot push, so the attempt ends before its agent runs. The repository's Workflow files setting does not let its jobs change workflow files, and this ticket cannot land without them.`,
+    `merging ${named} and ${targetMergeChangeName} ${change} would change ${[...brought].join(", ")}, which this job cannot push, so the attempt ends before its agent runs. The repository's binding does not let its jobs change them, and this ticket cannot land without them.`,
   );
 }
 
@@ -282,10 +289,10 @@ async function targetMergeStartTarget({
     log(`the workspace already holds ${named} at ${tip}`);
     return { named, tip, conflicted: [] };
   }
-  const withheld = await targetMergePipelines(where, tip);
+  const withheld = await targetMergeRefused(where, tip);
   if (withheld.length > 0) {
     log(
-      `${named} at ${tip} changes ${withheld.join(", ")} under .github/workflows/, which this job cannot push, so this attempt runs without merging it`,
+      `${named} at ${tip} changes ${withheld.join(", ")}, which this job cannot push, so this attempt runs without merging it`,
     );
     return { named, tip, conflicted: [], withheld };
   }
@@ -374,9 +381,8 @@ function targetMergeLeft(started) {
  * that answered, and `resume`, which runs the agent's conversation on with a
  * prompt and answers its result, or nothing where the runtime cannot resume.
  * A fetch or merge of the target that fails, or a target bringing in a
- * workflow change the job cannot push, is logged, and the work is pushed as it
- * stands; a failed landing's change left to the agent is not
- * (`targetMergeOwed`).
+ * change the job cannot push, is logged, and the work is pushed as it stands;
+ * a failed landing's change left to the agent is not (`targetMergeOwed`).
  */
 export async function targetMergedAtEnd({
   where,
@@ -441,10 +447,10 @@ async function targetMergeMoved({ where, named, fetched, log, said }) {
     () => sourceWorkCommitted(where),
     gitFailureLine,
   );
-  const withheld = await targetMergePipelines(where, tip);
+  const withheld = await targetMergeRefused(where, tip);
   if (withheld.length > 0) {
     log(
-      `${named} at ${tip} changes ${withheld.join(", ")} under .github/workflows/, which this job cannot push, so the work is pushed without merging it`,
+      `${named} at ${tip} changes ${withheld.join(", ")}, which this job cannot push, so the work is pushed without merging it`,
     );
     return undefined;
   }
@@ -471,8 +477,8 @@ async function targetMergeMoved({ where, named, fetched, log, said }) {
  * A failed landing's `change` the start left to the agent, merged on top of
  * the work committed where the work does not hold it: the conflict left, as
  * `targetMergedAtEnd` holds one, or nothing where it merged or was held.
- * Raised as the push step where it would bring in a workflow change the job
- * cannot push, and as `TargetMergeUnresolved` where it cannot be merged.
+ * Raised as the push step where it would bring in a change the job cannot
+ * push, and as `TargetMergeUnresolved` where it cannot be merged.
  */
 async function targetMergeOwed({ where, change, log, said }) {
   if (await sourceTargetContained({ ...where, tip: change })) return undefined;
@@ -482,11 +488,11 @@ async function targetMergeOwed({ where, change, log, said }) {
     () => sourceWorkCommitted(where),
     gitFailureLine,
   );
-  const brought = await targetMergePipelines(where, change);
+  const brought = await targetMergeRefused(where, change);
   if (brought.length > 0)
     throw new RunStepFailure(
       runPushFailed,
-      `merging ${named} would change ${brought.join(", ")} under .github/workflows/, which this job cannot push. The repository's Workflow files setting does not let its jobs change workflow files, and this ticket cannot land without them.`,
+      `merging ${named} would change ${brought.join(", ")}, which this job cannot push. The repository's binding does not let its jobs change them, and this ticket cannot land without them.`,
     );
   let conflicted;
   try {

@@ -46,7 +46,7 @@ import {
   sourceCheckpointRestored,
   sourceCheckpointSeen,
   sourceConflictsLeft,
-  sourcePipelinesBrought,
+  sourcePathsBrought,
   sourcePushPlacingVariables,
   sourceRestoredBriefed,
   sourceSecretReader,
@@ -2444,20 +2444,31 @@ async function committedOn(directory, from, path, content) {
 }
 
 /**
- * Catches a merge's workflow change read off the target alone: one `HEAD`
+ * Catches a merge's refused change read off the target alone: one `HEAD`
  * already holds counted, one the merge would leave conflicted missed, and a
- * change elsewhere counted. Nothing in the workspace moves.
+ * change outside the pathspecs counted, or one inside another pathspec
+ * missed. Nothing in the workspace moves.
  */
-test("the workflow paths a merge brings in are the ones it would change against the commit the push replaces", async () => {
+test("the refused paths a merge brings in are the ones it would change against the commit the push replaces", async () => {
   await inCheckout(async ({ directory, base }) => {
     const workflow = ".github/workflows/ci.yml";
     const elsewhere = await committedOn(directory, base, "other.txt", "x\n");
     const tip = await committedOn(directory, base, workflow, "on: push\n");
     await committedOn(directory, base, workflow, "on: push\n");
-    const brought = (from, at) =>
-      sourcePipelinesBrought({ base: from, tip: at, directory, command: git });
+    const brought = (from, at, paths = [".github/workflows/"]) =>
+      sourcePathsBrought({
+        base: from,
+        tip: at,
+        paths,
+        directory,
+        command: git,
+      });
 
     assert.deepEqual(await brought(base, elsewhere), []);
+    assert.deepEqual(
+      await brought(base, elsewhere, [".github/workflows/", "other.txt"]),
+      ["other.txt"],
+    );
     assert.deepEqual(await brought(base, tip), []);
     await git("git", ["checkout", "--quiet", "--detach", base], {
       cwd: directory,
