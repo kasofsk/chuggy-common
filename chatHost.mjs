@@ -72,6 +72,7 @@ import {
 } from "./chatCheckout.mjs";
 import {
   chatSessionClearWaitMs,
+  chatSessionDeadlineSecsMax,
   chatSessionStopGraceMs,
   chatSessionSweepPauseMs,
   chatSessionSweepsMax,
@@ -261,8 +262,10 @@ export const chatHostConfigSchema = z.strictObject({
     .optional(),
   /** How long a session it claims may sit idle, which chuggy caps; no idle limit where absent. */
   idleSecs: chatHostPositiveSchema.optional(),
-  /** How long a session it claims may run; no deadline where absent. */
-  deadlineSecs: chatHostPositiveSchema.optional(),
+  /** How long a session it claims may run, at most what a session's timer holds; no deadline where absent. */
+  deadlineSecs: chatHostPositiveSchema
+    .max(chatSessionDeadlineSecsMax)
+    .optional(),
   /** The capabilities its threads may hold, which narrow each thread's roster; the roster whole where absent. */
   sessionCapabilities: chatHostSettingsSchema.shape.sessionCapabilities,
   /** The most output a session may report; the runner's own where absent. */
@@ -1038,6 +1041,13 @@ export function checkedChatHostSettings(settings, engineName) {
   ]))
     if (!Number.isSafeInteger(bound) || bound < 1)
       throw new RangeError(`chat host ${name} must be a positive integer`);
+  if (
+    settings.deadlineSecs !== undefined &&
+    settings.deadlineSecs > chatSessionDeadlineSecsMax
+  )
+    throw new RangeError(
+      `chat host deadlineSecs is at most ${String(chatSessionDeadlineSecsMax)}`,
+    );
   if (settings.sessionMemoryBytes < chatSessionMemoryBytesMin)
     throw new RangeError(
       `chat host sessionMemoryBytes must be at least ${String(chatSessionMemoryBytesMin)}`,

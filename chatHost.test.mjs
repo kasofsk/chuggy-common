@@ -64,6 +64,7 @@ import {
 } from "./chatHost.mjs";
 import {
   chatSessionClearWaitMs,
+  chatSessionDeadlineSecsMax,
   chatSessionStopGraceMs,
   chatSessionSweepPauseMs,
   chatSessionSweepsMax,
@@ -1207,6 +1208,7 @@ test("a host's settings refuse too little memory a session, and keys they do not
     { sessionCapabilities: ["RunCommands", "RunCommands"] },
     { deadlineSecs: 0 },
     { deadlineSecs: 1.5 },
+    { deadlineSecs: chatSessionDeadlineSecsMax + 1 },
   ])
     assert.equal(chatHostConfigSchema.safeParse(config).success, false);
   assert.throws(
@@ -1229,6 +1231,26 @@ test("a host's settings refuse too little memory a session, and keys they do not
   assert.throws(
     () => checkedChatHostSettings({ ...settings, deadlineSecs: 0 }),
     /deadlineSecs must be a positive integer/u,
+  );
+  assert.throws(
+    () =>
+      checkedChatHostSettings({
+        ...settings,
+        deadlineSecs: chatSessionDeadlineSecsMax + 1,
+      }),
+    /deadlineSecs is at most/u,
+  );
+  assert.equal(
+    checkedChatHostSettings({
+      ...settings,
+      deadlineSecs: chatSessionDeadlineSecsMax,
+    }).deadlineSecs,
+    chatSessionDeadlineSecsMax,
+  );
+  assert.equal(
+    chatHostConfigSchema.safeParse({ deadlineSecs: chatSessionDeadlineSecsMax })
+      .success,
+    true,
   );
 });
 

@@ -221,6 +221,9 @@ const chatSessionIpcTables = [
 /** The longest a timer holds. */
 const chatTimerMsMax = 2 ** 31 - 1;
 
+/** The longest deadline a session's timer can hold, which bounds a host's own. */
+export const chatSessionDeadlineSecsMax = Math.floor(chatTimerMsMax / 1_000);
+
 /** What a session's directories are made with: its user's alone. */
 const chatSessionDirectoryMode = 0o700;
 
