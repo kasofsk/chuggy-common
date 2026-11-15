@@ -8691,11 +8691,13 @@ test("a work task naming only a targetRef fetches and merges nothing", async (t)
   });
 });
 
-/** A work task whose `targetMerge` is the fixture's over `fields`. */
+/** A work task whose `targetMerge` is the fixture's over `fields`, naming no `pushPathsRefused`. */
 function mergeAnswer(fields) {
-  return agentAnswer({
+  const answer = agentAnswer({
     targetMerge: { ...fetchedAnswer.targetMerge, ...fields },
   });
+  delete answer.pushPathsRefused;
+  return answer;
 }
 
 /** A path GitHub refuses a push changing where the job may not write pipelines. */
@@ -8862,7 +8864,7 @@ test("a target holding a workflow change an unwritable job cannot push is merged
     );
     assert.match(
       logged.join(""),
-      /second\.yml under \.github\/workflows\/, which this job cannot push, so the work is pushed without merging it/u,
+      /second\.yml, which this job cannot push, so the work is pushed without merging it/u,
     );
   });
 });
@@ -8903,6 +8905,135 @@ test("a target is merged where the job may write pipelines, or where its change 
 });
 
 /**
+ * What a forge answers a push carrying a workflow change, a merge counted by
+ * what it brings in against its first parent as GitHub counts it; the target's
+ * own ref, which the suite moves, is let through.
+ */
+const workflowsBroughtRefusal = `while read -r _ new ref; do
+  [ "$ref" = "${targetRef}" ] && continue
+  for commit in $(git rev-list "$new" --not --all); do
+    if git diff --name-only "$commit^" "$commit" | grep -q '^.github/workflows/'; then
+      echo "refusing to allow a GitHub App to create or update workflow without workflows permission" >&2
+      exit 1
+    fi
+  done
+done`;
+
+/**
+ * Catches a task's `pushPathsRefused` ignored, at the start or the end, by a
+ * job whose binding alone would merge: the merge would bring in a change its
+ * push is refused, and the run would be lost.
+ */
+test("a target changing a path the task's push may not change is merged neither at the start nor at the end, and the work is pushed", async (t) => {
+  await inCheckout(async (checkout) => {
+    await targetPushed(checkout);
+    await remoteRefuses(
+      checkout.remote,
+      "pre-receive",
+      workflowsBroughtRefusal,
+    );
+    const first = await targetMoved(checkout, workflowPath, "on: push\n");
+    const second = ".github/workflows/second.yml";
+    const logged = [];
+    t.mock.method(process.stderr, "write", (text) => logged.push(text));
+
+    const { failure, plane } = await standInAttempt(
+      t,
+      checkout,
+      [
+        {
+          work: `echo done > done.txt && ${targetMovedWork(checkout, second, "on: pull_request\n")}`,
+          frames: [verdictFrame()],
+        },
+      ],
+      {
+        answer: {
+          ...mergeAnswer({ pipelinesWritable: true }),
+          pushPathsRefused: [".github/workflows/"],
+        },
+      },
+    );
+
+    passStands(failure, plane);
+    const { commit, merges } = await candidatePushed(
+      checkout.remote,
+      checkout.base,
+    );
+    assert.deepEqual(merges, []);
+    assert.equal(
+      await remoteFile(checkout.remote, commit, "done.txt"),
+      "done\n",
+    );
+    const said = logged.join("");
+    assert.ok(
+      said.includes(
+        `${targetRef} at ${first} changes ${workflowPath}, which this job cannot push, so this attempt runs without merging it`,
+      ),
+      said,
+    );
+    const tip = await targetTip(checkout.remote);
+    assert.ok(
+      said.includes(
+        `${targetRef} at ${tip} changes ${workflowPath}, ${second}, which this job cannot push, so the work is pushed without merging it`,
+      ),
+      said,
+    );
+  });
+});
+
+/**
+ * Catches `pushPathsRefused` withholding a target whose changes are all
+ * elsewhere, and a task naming none withholding one from a job that may write
+ * pipelines: each is merged at the start and the end as it was before.
+ */
+test("a target is merged at the start and the end where its changes are outside the task's refused paths or the task names none", async (t) => {
+  for (const [path, refused] of [
+    ["target.txt", { pushPathsRefused: [".github/workflows/"] }],
+    [workflowPath, {}],
+  ])
+    await inCheckout(async (checkout) => {
+      await targetPushed(checkout);
+      if (refused.pushPathsRefused !== undefined)
+        await remoteRefuses(
+          checkout.remote,
+          "pre-receive",
+          workflowsBroughtRefusal,
+        );
+      const first = await targetMoved(checkout, path, "first\n");
+
+      const { failure, plane } = await standInAttempt(
+        t,
+        checkout,
+        [
+          {
+            work: `echo done > done.txt && ${targetMovedWork(checkout, `${path}.second`, "second\n")}`,
+            frames: [verdictFrame()],
+          },
+        ],
+        {
+          answer: { ...mergeAnswer({ pipelinesWritable: true }), ...refused },
+        },
+      );
+
+      passStands(failure, plane);
+      const { commit, merges } = await candidatePushed(
+        checkout.remote,
+        checkout.base,
+      );
+      assert.equal(merges.length, 2, path);
+      assert.ok(await remoteHolds(checkout.remote, first, commit), path);
+      assert.ok(
+        await remoteHolds(
+          checkout.remote,
+          await targetTip(checkout.remote),
+          commit,
+        ),
+        path,
+      );
+    });
+});
+
+/**
  * Catches a failed landing's rework that cannot push the tree it needs run
  * anyway, or ended as anything but the push step, with a reason naming
  * neither the files nor the setting.
@@ -8932,7 +9063,10 @@ test("a failed landing whose target or change carries a workflow change an unwri
       assert.ok(failure instanceof RunStepFailure, String(failure));
       assert.equal(failure.evidence, runPushFailed);
       assert.ok(failure.message.includes(workflowPath), failure.message);
-      assert.match(failure.message, /Workflow files setting/u);
+      assert.match(
+        failure.message,
+        /binding does not let its jobs change them/u,
+      );
       assert.equal((await runtime.starts()).length, 0);
       const refs = await remoteRefs(checkout.remote);
       assert.ok(!refs.includes("/attempts/"), refs);
