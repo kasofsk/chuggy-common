@@ -160,9 +160,14 @@
  * a session is opened with is the provisioning root's, not this image's, so
  * what is true here is the mapping: a roster without `DraftOriginate` cannot
  * reach the tool, and the derived-work rule is that mapping rather than a
- * sentence in a description. `revoke_ticket` and `update_ticket` are under
- * that capability too, which is what keeps them from a roster that does not
- * hold it, and `dispatch_ticket` is under `TicketDispatch` alone.
+ * sentence in a description. `revoke_ticket`, `take_ticket`, `return_ticket`
+ * and `update_ticket` are under that capability too, which is what keeps them
+ * from a roster that does not hold it, and `dispatch_ticket` is under
+ * `TicketDispatch` alone.
+ *
+ * A TAKE NAMES NO MEMBER. `take_ticket` and `return_ticket` take a ticket and
+ * send nothing else, so work moves onto a member's runner and account only as
+ * the member the session acts as, by that member's own act.
  *
  * AN OFFER TOOL REACHES NO ROUTE AND WRITES NOTHING. `navigate`, `offer_release`
  * and `offer_revoke` are under `ThreadOffer` alone, and each checks its input
@@ -465,10 +470,10 @@ export const sessionBuiltInTools = [
  * The tools of the contract's roster this package does not build yet, which
  * no session is allowed.
  */
-export const chuggyToolsUnbuilt = ["take_ticket", "return_ticket"];
+export const chuggyToolsUnbuilt = [];
 
 /** The routes of the tools' table that only `chuggyToolsUnbuilt` reach. */
-export const chuggyToolRoutesUnbuilt = ["ticketTake", "ticketReturn"];
+export const chuggyToolRoutesUnbuilt = [];
 
 /**
  * Which capability admits which tool, the runtime's own and the chuggy server's
@@ -1949,6 +1954,9 @@ const pathArguments = (z, into) => ({
 });
 /** A position in a mailbox, which is counted from one and never from zero. */
 const ordinal = (z) => z.number().int().min(1);
+/** What take_ticket and return_ticket say of the refusals both answer. */
+const chuggyTicketTakeRefusals =
+  "Every refusal is the API's, its status and body unaltered: 404 for a ticket this project does not hold, 403 TakerNotAPerson for a caller that is an agent, and 409 for a draft never released (Unreleased) and for a ticket Done (TicketDone) or Revoked (TicketRevoked), which runs nothing more.";
 /**
  * A JSON object this tool passes through and the API's own schema is the
  * authority on. IT IS `looseObject` AND NOT `record`: the runtime converts a
@@ -1970,7 +1978,7 @@ export const chuggyProjectTools = [
   {
     name: "list_tickets",
     description:
-      "One page of this project's tickets, ascending by number or by recent activity. Call it to find a ticket and its phase. Each carries `epics`, the epics it is in, when it is in any. A page may hold fewer than `limit`, and only `nextAfter`, or `nextCursor`, present says there are more.",
+      "One page of this project's tickets, ascending by number or by recent activity. Call it to find a ticket and its phase. Each carries `creator`, the member who filed it, and `owner`, the member its next execution is placed for: the member who took it, else its creator. Each carries `epics`, the epics it is in, when it is in any. A page may hold fewer than `limit`, and only `nextAfter`, or `nextCursor`, present says there are more.",
     shape: (z) => ({
       after: ticket(z)
         .describe(
@@ -2001,19 +2009,27 @@ export const chuggyProjectTools = [
           "Lists only the tickets in this epic, as list_epics answers its number; left out, every ticket.",
         )
         .optional(),
+      owner: identity(z)
+        .describe(
+          "Lists only the tickets this member owns, encoded as a ticket's `owner` is, read_abilities' `principal` for your own; left out, every ticket. A page read with it carries `matched`, how many tickets it matched.",
+        )
+        .optional(),
     }),
     // An activity cursor is the server's own, so none names a ticket to move past.
     cursorOf: ({ order }) => (order === undefined ? "after" : undefined),
-    call: (context, { after, limit: pageLimit, phase, order, cursor, epic }) =>
+    call: (
+      context,
+      { after, limit: pageLimit, phase, order, cursor, epic, owner },
+    ) =>
       read(
         context,
-        `${projectPath(context, "project")}${search({ after, limit: pageLimit, phase, order, cursor, epic })}`,
+        `${projectPath(context, "project")}${search({ after, limit: pageLimit, phase, order, cursor, epic, owner })}`,
       ),
   },
   {
     name: "read_ticket",
     description:
-      "One ticket: its phase, its version, its authoring, its brief and what its runs cost. Call it for where a ticket stands. It carries `runTotals`, what every run of its executions reported, summed: turns, durations, tokens by kind, permission denials and `costUsdMicros`, millionths of a dollar at the runtime's list price, with tokens and cost per model in `models`. A ticket no run has reported for carries none. A ticket waiting because its run stopped at its clone, setup, commit, push or deadline, because its runner's disk ran low, or because a credential its configuration listed was not delivered, names that step's label, the execution and the attempt in `escalation.failed`, which read_run_error takes to read the attempt's error text, and for a credential not delivered its `absent`: the `credential` and the `reason` it was not. Where its work is landing, waits to land or escalated at landing, read_ticket_landings says how: its hold, its approval, or its pull request and what its merge waits on. A ticket in an epic carries `epics`, each epic's number and title, read_epic reads one. A Pending ticket following its configuration's newest revision carries `following`: its `verdict`, one of Current, Moves, Held or Trimmed, and for Held the `code` its release would be refused with.",
+      "One ticket: its phase, its version, its authoring, its brief and what its runs cost. Call it for where a ticket stands. `creator` is the member who filed it, and `owner` the member its next execution is placed for: the member who took it, else its creator, absent where neither is a member. It carries `runTotals`, what every run of its executions reported, summed: turns, durations, tokens by kind, permission denials and `costUsdMicros`, millionths of a dollar at the runtime's list price, with tokens and cost per model in `models`. A ticket no run has reported for carries none. A ticket waiting because its run stopped at its clone, setup, commit, push or deadline, because its runner's disk ran low, or because a credential its configuration listed was not delivered, names that step's label, the execution and the attempt in `escalation.failed`, which read_run_error takes to read the attempt's error text, and for a credential not delivered its `absent`: the `credential` and the `reason` it was not. Where its work is landing, waits to land or escalated at landing, read_ticket_landings says how: its hold, its approval, or its pull request and what its merge waits on. A ticket in an epic carries `epics`, each epic's number and title, read_epic reads one. A Pending ticket following its configuration's newest revision carries `following`: its `verdict`, one of Current, Moves, Held or Trimmed, and for Held the `code` its release would be refused with.",
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
       read(context, projectPath(context, "ticket", { ticket: args.ticket })),
@@ -2613,6 +2629,28 @@ export const chuggyProjectTools = [
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
       submit(context, { mutation: "RevokeTicket", ticket: args.ticket }),
+  },
+  {
+    name: "take_ticket",
+    description: `Takes one released ticket for the member this session acts as, on your owner's word only. The take is the caller's own and names no other member: the ticket's \`owner\` becomes read_abilities' \`principal\`, and its next executions are placed for that member's personal runner and own agent account. read_abilities' \`mutate\` answers whether the caller may take; without it the take is answered 403 Forbidden. The answer is \`outcome\`, Taken, or AlreadyOwner where the caller owns it already, and \`owner\`. ${chuggyTicketTakeRefusals}`,
+    shape: (z) => ({ ticket: ticket(z) }),
+    call: (context, args) =>
+      write(
+        context,
+        projectPath(context, "ticketTake", { ticket: args.ticket }),
+        "POST",
+      ),
+  },
+  {
+    name: "return_ticket",
+    description: `Returns one ticket the member this session acts as took to its creator, on your owner's word only. The return is the caller's own, as the take was: only the ticket's taker returns it, and any other caller is refused 409 NotTaker. read_abilities' \`mutate\` answers whether the caller may take or return; without it the return is answered 403 Forbidden. The answer is \`outcome\` Returned and \`owner\`, the creator, absent where the creator is no member. ${chuggyTicketTakeRefusals}`,
+    shape: (z) => ({ ticket: ticket(z) }),
+    call: (context, args) =>
+      write(
+        context,
+        projectPath(context, "ticketReturn", { ticket: args.ticket }),
+        "POST",
+      ),
   },
   {
     name: "update_ticket",
