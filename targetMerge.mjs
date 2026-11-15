@@ -22,8 +22,10 @@
  * left in progress for the agent, its briefing saying what it is looking at.
  * A failed landing's `change` is merged after the target, every commit of it
  * keeping its message; where the target's merge stopped, the change is left
- * for the agent to merge once that merge is concluded. What cannot be fetched
- * or merged is logged and the attempt runs without it.
+ * for the agent to merge once that merge is concluded. It is never fetched by
+ * its hash, which a forge need not serve, so one the clone of every branch
+ * does not hold is not merged. What cannot be fetched, found or merged is
+ * logged and the attempt runs without it.
  *
  * AT THE END the target is fetched again, and where it moved past the work the
  * work is committed and the target merged on top. A clean merge is pushed with
@@ -43,6 +45,7 @@ import {
   runStep,
 } from "./runEvidence.mjs";
 import {
+  sourceCommitHeld,
   sourceConflictsLeft,
   sourceMergeConcluded,
   sourcePipelinesBrought,
@@ -175,8 +178,8 @@ async function targetMergePipelines(where, tip) {
  * unmerged and `withheld` the workflow paths it was not merged for; `change`,
  * where the task names one, is `{commit, conflicted}` once merged and
  * `{commit, pending: true}` where the target's merge stopped. Nothing where
- * the task names no `targetMerge`, or neither could be fetched or merged,
- * which `log` is told. `where` is the `task`, `base`, `directory`, `command`
+ * the task names no `targetMerge`, or neither could be fetched, found or
+ * merged, which `log` is told. `where` is the `task`, `base`, `directory`, `command`
  * and `git` the workspace's git is run with, `fetched` answers the target's
  * tip, and `said` a failure as it is logged. A failed landing that would bring
  * in a workflow change the job cannot push is raised as the push step.
@@ -195,11 +198,12 @@ export async function targetMergedAtStart({ where, fetched, log, said }) {
   }
   const contained =
     tip === undefined || (await sourceTargetContained({ ...where, tip }));
-  if (merge.change !== undefined)
+  const change = await targetMergeChangeHeld(where, merge.change, log);
+  if (change !== undefined)
     await targetMergeLandable(where, {
       named,
       tip: contained ? undefined : tip,
-      change: merge.change,
+      change,
     });
   const target =
     tip === undefined
@@ -212,17 +216,27 @@ export async function targetMergedAtStart({ where, fetched, log, said }) {
           log,
           said,
         });
-  if (merge.change === undefined) return target;
-  const change = await targetMergeStartChange({
+  if (change === undefined) return target;
+  const merged = await targetMergeStartChange({
     where,
     named,
-    change: merge.change,
+    change,
     stopped: (target?.conflicted.length ?? 0) > 0,
     log,
     said,
   });
-  if (change === undefined) return target;
-  return { ...(target ?? { named, tip, conflicted: [] }), change };
+  if (merged === undefined) return target;
+  return { ...(target ?? { named, tip, conflicted: [] }), change: merged };
+}
+
+/** A failed landing's `change` where the workspace holds it, and nothing where it names none or holds none, which `log` is told. */
+async function targetMergeChangeHeld(where, change, log) {
+  if (change === undefined) return undefined;
+  if (await sourceCommitHeld({ ...where, commit: change })) return change;
+  log(
+    `${targetMergeChangeName} ${change} is not in the clone, so this attempt runs without merging it`,
+  );
+  return undefined;
 }
 
 /**

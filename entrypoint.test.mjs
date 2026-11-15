@@ -9012,6 +9012,44 @@ test("a failed landing's change whose merge conflicts is left in progress for th
 });
 
 /**
+ * Catches a failed landing's change the clone does not hold ending the
+ * attempt on a git error, rather than the attempt running on the target
+ * without it, whether or not the job may write pipelines.
+ */
+test("a failed landing's change the clone does not hold is logged and the attempt runs on the target without it", async (t) => {
+  const change = "0123456789abcdef0123456789abcdef01234567";
+  for (const pipelinesWritable of [true, false])
+    await inCheckout(async (checkout) => {
+      await targetPushed(checkout);
+      const tip = await targetMoved(checkout, "target.txt", "landed\n");
+      const logged = [];
+      t.mock.method(process.stderr, "write", (text) => logged.push(text));
+
+      const { failure, plane, runtime } = await standInAttempt(
+        t,
+        checkout,
+        [verdictRun()],
+        { answer: mergeAnswer({ pipelinesWritable, change }) },
+      );
+
+      passStands(failure, plane);
+      const [{ brief }] = await runtime.starts();
+      assert.doesNotMatch(brief, /## A merge of/u);
+      const { merges } = await candidatePushed(checkout.remote, checkout.base);
+      assert.equal(merges.length, 1);
+      assert.equal(await mergedIn(checkout.remote, merges[0]), tip);
+      assert.ok(
+        logged
+          .join("")
+          .includes(
+            `the failed landing's change ${change} is not in the clone, so this attempt runs without merging it`,
+          ),
+        logged.join(""),
+      );
+    });
+});
+
+/**
  * Catches a failed landing's change merged on top of a target merge still in
  * progress, or left unmerged with no word of it to the agent.
  */

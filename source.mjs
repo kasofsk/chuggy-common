@@ -1086,6 +1086,23 @@ export async function sourceTargetFetched({
   return tip.trim();
 }
 
+/** Whether the workspace at `directory` holds `commit` as a commit. */
+export async function sourceCommitHeld({
+  commit,
+  directory,
+  command,
+  git = [],
+}) {
+  return command(
+    "git",
+    ["cat-file", "-e", `${commit}^{commit}`],
+    sourceLocal(directory, git),
+  ).then(
+    () => true,
+    () => false,
+  );
+}
+
 /** Whether `HEAD` already holds `tip` among its ancestors. */
 export async function sourceTargetContained({
   tip,
