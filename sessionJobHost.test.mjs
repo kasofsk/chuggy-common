@@ -176,8 +176,8 @@ test("a chat host's thread whose job host holds a restart job reports it standin
   assert.deepEqual(postedTo(plane, standingPath), [{ standing: true }]);
   assert.deepEqual(
     postedTo(plane, wakePath).map(({ wake, resource }) => [wake, resource]),
-    [["AttemptEnded", "dispatcher"]],
-    "a restore that only started a job again still wakes the thread",
+    [],
+    "a restore that only started a job again wakes nobody",
   );
   const [job] = JSON.parse(
     await readFile(jobHostPlaces(directory).state, "utf8"),

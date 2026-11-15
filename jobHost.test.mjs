@@ -469,7 +469,7 @@ async function restoredAttempt({ wakes, open, call }, file) {
   return JSON.parse(await call(jobHostToolNames.jobList, {}, before));
 }
 
-test("an attempt's restore starts a restart job again, ends any other that was running, fires a timer that fell due, and wakes for each", async (t) => {
+test("an attempt's restore starts a restart job again, ends any other that was running, fires a timer that fell due, and wakes for each but the job started again", async (t) => {
   const hosted = await hostOf(t);
   const { directory, clock, wakes, standings, open, call } = hosted;
   const file = join(directory, "out.log");
@@ -487,7 +487,6 @@ test("an attempt's restore starts a restart job again, ends any other that was r
   assert.deepEqual(
     wakes.map(({ wake, resource }) => [wake, resource]),
     [
-      ["AttemptEnded", "kept"],
       ["AttemptEnded", "plain"],
       ["TimerDue", "due"],
     ],
@@ -509,6 +508,112 @@ test("an attempt's restore starts a restart job again, ends any other that was r
     ),
     ["later"],
   );
+});
+
+/** A thread whose attempt left `jobs` running, each `{ name, restart }`, restored by an attempt of its own: the wakes it offered, the standings it reported and the state it wrote. */
+async function restoredJobs(t, jobs) {
+  const hosted = await hostOf(t);
+  const { directory, wakes, standings, host, open, call } = hosted;
+  for (const { name, restart } of jobs)
+    await call(jobHostToolNames.jobStart, {
+      name,
+      command: "sleep 600",
+      restart,
+    });
+  await host.settled();
+  const left = await stateOf(directory);
+  await host.close();
+  wakes.length = 0;
+  standings.length = 0;
+  const after = open();
+  t.after(() => after.close());
+  await after.restore();
+  await after.settled();
+  return { wakes, standings, left, written: await stateOf(directory) };
+}
+
+test("a restore that only starts restart jobs again wakes nobody, and still writes their new pids and reports the thread standing", async (t) => {
+  const { wakes, standings, left, written } = await restoredJobs(t, [
+    { name: "one", restart: true },
+    { name: "two", restart: true },
+  ]);
+  assert.deepEqual(wakes, []);
+  assert.deepEqual(standings, [true]);
+  for (const job of written.jobs) {
+    assert.equal(job.status, "Running");
+    assert.notEqual(
+      job.pid,
+      left.jobs.find(({ name }) => name === job.name).pid,
+    );
+  }
+});
+
+test("a restore that found a job running not started with restart offers exactly one AttemptEnded wake, naming it", async (t) => {
+  const { wakes, standings } = await restoredJobs(t, [
+    { name: "plain", restart: false },
+  ]);
+  assert.deepEqual(
+    wakes.map(({ wake, resource }) => [wake, resource]),
+    [["AttemptEnded", "plain"]],
+  );
+  assert.deepEqual(standings, [false]);
+});
+
+test("a restore of restart jobs and one that is not names only the one that is not", async (t) => {
+  const { wakes } = await restoredJobs(t, [
+    { name: "kept", restart: true },
+    { name: "plain", restart: false },
+    { name: "also", restart: true },
+  ]);
+  assert.deepEqual(
+    wakes.map(({ wake, resource }) => [wake, resource]),
+    [["AttemptEnded", "plain"]],
+  );
+});
+
+test("a restart job that exits while the restore's standing report is outstanding leaves the plane last told the thread is not standing", async (t) => {
+  const heard = [];
+  let holding;
+  const hosted = await hostOf(t, {
+    standing: async (standing) => {
+      const held = holding;
+      holding = undefined;
+      await held;
+      heard.push(standing);
+    },
+  });
+  const { host, open, call } = hosted;
+  await call(jobHostToolNames.jobStart, {
+    name: "kept",
+    command: "sleep 600",
+    restart: true,
+  });
+  await host.settled();
+  await host.close();
+  heard.length = 0;
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  holding = held;
+
+  const after = open();
+  t.after(() => after.close());
+  const restoring = after.restore();
+  await until(() => holding === undefined, "the restore's report is asked");
+  const [job] = JSON.parse(await call(jobHostToolNames.jobList, {}, after));
+  process.kill(-job.pid, "SIGKILL");
+  await until(
+    async () =>
+      JSON.parse(await call(jobHostToolNames.jobList, {}, after))[0].status ===
+      "Exited",
+    "the restarted job's exit",
+  );
+  release();
+  await restoring;
+  await after.settled();
+
+  assert.deepEqual(heard, [true, false]);
 });
 
 test("an attempt's restore resumes each watch at its file's end", async (t) => {

@@ -16,13 +16,16 @@
  * is written to `jobHostStateName` in the thread's directory, written whole
  * and renamed into place, and `restore` reads it back before the attempt's
  * first turn. A job that was running is started again where it was started
- * with `restart`, and recorded `AttemptEnded` otherwise; each one the restore
- * found running is offered as an `AttemptEnded` wake naming it. A watch
- * resumes at its file's end, and a timer that fell due meanwhile fires at
- * once. State that cannot be read is taken to be empty, which is said.
+ * with `restart`, and recorded `AttemptEnded` otherwise; each one not started
+ * again is offered as an `AttemptEnded` wake naming it, so a restore that only
+ * starts jobs again wakes nobody, and the thread reads their new pids and logs
+ * from `job_list` when next woken. A watch resumes at its file's end, and a
+ * timer that fell due meanwhile fires at once. State that cannot be read is
+ * taken to be empty, which is said.
  *
  * IT IS STANDING WHILE IT HOLDS A RUNNING JOB STARTED WITH `restart`, which is
- * reported to the plane once on restore and again whenever it changes, and
+ * reported to the plane once on restore and again whenever it changes, each
+ * report after the one before it, and
  * it is busy while it holds a running job, a watch or a timer, which keeps
  * the mailbox's idle bound from ending the attempt under them.
  *
@@ -715,7 +718,7 @@ async function jobHostWakeCancel(host, { reason }) {
   return `the timer for ${reason} is cancelled`;
 }
 
-/** One job the restore found running: started again where it was started with `restart`, `AttemptEnded` otherwise. */
+/** One job the restore found running: started again where it was started with `restart`, `AttemptEnded` otherwise, and whether it was started again. */
 async function jobHostJobRestored(host, job) {
   if (job.restart)
     try {
@@ -725,7 +728,7 @@ async function jobHostJobRestored(host, job) {
         cwd: jobHostInside(host.directory, job.cwd),
         restart: true,
       });
-      return;
+      return true;
     } catch (failure) {
       host.warn(
         `the job ${job.name} could not be started again: ${failure instanceof Error ? failure.message : String(failure)}\n`,
@@ -738,6 +741,7 @@ async function jobHostJobRestored(host, job) {
     code: undefined,
     signal: undefined,
   });
+  return false;
 }
 
 /**
@@ -747,21 +751,25 @@ async function jobHostJobRestored(host, job) {
  */
 async function jobHostRestore(host) {
   const read = await jobHostStateRead(host.places.state, host.warn);
-  const found = [];
+  let changed = false;
+  const ended = [];
   for (const job of read.jobs)
     if (job.status === jobRunning) {
-      found.push(job.name);
-      await jobHostJobRestored(host, job);
+      changed = true;
+      if (!(await jobHostJobRestored(host, job))) ended.push(job.name);
     } else host.jobs.set(job.name, job);
   for (const watch of read.watches) await jobHostWatchOpened(host, watch);
   const due = read.timers.filter(({ dueAtMs }) => dueAtMs <= host.now());
   for (const timer of read.timers)
     if (!due.includes(timer)) jobHostTimerArmed(host, { ...timer });
-  if (found.length > 0 || due.length > 0) await jobHostPersist(host);
-  for (const name of found) jobHostWake(host, attemptEnded, name);
+  if (changed || due.length > 0) await jobHostPersist(host);
+  for (const name of ended) jobHostWake(host, attemptEnded, name);
   for (const { reason } of due) jobHostWake(host, timerDue, reason);
-  host.told = jobHostStanding(host);
-  await host.standing(host.told);
+  const standing = jobHostStanding(host);
+  host.told = standing;
+  const reported = host.reporting.then(() => host.standing(standing));
+  host.reporting = reported.catch(() => {});
+  await reported;
 }
 
 /**
