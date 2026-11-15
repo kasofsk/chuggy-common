@@ -469,7 +469,7 @@ async function restoredAttempt({ wakes, open, call }, file) {
   return JSON.parse(await call(jobHostToolNames.jobList, {}, before));
 }
 
-test("an attempt's restore starts a restart job again, ends any other that was running, fires a timer that fell due, and wakes for each but the job started again", async (t) => {
+test("an attempt's restore starts a restart job again, ends any other that was running, fires a timer that fell due, and wakes for each", async (t) => {
   const hosted = await hostOf(t);
   const { directory, clock, wakes, standings, open, call } = hosted;
   const file = join(directory, "out.log");
@@ -487,6 +487,7 @@ test("an attempt's restore starts a restart job again, ends any other that was r
   assert.deepEqual(
     wakes.map(({ wake, resource }) => [wake, resource]),
     [
+      ["AttemptEnded", "kept"],
       ["AttemptEnded", "plain"],
       ["TimerDue", "due"],
     ],
