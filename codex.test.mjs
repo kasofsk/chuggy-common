@@ -100,28 +100,32 @@ test("a Codex briefing is the prompt whatever options precede it", () => {
 /**
  * Catches a resumed run that starts a new thread, takes the prompt as a value
  * of an option before it, or drops the options the first run had, such as its
- * result schema.
+ * result schema; and one that hands `resume` an option only `exec` reads, as
+ * `--add-dir` is, or lets `--image` take `resume` as one of its files.
  */
-test("a Codex run resumed is `exec resume` of its thread with the run's options, told its prompt", () => {
+test("a Codex run resumed is `exec <options> resume` of its thread, told its prompt", () => {
   const shelled = { ...run, shellArguments: ["--config", "shell"] };
+  const configured = ["--add-dir", "/extra", "--image", "a.png"];
   const argv = codexResumeInvocation(
     {
       ...task,
-      worker: {
-        mode: { ...task.worker.mode, arguments: ["--image", "a.png"] },
-      },
+      worker: { mode: { ...task.worker.mode, arguments: configured } },
     },
     "thread-1",
     { ...shelled, prompt: "resolve it" },
   );
+  const own = codexInvocation(task, shelled).slice(1, -2);
 
-  assert.deepEqual(argv.slice(0, 2), ["exec", "resume"]);
-  assert.deepEqual(argv.slice(2, -3), [
-    ...codexInvocation(task, shelled).slice(1, -2),
-    "--image",
-    "a.png",
+  assert.deepEqual(argv, [
+    "exec",
+    ...configured,
+    ...own,
+    "resume",
+    "--",
+    "thread-1",
+    "resolve it",
   ]);
-  assert.deepEqual(argv.slice(-3), ["--", "thread-1", "resolve it"]);
+  assert.match(own[0], /^--/);
   assert.equal(codexAgent.resumeInvocation, codexResumeInvocation);
 });
 

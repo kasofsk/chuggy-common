@@ -111,10 +111,16 @@ function codexEffortArguments(task) {
  * to turn on, so it is turned off here.
  */
 export function codexInvocation(task, run) {
-  return ["exec", ...codexOptions(task, run), "--", task.briefing.text];
+  return [
+    "exec",
+    ...codexOptions(task, run),
+    ...configuredArguments(task),
+    "--",
+    task.briefing.text,
+  ];
 }
 
-/** The options of a run and of a resumed one, which `codex exec resume` takes as `codex exec` does. */
+/** The options the core gives a run and a resumed one. */
 function codexOptions(task, run) {
   return [
     "--json",
@@ -129,19 +135,22 @@ function codexOptions(task, run) {
     "--output-schema",
     run.resultSchema,
     ...run.shellArguments,
-    ...configuredArguments(task),
   ];
 }
 
 /**
- * The same run carrying on in the thread `session` named, told `run.prompt`,
- * which follows the thread after `--` as the briefing follows `codex exec`.
+ * The same run carrying on in the thread `session` named, told `run.prompt`.
+ * Every option goes to `exec`, ahead of `resume`, since `resume` reads its
+ * parent's options and takes few of its own: `--add-dir` is `exec`'s alone. The worker's configured options come first, so one that
+ * takes every word after it, as `--image` does, ends at the core's own and
+ * never takes `resume` as a value.
  */
 export function codexResumeInvocation(task, session, run) {
   return [
     "exec",
-    "resume",
+    ...configuredArguments(task),
     ...codexOptions(task, run),
+    "resume",
     "--",
     session,
     run.prompt,

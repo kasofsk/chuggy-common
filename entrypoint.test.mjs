@@ -8578,8 +8578,9 @@ test("a Codex run whose end merge conflicts resumes its thread with the nudge, a
     const starts = await runtime.starts();
     assert.equal(starts.length, 3);
     const { argv } = starts[2];
-    assert.deepEqual(argv.slice(0, 2), ["exec", "resume"]);
-    assert.deepEqual(argv.slice(-3), [
+    assert.equal(argv[0], "exec");
+    assert.deepEqual(argv.slice(-4), [
+      "resume",
       "--",
       codexThread,
       targetMergeMovedNudge({ named: targetRef, tip, paths: ["README.md"] }),
