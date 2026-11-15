@@ -92,7 +92,10 @@ import {
   sessionTurnToolNameCharsMax,
   sessionTurnToolsMax,
 } from "@chuggy/worker-contract/sessionPlane";
-import { chuggyToolServerName } from "@chuggy/worker-contract/sessionTools";
+import {
+  chuggyToolPrefix,
+  chuggyToolServerName,
+} from "@chuggy/worker-contract/sessionTools";
 import { workerContractSessionContext } from "@chuggy/worker-contract/workerContract";
 import { leadDecisionDocumentSchema } from "@chuggy/worker-contract/workerDocuments";
 import {
@@ -125,6 +128,7 @@ import {
   contextCompaction,
   contextWindow,
 } from "./contextReading.mjs";
+import { jobHost, jobHostWakeSender } from "./jobHost.mjs";
 import { leadDecisionStaging } from "./leadDecision.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import {
@@ -722,13 +726,16 @@ export function sessionQueryOptions(
   store,
   environment,
   credential,
-  { servers = {}, checkout, git = [], bearer } = {},
+  { servers = {}, checkout, git = [], bearer, jobTools = [] } = {},
 ) {
   const workspace =
     environment[workerWorkspaceVariable] ?? workerWorkspaceDirectory;
-  const { allowedTools, disallowedTools } = sessionAllowedTools(
-    facts.capabilities,
-  );
+  const roster = sessionAllowedTools(facts.capabilities);
+  const allowedTools = [
+    ...roster.allowedTools,
+    ...jobTools.map((tool) => `${chuggyToolPrefix}${tool}`),
+  ];
+  const { disallowedTools } = roster;
   const model = facts.model ?? environment[sessionModelVariable];
   const fork = sessionForkFrom(facts);
   const own = sessionPromptOwn(facts);
@@ -739,21 +746,10 @@ export function sessionQueryOptions(
     sessionStore: store,
     sessionStoreFlush: "eager",
     cwd: checkout?.directory ?? (own ? sessionTreeEmpty(workspace) : workspace),
-    env: {
-      ...workerEnvironmentWithout(environment, [
-        ...credential.withheld,
-        ...(facts.effort === undefined ? [] : [sessionEffortVariable]),
-        sessionApiOriginVariable,
-        sessionBearerVariable,
-      ]),
-      ...credential.environment,
-      ...sessionShellCredential(task, facts, bearer),
-      [sessionConfigDirectoryVariable]: sessionConfigDirectory(
-        environment,
-        workspace,
-      ),
-      ...workerGitEnvironment(environment, git),
-    },
+    env: sessionRuntimeEnvironment(task, facts, environment, credential, {
+      git,
+      bearer,
+    }),
     mcpServers: servers,
     systemPrompt: sessionSystemPrompt(facts, checkout, builtIns),
     ...(own
@@ -784,6 +780,36 @@ export function sessionQueryOptions(
       ? { settings: { autoCompactWindow: facts.autoCompactWindow } }
       : {}),
     ...(sessionReportsLive(facts) ? { includePartialMessages: true } : {}),
+  };
+}
+
+/**
+ * The environment the runtime, and so its shell, is started on, which a job
+ * host's jobs are started on too.
+ */
+function sessionRuntimeEnvironment(
+  task,
+  facts,
+  environment,
+  credential,
+  { git, bearer },
+) {
+  const workspace =
+    environment[workerWorkspaceVariable] ?? workerWorkspaceDirectory;
+  return {
+    ...workerEnvironmentWithout(environment, [
+      ...credential.withheld,
+      ...(facts.effort === undefined ? [] : [sessionEffortVariable]),
+      sessionApiOriginVariable,
+      sessionBearerVariable,
+    ]),
+    ...credential.environment,
+    ...sessionShellCredential(task, facts, bearer),
+    [sessionConfigDirectoryVariable]: sessionConfigDirectory(
+      environment,
+      workspace,
+    ),
+    ...workerGitEnvironment(environment, git),
   };
 }
 
@@ -828,17 +854,23 @@ async function post(context, path, body) {
 }
 
 /**
- * A chat host's thread reporting it is not standing: nothing of a session
- * outlives its attempt (`./chatSession.mjs`), so no job of it is one its host
- * restarts. The report is advisory, so a body or a thread the plane refuses is
- * warned of and the session carries on; a stop on the session ends it.
+ * A chat host's thread reporting whether it is standing: whether its job host
+ * (`./jobHost.mjs`) holds a job the thread's next attempt starts again, which
+ * a thread holding none never does. The report is advisory, so a body or a
+ * thread the plane refuses is warned of and the session carries on; a stop on
+ * the session raises.
  */
-export async function sessionStandingReported(task, bearer, { request, warn }) {
+export async function sessionStandingReported(
+  task,
+  bearer,
+  { request, warn },
+  standing = false,
+) {
   const { path } = sessionPlaneRoutes.standing;
   const response = await request(task, bearer, path, {
     method: "PUT",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ standing: false }),
+    body: JSON.stringify({ standing }),
   });
   if (response.status === acceptedStatus) return;
   const body = await response.json().catch(() => undefined);
@@ -1348,6 +1380,7 @@ function sessionToolServers(context, facts, environment, services, sdk) {
         ...(services.chuggyRequest === undefined
           ? {}
           : { request: services.chuggyRequest }),
+        ...(context.jobHost === undefined ? {} : { jobHost: context.jobHost }),
       }),
       sdk,
     ),
@@ -1360,7 +1393,7 @@ function sessionToolServers(context, facts, environment, services, sdk) {
  * nothing for the next one to inherit. A claim is also where the watch for a
  * member's stop of the turn begins, in a session that holds one, and a claim
  * and a settlement are what `turnHeld` is told of, which a chat supervisor's
- * drain waits on.
+ * drain waits on. Its idle bound waits while the session's job host is busy.
  */
 function sessionStagedMailbox(
   context,
@@ -1378,6 +1411,7 @@ function sessionStagedMailbox(
       context.stops?.watching(turn.turn);
     },
     settle: () => turnHeld(false),
+    busy: () => context.jobHost?.busy() === true,
   });
 }
 
@@ -1405,6 +1439,7 @@ async function sessionRuntime(
         ...(checkout === undefined ? {} : { checkout }),
         git,
         bearer: context.bearer,
+        jobTools: (context.jobHost?.definitions ?? []).map(({ name }) => name),
       },
     ),
   });
@@ -1498,6 +1533,73 @@ function sessionStops(context, facts, { services, pause, warn }) {
 }
 
 /**
+ * Whether this session holds a job host, which a thread a chat host runs
+ * does where its agent has a shell, and no other session does.
+ */
+function sessionHoldsJobHost(facts, services) {
+  return (
+    services.chatHost === true &&
+    facts.kind === "Thread" &&
+    sessionRunsCommands(facts)
+  );
+}
+
+/**
+ * The job host a session holds (`./jobHost.mjs`), in the thread's directory,
+ * which is the session's workspace, its jobs started on the runtime's own
+ * environment, its wakes and its standing offered under the session's bearer
+ * and what it says scrubbed onto the session's output; nothing where the
+ * session holds none. Its restore is done once the wakes it offered are
+ * posted. `services.jobHost` is a suite's seams.
+ */
+function sessionJobHost(context, facts, opened, git) {
+  const { environment, credential, services, pause, warn } = opened;
+  if (!sessionHoldsJobHost(facts, services)) return undefined;
+  const said = (text) => warn(context.scrub(text));
+  const wakes = jobHostWakeSender(context.task, context.bearer, {
+    request: context.request,
+    pause,
+    warn: said,
+  });
+  const held = jobHost({
+    directory: environment[workerWorkspaceVariable] ?? workerWorkspaceDirectory,
+    environment: sessionRuntimeEnvironment(
+      context.task,
+      facts,
+      environment,
+      credential,
+      { git, bearer: context.bearer },
+    ),
+    wake: wakes.offer,
+    standing: (standing) =>
+      sessionStandingReported(
+        context.task,
+        context.bearer,
+        { request: context.request, warn },
+        standing,
+      ),
+    warn: said,
+    now: context.now,
+    ...services.jobHost,
+  });
+  return {
+    ...held,
+    restore: async () => {
+      await held.restore();
+      await wakes.settled();
+    },
+    settled: async () => {
+      await held.settled();
+      await wakes.settled();
+    },
+    close: async () => {
+      wakes.close();
+      await held.close();
+    },
+  };
+}
+
+/**
  * A stop its launcher asks for, which ends the mailbox as the plane's own stop
  * does: the turn being answered runs to its result, no further turn is
  * claimed, and the runtime's input ends. One asked before the mailbox was
@@ -1517,7 +1619,9 @@ function sessionStopHeard(context, stopped) {
  * speaks with or one of the refusals that stands in place of one. Both
  * refusals are a session the site placed and did not equip — with no
  * transcript to fork, or with no repository it can reach — and both are
- * checked after the mailbox, because the refusal is a failed turn.
+ * checked after the mailbox, because the refusal is a failed turn. A job host
+ * the session holds is restored before the runtime opens, and so before its
+ * first turn, and closed as the session ends.
  *
  * A SESSION THAT FAILS ENDS. The runtime reads the mailbox on its own, so a
  * throw out of the turns leaves its input waiting on a turn nobody will settle
@@ -1555,6 +1659,8 @@ async function sessionRun(context, facts, opened) {
   context.stops = sessionStops(context, facts, opened);
   const reads = await sessionReads(context, facts, opened);
   try {
+    context.jobHost = sessionJobHost(context, facts, opened, reads.git);
+    await context.jobHost?.restore();
     context.runtime = await sessionRuntime(context, {
       ...opened,
       facts,
@@ -1571,6 +1677,7 @@ async function sessionRun(context, facts, opened) {
     context.mailbox.stop();
     context.stops?.released();
     context.live?.close();
+    await context.jobHost?.close();
     await reads.close();
   }
 }
@@ -1644,9 +1751,14 @@ function sessionMainContext(task, bearer, { request, ...held }) {
   return context;
 }
 
-/** The standing a session reports where it is a chat host's thread, and nowhere else. */
+/**
+ * The standing a session reports where it is a chat host's thread, and
+ * nowhere else, as it starts, where it holds no job host: one that does
+ * reports its own once it is restored.
+ */
 async function sessionMainStanding(context, facts, services, warn) {
   if (services.chatHost !== true || facts.kind !== "Thread") return;
+  if (sessionHoldsJobHost(facts, services)) return;
   await sessionStandingReported(context.task, context.bearer, {
     request: context.request,
     warn,

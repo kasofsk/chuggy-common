@@ -64,6 +64,7 @@
     "imageRecord.mjs",
     "imageSweep.mjs",
     "job.mjs",
+    "jobHost.mjs",
     "keptWorkspace.mjs",
     "leadDecision.mjs",
     "lease.mjs",

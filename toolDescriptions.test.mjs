@@ -24,6 +24,7 @@ import {
   chuggyToolServer,
   sessionCapabilityTools,
 } from "./chuggyTools.mjs";
+import { jobHost, jobHostToolNames } from "./jobHost.mjs";
 import { leadDecisionStaging } from "./leadDecision.mjs";
 import { localToolContext, localToolServer } from "./localTools.mjs";
 
@@ -64,12 +65,13 @@ function recorded() {
  * `createSdkMcpServer` registers each of its `tool`s on an `McpServer`, and
  * this does the same, since the agent SDK is not this repository's to carry.
  */
-function podServer(request) {
+function podServer(request, held) {
   return chuggyToolServer(
     chuggyToolContext({ tenant: "t", project: "p" }, "bearer", {
       capabilities: Object.keys(sessionCapabilityTools),
       staging: leadDecisionStaging(),
       ...(request === undefined ? {} : { request }),
+      ...(held === undefined ? {} : { jobHost: held }),
     }),
     {
       z,
@@ -124,8 +126,27 @@ function toolDescriptionFaults({ name, description, inputSchema }) {
   return faults;
 }
 
+/** The pod's server for a chat host's thread, which holds a job host too. */
+function podServerJobs() {
+  return podServer(
+    undefined,
+    jobHost({
+      directory: "/sessions/threads/thread",
+      environment: {},
+      wake: () => undefined,
+      standing: async () => undefined,
+      warn: () => undefined,
+    }),
+  );
+}
+
 for (const [server, built, roster] of [
   ["the pod's server", podServer, allChuggyTools],
+  [
+    "a chat host's thread's server",
+    podServerJobs,
+    [...allChuggyTools, ...Object.values(jobHostToolNames)],
+  ],
   ["the local server", localServer, chuggyProjectTools.map(({ name }) => name)],
 ])
   test(`${server} lists every tool opening with a short sentence and every parameter described`, async () => {

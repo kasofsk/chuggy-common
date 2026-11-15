@@ -2987,7 +2987,8 @@ export const chuggyOfferTools = [
  * Every tool this session holds, project, member, offer and decision alike,
  * filtered by the capability roster its row carries. A tool the roster does
  * not admit is not registered at all, so the runtime's own tool list is the
- * proof rather than this source.
+ * proof rather than this source. The tools of a job host (`./jobHost.mjs`)
+ * are the session's, held where it holds one, and no roster names them.
  */
 export function chuggyToolDefinitions(context) {
   const admitted = new Set(
@@ -3003,9 +3004,15 @@ export function chuggyToolDefinitions(context) {
     ...definition,
     call: (args) => definition.call(context, scrubbedArguments(args, context)),
   }));
-  return [...served, ...context.staging.definitions].filter((definition) =>
-    admitted.has(definition.name),
-  );
+  return [
+    ...[...served, ...context.staging.definitions].filter((definition) =>
+      admitted.has(definition.name),
+    ),
+    ...(context.jobHost?.definitions ?? []).map((definition) => ({
+      ...definition,
+      call: (args) => definition.call(context, args),
+    })),
+  ];
 }
 
 /** `value` with every string in it, each key included, scrubbed of the session's secrets. */
@@ -3158,7 +3165,7 @@ export function chuggyToolServer(context, sdk) {
   });
 }
 
-/** What one session's tools are held in: its task, its bearer, this turn's staging, where its images are written, how the public docs are fetched, and the scrub of what they send. */
+/** What one session's tools are held in: its task, its bearer, this turn's staging, where its images are written, how the public docs are fetched, the scrub of what they send, and its job host where it holds one. */
 export function chuggyToolContext(task, bearer, services = {}) {
   return {
     task,
@@ -3171,5 +3178,6 @@ export function chuggyToolContext(task, bearer, services = {}) {
     staging: services.staging ?? leadDecisionStaging(),
     imageFile: services.imageFile ?? chuggyToolImageFiles(),
     docsFetch: services.docsFetch ?? globalThis.fetch,
+    ...(services.jobHost === undefined ? {} : { jobHost: services.jobHost }),
   };
 }
