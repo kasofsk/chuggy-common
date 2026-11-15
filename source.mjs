@@ -48,9 +48,6 @@ const sourceTargetPrefix = "chuggy-target-";
 /** Where a fetched target's tip is held, in the repository it is fetched into and then in the workspace. */
 const sourceTargetSeenRef = "refs/chuggy/target";
 
-/** Where a repository's GitHub workflows are, which a push needs the forge's leave to change. */
-const sourcePipelinesPath = ".github/workflows/";
-
 /** Where the index a target's merge stopped with is kept, in the workspace's git directory. */
 const sourceTargetStoppedIndex = "chuggy-target-merge-index";
 
@@ -1124,15 +1121,16 @@ export async function sourceTargetContained({
 }
 
 /**
- * The paths under `.github/workflows/` that merging `tip` into `HEAD` would
+ * The paths under the pathspecs `paths` that merging `tip` into `HEAD` would
  * change, and that would then differ from `base`, the commit the push
- * replaces: what a job that may not write pipelines cannot push. It is read
+ * replaces: what a job whose push may not change them cannot push. It is read
  * from the tree git would merge to, so nothing in the workspace moves, and a
  * path the merge would leave conflicted counts.
  */
-export async function sourcePipelinesBrought({
+export async function sourcePathsBrought({
   base,
   tip,
+  paths,
   directory,
   command,
   git = [],
@@ -1162,7 +1160,7 @@ export async function sourcePipelinesBrought({
         from,
         merged,
         "--",
-        sourcePipelinesPath,
+        ...paths,
       ],
       local,
     );

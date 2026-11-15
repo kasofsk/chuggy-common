@@ -54,6 +54,7 @@ export const pushed = workTaskDocumentSchema.strict().parse({
   },
   targetRef: "refs/heads/main",
   targetMerge: { ref: "refs/heads/main", pipelinesWritable: true },
+  pushPathsRefused: [".github/workflows/"],
   workerPlane: {
     url: "http://worker-plane.test:3001",
     capabilityFile: "/run/worker-plane.test/bearer",
