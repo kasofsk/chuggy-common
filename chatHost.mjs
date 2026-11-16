@@ -17,6 +17,11 @@
  * is drained too, standing sessions with the rest, and none is started
  * before the release installs, once no session is held.
  *
+ * AN END IS BOUNDED BY THE TIME ITS CALLER GIVES IT. It polls no more, ends
+ * the supervisor, which ends every session, and names each session that
+ * ended to the plane, and then `run` answers `Ended`; what the plane has not
+ * answered by then it learns at the host's next poll or as a lease lapses.
+ *
  * UNTIL A SUPERVISOR IS READY THE HOST HAS NO ROOM, and its polls name none
  * and ask for an answer at once, a short wait apart: a plane takes a host
  * with no room and nothing held as one that is not live. A start never holds
@@ -1110,9 +1115,15 @@ export function checkedChatHostSettings(settings, engineName) {
  * @property {Promise<void> | undefined} starting a supervisor's start, while one runs
  * @property {string | undefined} startingIn the image that start is in
  * @property {AbortController} cut aborted once the host ends, which cuts a pull short and starts nothing more
+ * @property {number | undefined} endWaitMs what its end was given, once it was asked to end
+ * @property {Promise<void>} endAsked settles once it is asked to end
+ * @property {() => void} endAsk settles `endAsked`
+ *
+ * @typedef {Extract<WorkerPoolPass, {passed: "Denied" | "Updated"}> | {passed: "Ended"}} ChatHostOutcome
  *
  * @typedef {object} ChatHost
- * @property {() => Promise<Extract<WorkerPoolPass, {passed: "Denied" | "Updated"}>>} run passes until the plane denies the host or its runner has updated itself, its supervisor ended after
+ * @property {() => Promise<ChatHostOutcome>} run passes until the plane denies the host, its runner has updated itself, or it is ended, its supervisor ended after
+ * @property {(waitMs: number) => void} end stops its passes, ends its supervisor and names each session that ended to the plane, within `waitMs`, after which `run` answers `Ended`
  * @property {() => ChatHostStatus} status
  */
 
@@ -1177,10 +1188,12 @@ export function chatHost(credentials, settings, seams) {
     starting: undefined,
     startingIn: undefined,
     cut: new globalThis.AbortController(),
+    ...chatHostEnding(),
   };
   client.plane = chatHostPlane(state, client.plane);
   return {
     run: () => chatHostRun(state),
+    end: (waitMs) => chatHostEnd(state, waitMs),
     status: () => ({
       named: state.named,
       used: state.used,
@@ -1192,6 +1205,33 @@ export function chatHost(credentials, settings, seams) {
         : { startingIn: state.startingIn }),
     }),
   };
+}
+
+/** A host's end, not yet asked. */
+function chatHostEnding() {
+  /** @type {() => void} */
+  let endAsk = () => undefined;
+  /** @type {Promise<void>} */
+  const endAsked = new Promise((resolve) => {
+    endAsk = resolve;
+  });
+  return { endWaitMs: undefined, endAsked, endAsk };
+}
+
+/**
+ * The host asked to end within `waitMs`; an end asked again keeps the first.
+ *
+ * @param {ChatHostState} state
+ * @param {number} waitMs
+ */
+function chatHostEnd(state, waitMs) {
+  if (!Number.isSafeInteger(waitMs) || waitMs < 1)
+    throw new RangeError(
+      "a chat host's end must be given a positive integer of ms",
+    );
+  if (state.endWaitMs !== undefined) return;
+  state.endWaitMs = waitMs;
+  state.endAsk();
 }
 
 /**
@@ -1217,11 +1257,14 @@ async function chatHostPass(state, updating) {
 }
 
 /**
- * The pool loop until the plane denies the host, or its runner has
- * installed the release it updates itself to, after which its supervisor is
- * ended, stopping every session it runs.
+ * The pool loop until the plane denies the host, its runner has installed
+ * the release it updates itself to, or it is ended, after which its
+ * supervisor is ended, stopping every session it runs. An end names each
+ * session that ended to the plane, and waits on neither the supervisor nor
+ * the plane past the time it was given.
  *
  * @param {ChatHostState} state
+ * @returns {Promise<ChatHostOutcome>}
  */
 async function chatHostRun(state) {
   const { seams } = state;
@@ -1232,33 +1275,116 @@ async function chatHostRun(state) {
           log: seams.log,
           nowMs: seams.nowMs,
         });
+  /** @type {ChatHostOutcome | undefined} */
+  let outcome;
   try {
-    for (;;) {
-      const { pass, waiting } = await chatHostPass(state, updating);
-      if (pass.passed === "Updated") return pass;
-      if (pass.passed === "Denied") {
-        seams.log(`the plane denied this chat host: ${pass.evidence}`);
-        return pass;
-      }
-      if (pass.passed === "Unavailable") {
-        seams.log(`outage: ${pass.evidence}`);
-        await seams.sleep(state.client.settings.outageBackoffMs);
-        continue;
-      }
-      if (pass.placed + pass.stopped + pass.refused + pass.ended > 0)
-        seams.log(poolRunnerPassLine(pass));
-      if (waiting) await chatHostUnready(state);
-      else if (pass.placed === 0 && state.backend.stopping().length > 0)
-        await seams.sleep(chatHostStoppingWaitMs);
-      else if (pass.claim !== undefined)
-        await seams.sleep(workerPoolClaimWaitMs);
-    }
+    outcome = await chatHostPassed(state, updating);
+    return outcome;
   } finally {
     state.cut.abort();
-    await state.backend.closed();
-    await state.starting;
-    await state.backend.closed();
+    const closing = chatHostRunClosed(state);
+    await (outcome?.passed === "Ended"
+      ? chatHostRunEnded(state, closing)
+      : closing);
   }
+}
+
+/**
+ * Passes until one denies the host or installs its runner's release, or
+ * until it is asked to end, which cuts short a pass or a wait under way.
+ *
+ * @param {ChatHostState} state
+ * @param {import("./poolLoop.mjs").WorkerPoolUpdating | undefined} updating
+ * @returns {Promise<ChatHostOutcome>}
+ */
+async function chatHostPassed(state, updating) {
+  const { seams } = state;
+  const ended = /** @type {const} */ ({ passed: "Ended" });
+  for (;;) {
+    if (state.endWaitMs !== undefined) return ended;
+    const passing = await chatHostUnlessEnded(
+      state,
+      chatHostPass(state, updating),
+    );
+    if (passing === undefined) return ended;
+    const { pass, waiting } = passing;
+    if (pass.passed === "Updated") return pass;
+    if (pass.passed === "Denied") {
+      seams.log(`the plane denied this chat host: ${pass.evidence}`);
+      return pass;
+    }
+    if (pass.passed === "Unavailable") {
+      seams.log(`outage: ${pass.evidence}`);
+      await chatHostUnlessEnded(
+        state,
+        seams.sleep(state.client.settings.outageBackoffMs),
+      );
+      continue;
+    }
+    if (pass.placed + pass.stopped + pass.refused + pass.ended > 0)
+      seams.log(poolRunnerPassLine(pass));
+    if (waiting) await chatHostUnlessEnded(state, chatHostUnready(state));
+    else if (pass.placed === 0 && state.backend.stopping().length > 0)
+      await chatHostUnlessEnded(state, seams.sleep(chatHostStoppingWaitMs));
+    else if (pass.claim !== undefined)
+      await chatHostUnlessEnded(state, seams.sleep(workerPoolClaimWaitMs));
+  }
+}
+
+/**
+ * What `work` settles to, or nothing where the host is asked to end first;
+ * work so left behind runs on against a supervisor that takes nothing more.
+ *
+ * @template T
+ * @param {ChatHostState} state
+ * @param {Promise<T>} work
+ * @returns {Promise<T | undefined>}
+ */
+function chatHostUnlessEnded(state, work) {
+  return Promise.race([work, state.endAsked.then(() => undefined)]);
+}
+
+/** The supervisor ended, and one whose start was under way. */
+async function chatHostRunClosed(state) {
+  await state.backend.closed();
+  await state.starting;
+  await state.backend.closed();
+}
+
+/**
+ * Once `closing` has ended the supervisor, each session that ended named to
+ * the plane, as a pass names one that ended of itself; whatever is not done
+ * within the end's time is left, and the plane learns of those sessions at
+ * the host's next poll or as their leases lapse.
+ *
+ * @param {ChatHostState} state
+ * @param {Promise<void>} closing
+ */
+async function chatHostRunEnded(state, closing) {
+  const waitMs = /** @type {number} */ (state.endWaitMs);
+  const named = closing.then(async () => {
+    const answers = await Promise.all(
+      (await state.backend.ended()).map((workload) => {
+        if (workload.kind !== "Session")
+          throw new TypeError(
+            "a chat host ended a workload that is no session",
+          );
+        return state.client.sessions.end(workload);
+      }),
+    );
+    return answers.filter((answer) => answer === "Ended").length;
+  });
+  let timer;
+  const late = new Promise((resolve) => {
+    timer = globalThis.setTimeout(() => resolve(undefined), waitMs);
+  });
+  const ended = await Promise.race([named, late]);
+  globalThis.clearTimeout(timer);
+  state.seams.log(
+    ended === undefined
+      ? `this chat host ended without its supervisor and its sessions' ends settled within ${String(waitMs)} ms, which the plane is left to notice`
+      : `this chat host ended, and ${String(ended)} sessions were named to the plane as ended`,
+  );
 }
 
 /** The wait of a host with no room, which a start that settles ends sooner. */
