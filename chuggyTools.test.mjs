@@ -4178,6 +4178,7 @@ const projectToolArguments = {
   },
   retry_paused_agent: { agent: "Claude" },
   retire_credential: { agent: "Claude", credential: "work" },
+  merge_pull_request: { ticket: 26 },
 };
 
 /** What every member tool is driven with where a suite drives them all. */
@@ -5927,5 +5928,110 @@ test("every agent-account tool says it acts on the caller's own account at no te
       /your owner's own account, at no tenant and no project, whichever project this server is bound to\./u,
       name,
     );
+  }
+});
+
+/** The route merge_pull_request posts to for ticket 26 of the session's project. */
+const proposalMergePath =
+  "/api/v1/tenants/vteng/projects/chuggy/tickets/26/proposal-merge";
+
+/** The pull request a merge answer links to. */
+const proposalMergeUrl = "https://github.com/vteng/chuggy/pull/7";
+
+test("merge_pull_request makes the one POST to its ticket's proposal-merge route, with no body", async () => {
+  const { api, call } = toolsOf({}, () => ({
+    status: 200,
+    body: JSON.stringify({ outcome: "Merged", url: proposalMergeUrl }),
+  }));
+
+  const answer = await call("merge_pull_request", { ticket: 26 });
+
+  assert.equal(answer.isError, undefined, textOf(answer));
+  assert.deepEqual(
+    api.calls.map((asked) => [asked.method, asked.path, asked.init.body]),
+    [["POST", proposalMergePath, undefined]],
+  );
+});
+
+test("merge_pull_request relays every answer the route gives, each refusal by its name with its url", async () => {
+  const merged = JSON.stringify({
+    outcome: "Merged",
+    mergeCommit: "a".repeat(40),
+    url: proposalMergeUrl,
+  });
+  const refusedOf = (refused) =>
+    JSON.stringify({
+      error: { code: "ProposalMergeRefused", message: "m" },
+      refused,
+      url: proposalMergeUrl,
+    });
+  const errorOf = (code) => JSON.stringify({ error: { code, message: "m" } });
+  for (const [status, body] of [
+    [200, merged],
+    [403, errorOf("ProposalMergeForbidden")],
+    [404, errorOf("NotFound")],
+    ...[
+      "Closed",
+      "Conflicting",
+      "Blocked",
+      "Behind",
+      "HeadMoved",
+      "NotMergeable",
+      "AppDenied",
+    ].map((refused) => [409, refusedOf(refused)]),
+  ]) {
+    const { api, call } = toolsOf({}, () => ({ status, body }));
+
+    const answer = await call("merge_pull_request", { ticket: 26 });
+
+    assert.equal(textOf(answer), `HTTP ${String(status)}\n${body}`);
+    assert.equal(answer.isError, status >= 400 ? true : undefined, body);
+    assert.equal(api.calls.length, 1, body);
+  }
+});
+
+test("merge_pull_request refuses a ticket the contract does not admit and asks nothing", async () => {
+  for (const args of [{}, { ticket: 0 }, { ticket: 2.5 }, { ticket: "26" }]) {
+    const { api, call } = toolsOf();
+
+    const answer = await call("merge_pull_request", args);
+
+    assert.equal(answer.isError, true, JSON.stringify(args));
+    assert.deepEqual(api.calls, [], JSON.stringify(args));
+  }
+});
+
+test("merge_pull_request's description names every refusal and says to ask the person first", () => {
+  const { description } = chuggyProjectTools.find(
+    (tool) => tool.name === "merge_pull_request",
+  );
+  for (const named of [
+    "read_ticket_landings first",
+    "review and merge it themselves",
+    "Merged",
+    "403 ProposalMergeForbidden",
+    "MergeProposals",
+    "404",
+    "Closed",
+    "Conflicting",
+    "Blocked",
+    "Behind",
+    "HeadMoved",
+    "NotMergeable",
+    "AppDenied",
+    "one line with that link",
+  ])
+    assert.ok(description.includes(named), named);
+});
+
+test("no session's roster allows merge_pull_request", () => {
+  const tool = `${chuggyToolPrefix}merge_pull_request`;
+  for (let subset = 0; subset < 2 ** sessionCapabilities.length; subset += 1) {
+    const roster = sessionCapabilities.filter(
+      (_, index) => ((subset >> index) & 1) === 1,
+    );
+    const { allowedTools, disallowedTools } = sessionAllowedTools(roster);
+    assert.ok(!allowedTools.includes(tool), roster.join(","));
+    assert.ok(disallowedTools.includes(tool), roster.join(","));
   }
 });

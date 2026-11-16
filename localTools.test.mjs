@@ -132,7 +132,7 @@ test("a person's agent is given every project tool and no decision tool, under o
   assert.notEqual(context.turn(), first);
 });
 
-test("a person's agent is given every lead settings, placement and agent-account tool", () => {
+test("a person's agent is given every lead settings, placement, agent-account and pull request merge tool", () => {
   const context = localToolContext({
     site: "https://chuggy.test",
     tenant: "vteng",
@@ -144,14 +144,18 @@ test("a person's agent is given every lead settings, placement and agent-account
   localToolServer(context, sdk);
   const served = new Set(registered.map(({ name }) => name));
 
-  for (const capability of ["ProjectSettings", "AgentAccounts"]) {
+  for (const capability of [
+    "ProjectSettings",
+    "AgentAccounts",
+    "ProposalMerge",
+  ]) {
     assert.ok(chuggyToolCapabilities[capability].length > 0, capability);
     for (const tool of chuggyToolCapabilities[capability])
       assert.ok(served.has(tool), tool);
   }
 });
 
-test("the server's instructions say how to change the lead's prompt and move it onto the subsidized lead", () => {
+test("the server's instructions say how to change the lead's prompt, move it onto the subsidized lead and merge a ticket's pull request", () => {
   const instructions = localToolInstructions({
     tenant: "vteng",
     project: "chuggy",
@@ -163,6 +167,10 @@ test("the server's instructions say how to change the lead's prompt and move it 
   assert.match(
     instructions,
     /^To move the lead onto the subsidized lead: read_docs the page "The subsidized lead", then update_placement\.$/mu,
+  );
+  assert.match(
+    instructions,
+    /^To merge a ticket's pull request: read_ticket_landings, ask the person whether they want chuggy to merge it, then merge_pull_request\.$/mu,
   );
 });
 

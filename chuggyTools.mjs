@@ -2859,6 +2859,17 @@ export const chuggyProjectTools = [
         "DELETE",
       ),
   },
+  {
+    name: "merge_pull_request",
+    description: `Merges the pull request one ticket's landing opened, through chuggy's portal app, on your owner's yes only. read_ticket_landings first, name the pull request by its \`proposal.url\`, and ask whether they want chuggy to merge it or would rather review and merge it themselves: a repository with its own history may have rules an app cannot pass. The answer is the API's, its status and body unaltered: 200 \`outcome\` Merged, also where it was merged already; 403 ProposalMergeForbidden where your owner lacks the MergeProposals permit, \`mergeProposals\` in read_abilities; 404 for a ticket with no proposed landing; and 409 with \`refused\`, Closed, Conflicting, Blocked, Behind, HeadMoved, NotMergeable or AppDenied, and the pull request's \`url\`. On a 409 say the reason in one line with that link and leave the merge to your owner.`,
+    shape: (z) => ({ ticket: ticket(z) }),
+    call: (context, args) =>
+      write(
+        context,
+        projectPath(context, "ticketProposalMerge", { ticket: args.ticket }),
+        "POST",
+      ),
+  },
 ];
 
 /**

@@ -76,6 +76,7 @@ export const localToolCapabilities = [
   "TicketDispatch",
   "ProjectSettings",
   "AgentAccounts",
+  "ProposalMerge",
 ];
 
 /** What a submitted command made again answers here, where every call is a turn of its own. */
@@ -97,7 +98,8 @@ To file a ticket:
 8. read_operation: every command is submitted, and this is how its outcome is read.
 Releasing starts nothing: once its dependencies are Done the ticket waits Pending until it is dispatched, by the project's lead unless read_lead answers a lead standing with \`held\` or a \`refusal\`, or no lead for a reason other than \`NotNeeded\` or \`AwaitingSelector\`, and there by dispatch_ticket on the word of the person you act for, or by another person who may dispatch.
 To change the lead's prompt: read_docs the page "Writing a project's lead prompt", then read_lead_settings and update_lead_settings.
-To move the lead onto the subsidized lead: read_docs the page "The subsidized lead", then update_placement.`;
+To move the lead onto the subsidized lead: read_docs the page "The subsidized lead", then update_placement.
+To merge a ticket's pull request: read_ticket_landings, ask the person whether they want chuggy to merge it, then merge_pull_request.`;
 }
 
 const localToolUnauthorizedStatus = 401;
