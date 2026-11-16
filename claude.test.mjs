@@ -420,6 +420,35 @@ test("a Claude run's user settings are under CLAUDE_CONFIG_DIR where it is named
   );
 });
 
+/** Catches the default written into a settings file outside the run's HOME, which is its user's and read by their own sessions. */
+test("user settings under a CLAUDE_CONFIG_DIR outside the run's HOME are left unchanged", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "chuggy-claude-config-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const config = join(root, "operator");
+  const environment = {
+    HOME: join(root, "job", "home"),
+    CLAUDE_CONFIG_DIR: config,
+  };
+  await mkdir(config, { recursive: true });
+  await writeFile(join(config, "settings.json"), '{"model":"opus"}');
+
+  assert.deepEqual(await prepareClaudeEnvironment(environment), {});
+  assert.equal(
+    await readFile(join(config, "settings.json"), "utf8"),
+    '{"model":"opus"}',
+  );
+
+  const owned = {
+    ...environment,
+    CLAUDE_CONFIG_DIR: join(environment.HOME, "config"),
+  };
+  await prepareClaudeEnvironment(owned);
+  assert.deepEqual(
+    JSON.parse(await readFile(claudeUserSettingsPath(owned), "utf8")),
+    { autoCompactWindow: 250_000 },
+  );
+});
+
 /** Catches the window set by the variable that outranks every settings layer, so no workload could choose one. */
 test("a Claude run never sets CLAUDE_CODE_AUTO_COMPACT_WINDOW", async (t) => {
   const run = await claudeWindowRun(t, []);

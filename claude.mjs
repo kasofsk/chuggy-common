@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 
 import {
   claudeCredentialEnvironment,
@@ -195,16 +195,29 @@ export function claudeUserSettingsPath(environment) {
 }
 
 /**
+ * Whether `file` is under the HOME `environment` names, which is the run's
+ * own: the image's in a pod, the job's place on a host.
+ */
+function prepareClaudeEnvironmentOwns(environment, file) {
+  const within = relative(environment.HOME || homedir(), file);
+  return (
+    within !== ".." && !within.startsWith(`..${sep}`) && !isAbsolute(within)
+  );
+}
+
+/**
  * What a Claude run's own process is started with beside `environment`:
  * nothing, once its user settings name a compaction window. Where they name
  * none, `claudeAutoCompactWindowDefault` is added to them, every key they hold
  * kept. The user layer is the lowest Claude Code reads, so a repository's own
  * settings and a workload's `--settings` each outrank it.
  * `CLAUDE_CODE_AUTO_COMPACT_WINDOW` would outrank them all, so it is never set.
- * A file that is not a JSON object is left as it is.
+ * A file that is not a JSON object, or that is outside the run's HOME and so
+ * someone else's, is left as it is.
  */
 export async function prepareClaudeEnvironment(environment) {
   const file = claudeUserSettingsPath(environment);
+  if (!prepareClaudeEnvironmentOwns(environment, file)) return {};
   const text = await readFile(file, "utf8").catch((error) => {
     if (error?.code === "ENOENT") return "{}";
     throw error;

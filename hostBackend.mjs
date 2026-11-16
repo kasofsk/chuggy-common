@@ -171,6 +171,13 @@ const hostWindowsPlaceVariables = ["USERPROFILE", "TEMP", "TMP"];
 const hostWithheldVariables = [...reservedJobVariables, ...hostPlaceVariables];
 
 /**
+ * The runner's own variables naming a place of its user's that a job is not
+ * handed, though the owner's environment may name one: Claude Code's config
+ * directory, which a job's run would otherwise read and write as its own.
+ */
+const hostRunnerPlaceVariables = ["CLAUDE_CONFIG_DIR"];
+
+/**
  * Whether `name` is one chuggy sets for a job on this platform. Windows reads
  * a variable's name whatever its case, so there a runner's `Temp` stands for
  * `TEMP`; elsewhere names are as written.
@@ -295,8 +302,8 @@ function hostRefusal(settings, assignment, kind) {
 }
 
 /**
- * The environment a host job starts with: the runner's, less what chuggy sets,
- * then the owner's, then the job's own.
+ * The environment a host job starts with: the runner's, less what chuggy sets
+ * and its user's own places, then the owner's, then the job's own.
  *
  * @param {Readonly<Record<string, string | undefined>>} inherited
  * @param {Readonly<Record<string, string>>} owned
@@ -320,6 +327,9 @@ export function hostJobEnvironment(
     if (
       value !== undefined &&
       !hostWithheld(name, platform) &&
+      !hostRunnerPlaceVariables.some((place) =>
+        windows ? place === name.toUpperCase() : place === name,
+      ) &&
       // On Windows the owner's `PATH` is the runner's `Path`, and must win.
       !(windows && ownedNames.includes(name.toUpperCase()))
     )
