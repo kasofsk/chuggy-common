@@ -89,12 +89,13 @@ export function poolRunnerTokens(credentials) {
 
 /**
  * @param {PoolCredentials} credentials
- * @param {Pick<import("./poolPlane.mjs").PoolPlaneClientSettings, "runner" | "capabilities" | "idleSecs" | "sessionCapabilities">} named what each poll names: the runner's package and version; its capabilities, less what its backend withholds then, none leaving the set its registration recorded; and a chat host's idle bound and its threads' capabilities, a chat host's alone
+ * @param {Pick<import("./poolPlane.mjs").PoolPlaneClientSettings, "runner" | "capabilities" | "idleSecs" | "sessionCapabilities" | "ticketWakes">} named what each poll names: the runner's package and version; its capabilities, less what its backend withholds then, none leaving the set its registration recorded; and a chat host's idle bound, its threads' capabilities and whether they are woken for their tickets, a chat host's alone
  * @param {typeof globalThis.fetch} [fetcher] the fetch the plane is reached by, when not the global one
  * @returns {WorkerPoolClient["plane"]}
  */
 export function poolRunnerPlane(credentials, named, fetcher) {
-  const { runner, capabilities, idleSecs, sessionCapabilities } = named;
+  const { runner, capabilities, idleSecs, sessionCapabilities, ticketWakes } =
+    named;
   return poolPlaneClient(
     {
       baseUrl: credentials.planeUrl,
@@ -103,6 +104,7 @@ export function poolRunnerPlane(credentials, named, fetcher) {
       ...(capabilities === undefined ? {} : { capabilities }),
       ...(idleSecs === undefined ? {} : { idleSecs }),
       ...(sessionCapabilities === undefined ? {} : { sessionCapabilities }),
+      ...(ticketWakes === undefined ? {} : { ticketWakes }),
     },
     fetcher,
   );
@@ -114,7 +116,7 @@ export function poolRunnerPlane(credentials, named, fetcher) {
  * @param {PoolCredentials} credentials
  * @param {WorkerPoolBackend} backend
  * @param {PoolRunnerLimits} limits
- * @param {{tokens?: WorkerPoolClient["tokens"], fetch?: typeof globalThis.fetch, planeFetch?: typeof globalThis.fetch, runner?: RunnerIdentity, capabilities?: readonly string[], idleSecs?: number, sessionCapabilities?: import("./poolPlane.mjs").PoolPlaneClientSettings["sessionCapabilities"], reports?: PoolRunnerReports}} [seams] the token source when not the pool file's, the fetch a job's or a session's plane is reached by and the one the pool's plane is when not the global one, the runner, the capabilities, and a chat host's idle bound and its threads' capabilities each poll names, and whether and how the runner reports on itself
+ * @param {{tokens?: WorkerPoolClient["tokens"], fetch?: typeof globalThis.fetch, planeFetch?: typeof globalThis.fetch, runner?: RunnerIdentity, capabilities?: readonly string[], idleSecs?: number, sessionCapabilities?: import("./poolPlane.mjs").PoolPlaneClientSettings["sessionCapabilities"], ticketWakes?: import("./poolPlane.mjs").PoolPlaneClientSettings["ticketWakes"], reports?: PoolRunnerReports}} [seams] the token source when not the pool file's, the fetch a job's or a session's plane is reached by and the one the pool's plane is when not the global one, the runner, the capabilities, and a chat host's idle bound, its threads' capabilities and their ticket wakes each poll names, and whether and how the runner reports on itself
  * @returns {PoolRunnerClient}
  */
 export function poolRunnerClient(credentials, backend, limits, seams = {}) {

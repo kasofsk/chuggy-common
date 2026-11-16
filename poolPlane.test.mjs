@@ -9,6 +9,7 @@ import {
   workerContractRelease,
   workerContractSessionCapabilitiesNamed,
 } from "@chuggy/worker-contract/workerContract";
+import { threadTicketWakeSettings } from "@chuggy/worker-contract/sessionPlane";
 import {
   workerPoolCapabilitiesMax,
   workerPoolPollSessionCapabilitiesText,
@@ -809,6 +810,21 @@ test("a chat host names its threads' capabilities only to a plane whose last ans
   ]);
 });
 
+/** The two polls a host on `settings` makes of a plane answering as `decided` does, each asking for two sessions. */
+async function planeDecidedPolls(settings, decided) {
+  const seen = [];
+  const plane = poolPlaneClient(settings, async (input) => {
+    seen.push(new globalThis.URL(String(input)));
+    return new globalThis.Response(
+      JSON.stringify({ assignments: [], sessions: [], stop: [] }),
+      { status: 200, headers: planeHeaders(decided) },
+    );
+  });
+  await plane.poll("pool-token", [], 0, 2);
+  await plane.poll("pool-token", [], 0, 2);
+  return seen;
+}
+
 /**
  * Catches a host's capabilities named to a plane whose list leaves
  * `SessionCapabilitiesNamed` out, which claims it sessions without them, or
@@ -817,19 +833,10 @@ test("a chat host names its threads' capabilities only to a plane whose last ans
  */
 test("a chat host names its threads' capabilities to a plane listing SessionCapabilitiesNamed, never to one leaving it out, and by its release to one listing nothing", async () => {
   for (const decided of planesDeciding("SessionCapabilitiesNamed")) {
-    const seen = [];
-    const plane = poolPlaneClient(
+    const seen = await planeDecidedPolls(
       { ...planeSettings, sessionCapabilities: ["RepositoryRead"] },
-      async (input) => {
-        seen.push(new globalThis.URL(String(input)));
-        return new globalThis.Response(
-          JSON.stringify({ assignments: [], sessions: [], stop: [] }),
-          { status: 200, headers: planeHeaders(decided) },
-        );
-      },
+      decided,
     );
-    await plane.poll("pool-token", [], 0, 2);
-    await plane.poll("pool-token", [], 0, 2);
     const named = planeNamed(decided);
     assert.equal(
       seen[1].searchParams.has("sessionCapabilities"),
@@ -842,6 +849,57 @@ test("a chat host names its threads' capabilities to a plane listing SessionCapa
       named,
     );
   }
+});
+
+/**
+ * Catches a host's ticket wakes named to a plane whose list leaves
+ * `ThreadTicketWakes` out, which refuses a poll naming a field it cannot read,
+ * or withheld from one that lists it, and a host asking such a plane for no
+ * session over a setting it only withholds.
+ */
+test("a chat host names its threads' ticket wakes only to a plane listing ThreadTicketWakes, and asks for its sessions either way", async () => {
+  for (const decided of planesDeciding("ThreadTicketWakes"))
+    for (const ticketWakes of threadTicketWakeSettings) {
+      const seen = await planeDecidedPolls(
+        { ...planeSettings, ticketWakes },
+        decided,
+      );
+      const named = planeNamed(decided);
+      assert.equal(seen[0].searchParams.has("ticketWakes"), false, named);
+      assert.equal(
+        seen[1].searchParams.get("ticketWakes"),
+        decided.takes ? ticketWakes : null,
+        named,
+      );
+      for (const url of seen)
+        assert.equal(url.searchParams.get("wantedSessions"), "2", named);
+    }
+});
+
+test("a client given no ticket wakes names none, and a setting the contract cannot read is refused at once", async () => {
+  const seen = [];
+  const plane = poolPlaneClient(planeSettings, async (input) => {
+    seen.push(new globalThis.URL(String(input)));
+    return new globalThis.Response(
+      JSON.stringify({ assignments: [], sessions: [], stop: [] }),
+      {
+        status: 200,
+        headers: planeHeaders({
+          release: workerContractRelease,
+          features: ["ThreadTicketWakes"],
+        }),
+      },
+    );
+  });
+  await plane.poll("pool-token", [], 0, 1);
+  await plane.poll("pool-token", [], 0, 1);
+  for (const url of seen)
+    assert.equal(url.searchParams.has("ticketWakes"), false);
+  for (const ticketWakes of ["on", "Host", ""])
+    assert.throws(
+      () => checkedPoolPlaneClientSettings({ ...planeSettings, ticketWakes }),
+      /^RangeError: pool plane ticketWakes must be one of On, Off$/u,
+    );
 });
 
 /**

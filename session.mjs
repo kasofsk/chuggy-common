@@ -154,6 +154,10 @@ import { sessionMailbox } from "./sessionMailbox.mjs";
 import { sessionStopWatch } from "./sessionStop.mjs";
 import { sessionStoreAdapter } from "./sessionStore.mjs";
 import {
+  sessionTicketWakesDefinitions,
+  sessionTicketWakesOffered,
+} from "./sessionTicketWakes.mjs";
+import {
   sessionRequest,
   sessionRequestOnce,
   sessionStopped,
@@ -729,14 +733,14 @@ export function sessionQueryOptions(
   store,
   environment,
   credential,
-  { servers = {}, checkout, git = [], bearer, jobTools = [] } = {},
+  { servers = {}, checkout, git = [], bearer, ownTools = [] } = {},
 ) {
   const workspace =
     environment[workerWorkspaceVariable] ?? workerWorkspaceDirectory;
   const roster = sessionAllowedTools(facts.capabilities);
   const allowedTools = [
     ...roster.allowedTools,
-    ...jobTools.map((tool) => `${chuggyToolPrefix}${tool}`),
+    ...ownTools.map((tool) => `${chuggyToolPrefix}${tool}`),
   ];
   const { disallowedTools } = roster;
   const model = facts.model ?? environment[sessionModelVariable];
@@ -1375,11 +1379,24 @@ export function sessionLease(task, bearer, request) {
 }
 
 /**
+ * The session's own tools, which no roster names: its job host's where it
+ * holds one, and `ticket_wakes` where its plane offers it.
+ */
+function sessionOwnTools(context, facts) {
+  return [
+    ...(context.jobHost?.definitions ?? []),
+    ...(sessionTicketWakesOffered(facts, context.peer)
+      ? sessionTicketWakesDefinitions(context)
+      : []),
+  ];
+}
+
+/**
  * The in-process servers this session's runtime is opened with, which is the one
  * `chuggy` server and nothing else. Its tools reach the API under the pod's own
  * session bearer, so every command they issue is the session's and carries it.
  */
-function sessionToolServers(context, facts, environment, services, sdk) {
+function sessionToolServers(context, facts, environment, services, sdk, own) {
   return {
     [chuggyToolServerName]: chuggyToolServer(
       chuggyToolContext(context.task, context.bearer, {
@@ -1391,7 +1408,7 @@ function sessionToolServers(context, facts, environment, services, sdk) {
         ...(services.chuggyRequest === undefined
           ? {}
           : { request: services.chuggyRequest }),
-        ...(context.jobHost === undefined ? {} : { jobHost: context.jobHost }),
+        own,
       }),
       sdk,
     ),
@@ -1437,6 +1454,7 @@ async function sessionRuntime(
   { facts, environment, credential, checkout, services, git },
 ) {
   const sdk = services.sdk ?? (await sessionSdk());
+  const own = sessionOwnTools(context, facts);
   return sdk.query({
     prompt: context.mailbox.turns(),
     options: sessionQueryOptions(
@@ -1446,11 +1464,18 @@ async function sessionRuntime(
       environment,
       credential,
       {
-        servers: sessionToolServers(context, facts, environment, services, sdk),
+        servers: sessionToolServers(
+          context,
+          facts,
+          environment,
+          services,
+          sdk,
+          own,
+        ),
         ...(checkout === undefined ? {} : { checkout }),
         git,
         bearer: context.bearer,
-        jobTools: (context.jobHost?.definitions ?? []).map(({ name }) => name),
+        ownTools: own.map(({ name }) => name),
       },
     ),
   });

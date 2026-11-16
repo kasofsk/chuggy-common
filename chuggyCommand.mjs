@@ -16,6 +16,9 @@
  * says which turn of the session a call belongs to, so each submitted command
  * mints its operation from a turn of its own.
  *
+ * A SHELL WITH NO CREDENTIAL IS TOLD WHY: a thread's shell is handed the four
+ * variables only where its chat host's settings name `sessionCapabilities`.
+ *
  * The exit is `chuggyCommandExits`': an answer, a refusal or failed call, or a
  * call that was never made because the command was misused.
  */
@@ -126,7 +129,10 @@ export async function chuggyCommand(argv, environment) {
   if (name === undefined || rest.length > 0)
     return misused("name one tool and at most one input");
   const { context, unset } = chuggyCommandContext(environment);
-  if (context === undefined) return misused(`${unset.join(", ")} unset`);
+  if (context === undefined)
+    return misused(
+      `${unset.join(", ")} unset: this shell was handed no credential, and a thread's shell is handed one only where its chat host's settings name sessionCapabilities`,
+    );
   const definitions = chuggyToolDefinitions(context);
   const definition = definitions.find((each) => each.name === name);
   if (definition === undefined)
