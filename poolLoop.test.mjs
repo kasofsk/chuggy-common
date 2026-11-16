@@ -807,6 +807,7 @@ test("a pool whose first read takes no job reads what it holds no more that pass
 test("a draining pool told a job waits takes no claim, and one finding the plane does not claim by room asks it for no job", async () => {
   const draining = {
     draining: () => true,
+    drainingFor: () => "chuggy-linux 0.14.1",
     restart: () => undefined,
     named: async () => {},
   };
@@ -1567,7 +1568,9 @@ test("where a workload would end with the process, the release is proved while t
     settings: updateSettings,
     backend: { ...idle, held: async () => held },
   });
+  assert.equal(run.updating.drainingFor(), undefined);
   await passes(pooled, run.updating, 4);
+  assert.equal(run.updating.drainingFor(), "chuggy-linux 0.14.1");
   assert.deepEqual(run.asked, {
     refusal: ["0.14.1"],
     prove: ["0.14.1"],
@@ -1584,6 +1587,7 @@ test("where a workload would end with the process, the release is proved while t
     (await workerPoolClientPass(pooled, run.updating)).passed,
     "Updated",
   );
+  assert.equal(run.updating.drainingFor(), "chuggy-linux 0.14.1");
   assert.deepEqual(
     polls.map(({ room }) => room),
     [

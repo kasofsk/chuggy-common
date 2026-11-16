@@ -13,6 +13,9 @@
  * as the engine's own login pulls it, as its setting says. While what is
  * named and what runs differ, the supervisor running is drained, taking no
  * session more, and once it has exited one is started in the image named.
+ * While the pool drains for a proved release of its runner, the supervisor
+ * is drained too, standing sessions with the rest, and none is started
+ * before the release installs, once no session is held.
  *
  * UNTIL A SUPERVISOR IS READY THE HOST HAS NO ROOM, and its polls name none
  * and ask for an answer at once, a short wait apart: a plane takes a host
@@ -827,17 +830,27 @@ async function chatHostStarted(state, image) {
 }
 
 /**
- * The supervisor brought to the image wanted: one running another drained,
- * and one started where none ran as the pass began, so the sessions of the
- * one before are named first, none is starting, an image is wanted, and the
- * backoff is past. One that ended of itself puts the next start off by the
+ * The supervisor brought to the image wanted: one running another, or
+ * running while the pool drains for its runner's release, drained, and one
+ * started where none ran as the pass began, so the sessions of the one
+ * before are named first, none is starting, an image is wanted, no release
+ * is drained for, and the backoff is past. One that ended of itself puts the next start off by the
  * backoff. A start runs beside the passes, which go on polling while an
  * image is pulled and a supervisor readies.
  */
-function chatHostFollowed(state, draining, idle) {
+function chatHostFollowed(state, updating, idle) {
   if (state.starting !== undefined) return;
   const wanted = chatHostWanted(state);
   const phase = state.backend.phase();
+  const draining = updating?.drainingFor();
+  if (phase === "Ready" && draining !== undefined) {
+    state.seams.log(
+      `the supervisor is drained for ${draining}, which this host installs once it holds no session`,
+    );
+    state.backend.drain();
+    state.drained = true;
+    return;
+  }
   if (phase === "Ready" && wanted !== undefined && wanted !== state.used) {
     state.seams.log(
       `the session image is now ${wanted}; the supervisor running ${String(state.used)} is drained`,
@@ -855,7 +868,7 @@ function chatHostFollowed(state, draining, idle) {
     (phase !== "Absent" && phase !== "Ended") ||
     !idle ||
     wanted === undefined ||
-    draining ||
+    draining !== undefined ||
     state.cut.signal.aborted ||
     state.seams.nowMs() < state.startableMs
   )
@@ -1184,11 +1197,7 @@ async function chatHostPass(state, updating) {
     sessionsMax: Math.min(state.settings.sessionsMax, ceiling),
   };
   const pass = await workerPoolClientPass(state.client, updating);
-  chatHostFollowed(
-    state,
-    updating?.draining() ?? false,
-    before === "Absent" || before === "Ended",
-  );
+  chatHostFollowed(state, updating, before === "Absent" || before === "Ended");
   return { pass, waiting: ceiling === 0 };
 }
 

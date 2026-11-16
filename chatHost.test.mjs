@@ -308,6 +308,7 @@ async function hostOf(
     answering = {},
     handed = (handle) => handle,
     engine = "docker",
+    updates,
   },
 ) {
   const runtimeDir = await mkdtemp(join(tmpdir(), "chuggy-chat-host-"));
@@ -350,6 +351,7 @@ async function hostOf(
         }),
         invalidate: (token) => invalidated.push(token),
       },
+      ...(updates === undefined ? {} : { updates }),
       fetch: planeOf(seen, answers, supervisors, {
         nowMs: now,
         status: () => host?.status(),
@@ -531,6 +533,100 @@ test("an image the plane names anew drains the supervisor, whose sessions end of
     ],
   );
   assert.deepEqual(run.host.status().used, two);
+});
+
+const runner = { package: "chuggy-linux", version: "0.14.0" };
+const release = {
+  package: "chuggy-linux",
+  version: "0.14.1",
+  url: "https://github.com/kasofsk/chuggy-linux/releases/download/v0.14.1/chuggy-linux-0.14.1.tgz",
+  integrity: `sha512-${"A".repeat(86)}==`,
+};
+
+/** An updater that proves and installs whatever it is asked to, each asked taken into `asked`. */
+function updatesOf(asked) {
+  return {
+    on: true,
+    updater: {
+      runner,
+      refusal: async () => undefined,
+      prove: async (named) => {
+        asked.push(`prove ${named.version}`);
+        return { proved: "Proved" };
+      },
+      update: async (named) => {
+        asked.push(`update ${named.version}`);
+        return { updated: "Installed", version: named.version };
+      },
+    },
+  };
+}
+
+/** Catches a host whose standing thread holds a proved update of its runner off for as long as the thread stands. */
+test("a proved release of the runner drains the supervisor, a session it holds with the rest, and the host installs it once none is held, starting no supervisor between", async (t) => {
+  const asked = [];
+  const run = await hostOf(t, {
+    answers: [
+      { chatImage: one },
+      { chatImage: one, sessions: [sessionOf("a")] },
+      { chatImage: one, release },
+      { chatImage: one, release },
+      { chatImage: one, release },
+      (supervisors) => {
+        assert.deepEqual(
+          supervisors[0].frames.map(({ frame }) => frame),
+          ["Start", "Drain"],
+        );
+        assert.deepEqual(asked, ["prove 0.14.1"]);
+        supervisors[0].finish();
+        return { chatImage: one, release };
+      },
+      { chatImage: one, release },
+      { chatImage: one, release },
+    ],
+    answering: { lingering: true },
+    updates: updatesOf(asked),
+  });
+  assert.deepEqual(await run.host.run(), {
+    passed: "Updated",
+    version: "0.14.1",
+  });
+  assert.deepEqual(asked, ["prove 0.14.1", "update 0.14.1"]);
+  assert.deepEqual(
+    run.seen.started.map(({ image }) => image),
+    [one],
+  );
+  assert.deepEqual(run.seen.ended, ["Succeeded"]);
+  assert.equal(
+    run.logged.filter((line) => line.includes("is drained for")).length,
+    1,
+  );
+  assert.ok(
+    run.logged.includes(
+      "the supervisor is drained for chuggy-linux 0.14.1, which this host installs once it holds no session",
+    ),
+    run.logged.join("\n"),
+  );
+});
+
+test("a host whose runner has no update pending drains no supervisor", async (t) => {
+  const asked = [];
+  const run = await hostOf(t, {
+    answers: [
+      { chatImage: one },
+      { chatImage: one, sessions: [sessionOf("a")] },
+      { chatImage: one },
+      { chatImage: one },
+    ],
+    answering: { lingering: true },
+    updates: updatesOf(asked),
+  });
+  assert.equal((await run.host.run()).passed, "Denied");
+  assert.deepEqual(asked, []);
+  assert.deepEqual(
+    run.supervisors[0].frames.map(({ frame }) => frame),
+    ["Start"],
+  );
 });
 
 test("a drained supervisor's sessions are named as ended before a supervisor is started in the image named anew", async (t) => {

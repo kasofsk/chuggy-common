@@ -190,6 +190,7 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  *
  * @typedef {object} WorkerPoolUpdating a run's update, from the release a poll names to the restart
  * @property {() => boolean} draining whether the pool asks for no work, for a release it installs
+ * @property {() => string | undefined} drainingFor the release it drains for, as its log names it, while it does
  * @property {(held: readonly WorkerPoolHeld[]) => string | undefined} restart the version installed to restart on, if any; otherwise starts the install of a release named or drained for where nothing held ends with this process, or the proof of one named where something does
  * @property {(release: WorkerRunnerRelease | undefined) => Promise<void>} named takes what a reconciled poll named
  *
@@ -501,7 +502,7 @@ export const workerPoolUpdateBackoffMs = 60 * 60 * 1000;
  * first; `Proving` and `Proved` take work as before, and the poll that still
  * names a `Proved` release drains for it.
  *
- * @typedef {{at: "Idle"} | {at: "Installed", version: string}
+ * @typedef {{at: "Idle"} | {at: "Installed", release: WorkerRunnerRelease, version: string}
  *   | {at: "Named" | "Proving" | "Proved" | "Draining" | "Installing", release: WorkerRunnerRelease}} WorkerPoolUpdateStage
  *
  * @typedef {object} WorkerPoolUpdateState what a run remembers between passes of its update
@@ -574,7 +575,7 @@ function workerPoolInstallStarted(state, release) {
       if (updated.updated === "Failed")
         workerPoolUpdateFailed(state, release, updated.reason);
       else {
-        state.stage = { at: "Installed", version: updated.version };
+        state.stage = { at: "Installed", release, version: updated.version };
         state.seams.log(
           `${release.package} ${updated.version} is installed, and this runner ends to start on it`,
         );
@@ -654,9 +655,16 @@ async function workerPoolUpdateNamed(state, release) {
 export function workerPoolUpdating(updates, seams) {
   /** @type {WorkerPoolUpdateState} */
   const state = { updates, seams, stage: { at: "Idle" }, retryAtMs: 0 };
+  const drainingFor = () => {
+    const { stage } = state;
+    return ["Draining", "Installing", "Installed"].includes(stage.at) &&
+      "release" in stage
+      ? workerPoolReleaseNamed(stage.release)
+      : undefined;
+  };
   return {
-    draining: () =>
-      ["Draining", "Installing", "Installed"].includes(state.stage.at),
+    draining: () => drainingFor() !== undefined,
+    drainingFor,
     restart: (held) => {
       const { stage } = state;
       if (stage.at === "Installed") return stage.version;
