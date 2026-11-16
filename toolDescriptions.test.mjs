@@ -28,6 +28,7 @@ import {
 import { jobHost, jobHostToolNames } from "./jobHost.mjs";
 import { leadDecisionStaging } from "./leadDecision.mjs";
 import { localToolContext, localToolServer } from "./localTools.mjs";
+import { sessionTicketWakesDefinitions } from "./sessionTicketWakes.mjs";
 
 /** The longest a description's opening sentence may be, which is what an agent reads a tool list by. */
 const toolDescriptionOpeningCharsMax = 160;
@@ -72,7 +73,7 @@ function podServer(request, held) {
       capabilities: Object.keys(sessionCapabilityTools),
       staging: leadDecisionStaging(),
       ...(request === undefined ? {} : { request }),
-      ...(held === undefined ? {} : { jobHost: held }),
+      ...(held === undefined ? {} : { own: held }),
     }),
     {
       z,
@@ -127,18 +128,22 @@ function toolDescriptionFaults({ name, description, inputSchema }) {
   return faults;
 }
 
-/** The pod's server for a chat host's thread, which holds a job host too. */
+/** The pod's server for a chat host's thread, which holds its own tools too: a job host's and `ticket_wakes`. */
 function podServerJobs() {
-  return podServer(
-    undefined,
-    jobHost({
+  return podServer(undefined, [
+    ...jobHost({
       directory: "/sessions/threads/thread",
       environment: {},
       wake: () => undefined,
       standing: async () => undefined,
       warn: () => undefined,
+    }).definitions,
+    ...sessionTicketWakesDefinitions({
+      task: {},
+      bearer: "bearer",
+      request: async () => undefined,
     }),
-  );
+  ]);
 }
 
 for (const [server, built, roster] of [
@@ -153,6 +158,7 @@ for (const [server, built, roster] of [
     [
       ...allChuggyTools.filter((tool) => !chuggyToolsUnbuilt.includes(tool)),
       ...Object.values(jobHostToolNames),
+      "ticket_wakes",
     ],
   ],
   ["the local server", localServer, chuggyProjectTools.map(({ name }) => name)],

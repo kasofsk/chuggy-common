@@ -147,7 +147,7 @@ for (const variable of [
   sessionTenantVariable,
   sessionProjectVariable,
 ])
-  test(`the command is a usage error where ${variable} is unset, and asks nothing`, async (t) => {
+  test(`the command is a usage error saying why the shell holds no credential where ${variable} is unset, and asks nothing`, async (t) => {
     const api = await fakeApi(() => ({ status: 200, json: {} }));
     t.after(api.close);
     const variables = variablesOf(api);
@@ -156,7 +156,13 @@ for (const variable of [
     const answer = await ran(["read_ticket", '{"ticket":7}'], variables);
 
     assert.equal(answer.exit, chuggyCommandExits.misused);
-    assert.match(answer.err, new RegExp(`${variable} unset`, "u"));
+    assert.match(
+      answer.err,
+      new RegExp(
+        `^chuggy: ${variable} unset: this shell was handed no credential, and a thread's shell is handed one only where its chat host's settings name sessionCapabilities$`,
+        "mu",
+      ),
+    );
     assert.equal(answer.out, "");
     assert.equal(api.seen.length, 0);
   });

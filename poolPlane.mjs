@@ -32,7 +32,10 @@
  * image its sessions run in, which is passed on. A host given the
  * capabilities its threads may hold names them only to a plane whose last
  * answer said it implements `SessionCapabilitiesNamed`, and asks any other
- * for no session, so none is claimed without them.
+ * for no session, so none is claimed without them. A host given whether its
+ * threads are woken for their tickets names it only to a plane whose last
+ * answer said it implements `ThreadTicketWakes`, and still claims sessions
+ * from any other.
  *
  * A member's personal runner names on every poll, whatever the plane last
  * answered, the credentials its terms name for each agent, and only as a
@@ -58,6 +61,7 @@ import {
   contractVersionRefusalStatus,
   workerContractRelease,
 } from "@chuggy/worker-contract/workerContract";
+import { threadTicketWakeSettings } from "@chuggy/worker-contract/sessionPlane";
 import {
   workerPoolCapabilitiesMax,
   workerPoolPollQuery,
@@ -101,6 +105,7 @@ import { answeredPeer, peerImplements } from "./wire.mjs";
  * @property {readonly string[]} [capabilities] the runner's capabilities, which each poll names, each once
  * @property {number} [idleSecs] how long a session a chat host claims may sit idle, which each poll names; the plane caps it, and reads it from a chat host alone
  * @property {Parameters<typeof workerPoolPollSessionCapabilitiesText>[0]} [sessionCapabilities] the capabilities a chat host's threads may hold, which each poll to a plane that reads them names, and without which no session is asked for
+ * @property {(typeof threadTicketWakeSettings)[number]} [ticketWakes] whether a chat host's threads that made no choice of their own are woken for their tickets, which each poll to a plane that reads it names
  */
 
 /** The most one reconciliation may weigh, orders above a bounded batch of assignments. */
@@ -181,6 +186,13 @@ export function checkedPoolPlaneClientSettings(input) {
     throw new RangeError(
       "pool plane sessionCapabilities must name session capabilities, each once",
     );
+  if (
+    input.ticketWakes !== undefined &&
+    !threadTicketWakeSettings.includes(input.ticketWakes)
+  )
+    throw new RangeError(
+      `pool plane ticketWakes must be one of ${threadTicketWakeSettings.join(", ")}`,
+    );
   return {
     ...input,
     baseUrl: url.toString(),
@@ -202,7 +214,8 @@ function poolPlaneUrl(settings, route) {
 /**
  * The poll's address. Where the settings name session capabilities it names
  * them only to a plane whose last answer, `peer`, says it reads them, and asks
- * any other for no session.
+ * any other for no session; where they name ticket wakes it names those only
+ * to a plane that reads them, and asks any other as it would without them.
  *
  * @param {PoolPlaneClientSettings} settings
  * @param {readonly string[]} held
@@ -233,6 +246,11 @@ function poolPlaneAssignmentsUrl(settings, held, wanted, wantedSessions, peer) {
       workerPoolPollQuery.sessionCapabilities,
       workerPoolPollSessionCapabilitiesText(sessionCapabilities),
     );
+  if (
+    settings.ticketWakes !== undefined &&
+    peerImplements(peer, "ThreadTicketWakes")
+  )
+    url.searchParams.set(workerPoolPollQuery.ticketWakes, settings.ticketWakes);
   return url;
 }
 

@@ -4,9 +4,9 @@
  * the feature and with one that leaves it out.
  *
  * A PLANE NAMING NO FEATURES IS READ AS BEFORE FEATURES WERE LISTED: it takes a
- * feature from the version of its major the feature first shipped in, and
- * that rule is written here rather than asked of the contract, so a client
- * that stops following it fails.
+ * feature from the version of its major the feature first shipped in, and a
+ * feature with no version not at all. That rule is written here rather than
+ * asked of the contract, so a client that stops following it fails.
  */
 
 import {
@@ -39,6 +39,7 @@ export function planeTakes(plane, feature) {
   if (plane.features !== undefined) return plane.features.includes(feature);
   const spoken = workerContractVersionOf(plane.release);
   const first = workerContractFeatures[feature];
+  if (first === undefined) return false;
   return spoken.major === first.major && spoken.minor >= first.minor;
 }
 

@@ -46,6 +46,7 @@ export const workerFeaturesImplemented = [
   "ChatSessionThreads",
   "TargetMerge",
   "PushPathsRefused",
+  "ThreadTicketWakes",
 ];
 
 /**

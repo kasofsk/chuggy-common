@@ -10,7 +10,7 @@
     "chuggy": "chuggyCommand.mjs"
   },
   "dependencies": {
-    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.128.0/chuggy-worker-contract-1.128.0.tgz"
+    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.131.0/chuggy-worker-contract-1.131.0.tgz"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -104,6 +104,7 @@
     "sessionMailbox.mjs",
     "sessionStop.mjs",
     "sessionStore.mjs",
+    "sessionTicketWakes.mjs",
     "sessionTransport.mjs",
     "setupEnvironment.mjs",
     "snapshot.mjs",

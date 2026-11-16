@@ -13,7 +13,6 @@ import {
   sessionStoreBatchBytesMax,
 } from "@chuggy/worker-contract/sessionPlane";
 import {
-  agenticRefusalsAnsweredMax,
   allChuggyTools,
   briefLineCharsMax,
   chuggyDocsIndex,
@@ -39,7 +38,6 @@ import {
   nativeHttpPageItemsMax,
   runTranscriptBatchBytesMax,
   runTranscriptPageBatchesMax,
-  selectorHistoryLimitMax,
   selectorProjectOverridesSchema,
   threadTurnsAnsweredMax,
   ticketLandingsAnsweredMax,
@@ -240,8 +238,6 @@ const pageBounds = {
   list_epics: epicPageLimitMax,
   read_epic_history: epicPageLimitMax,
   list_configurations: nativeHttpPageItemsMax,
-  read_decision_log: selectorHistoryLimitMax,
-  read_refusals: agenticRefusalsAnsweredMax,
   list_executions: nativeHttpPageItemsMax,
   read_thread: threadTurnsAnsweredMax,
   list_projects: nativeHttpPageItemsMax,
@@ -389,11 +385,6 @@ test("the refusal names what this caller can lower, and says so where there is n
       /list_tickets is already asking for one, so this one cannot be answered\.$/,
     ],
     [
-      "read_refusals",
-      {},
-      /read_refusals is already asking for one, so this one cannot be answered\.$/,
-    ],
-    [
       "read_thread",
       { session: "t-1", limit: 1 },
       /read_thread is already asking for one; move past it with before\.$/,
@@ -527,14 +518,14 @@ test("a thread transcript of one full batch is read whole, page by page, under t
  * page under the bound as the route sends it and over it as an answer escapes
  * it. It is answered in part, and the read after resumes inside the same batch.
  */
-test("a lead transcript page a little over the bound is answered across two reads", async () => {
+test("a transcript page a little over the bound is answered across two reads", async () => {
   const entries = Array.from({ length: 30 }, (_, index) => ({
     uuid: `u-${String(index)}`,
     type: "assistant",
     message: { role: "assistant", content: "x".repeat(936) },
   }));
   const body = JSON.stringify({
-    stream: "lead-1",
+    stream: "t-1",
     entries,
     elided: 0,
     truncated: false,
@@ -547,9 +538,11 @@ test("a lead transcript page a little over the bound is answered across two read
   );
   const { api, call } = toolsOf({}, () => ({ status: 200, body }));
 
-  const answers = [await call("read_lead_transcript", {})];
+  const answers = [await call("read_thread_transcript", { session: "t-1" })];
   const first = JSON.parse(textOf(answers[0]));
-  answers.push(await call("read_lead_transcript", first.next));
+  answers.push(
+    await call("read_thread_transcript", { session: "t-1", ...first.next }),
+  );
   const second = JSON.parse(textOf(answers[1]));
 
   for (const answer of answers) {
@@ -565,8 +558,8 @@ test("a lead transcript page a little over the bound is answered across two read
   assert.deepEqual(
     api.calls.map(({ path }) => path),
     [
-      "/api/v1/tenants/vteng/projects/chuggy/lead/transcript?limit=1",
-      "/api/v1/tenants/vteng/projects/chuggy/lead/transcript?after=0&limit=1",
+      "/api/v1/tenants/vteng/projects/chuggy/threads/t-1/transcript?limit=1",
+      "/api/v1/tenants/vteng/projects/chuggy/threads/t-1/transcript?after=0&limit=1",
     ],
   );
 });
@@ -751,10 +744,6 @@ test("each transcript tool answers an entry as what it says of the session and c
       { execution: "e-1", attempt: "a-1" },
       runPageOf([runBatchOf(1, transcriptShapedEvents)]),
     ],
-    read_lead_transcript: [
-      {},
-      JSON.stringify({ stream: "lead-1", entries: transcriptShapedEvents }),
-    ],
     read_thread_transcript: [
       { session: "t-1" },
       JSON.stringify({ stream: "t-1", entries: transcriptShapedEvents }),
@@ -813,8 +802,6 @@ test("the transcript reads say what their cursor counts, where a stream starts a
   ];
   const ends = {
     read_run_transcript: /An answer with no `next` has read all the run wrote/,
-    read_lead_transcript:
-      /An answer with no `next` has read to the stream's end/,
     read_thread_transcript:
       /An answer with no `next` has read to the stream's end/,
   };
@@ -1553,19 +1540,8 @@ const readRoutes = [
     "/configurations?latest=false&limit=5",
   ],
   [["read_configuration", { revision: "r/1" }], "/configurations/r%2F1"],
-  [
-    ["read_decision_log", { after: 3, limit: 2 }],
-    "/selector-history?after=3&limit=2",
-  ],
-  [["read_refusals", { limit: 4 }], "/agentic-refusals?limit=4"],
-  [["read_ticket_refusals", { ticket: 9 }], "/tickets/9/agentic-refusals"],
   [["read_ticket_landings", { ticket: 9 }], "/tickets/9/landings"],
   [["read_landing_queues", {}], "/landing-queues"],
-  [["read_lead", {}], "/lead"],
-  [
-    ["read_lead_transcript", { after: 2, entry: 3 }],
-    "/lead/transcript?after=2&limit=1",
-  ],
   [
     ["list_executions", { ticket: 3, state: ["Running"] }],
     "/executions?ticket=3&state=Running",
@@ -2616,9 +2592,7 @@ test("an argument past its bound is refused before any call is made", async () =
   for (const [name, args] of [
     ["read_ticket", { ticket: 0 }],
     ["list_tickets", { limit: 101 }],
-    ["read_decision_log", { limit: 51 }],
-    ["read_refusals", { limit: 33 }],
-    ["read_lead_transcript", { after: -1 }],
+    ["read_thread_transcript", { session: "t-1", after: -1 }],
     ["read_execution", { execution: "" }],
     ["fetch_image", { artifact: "" }],
     ["fetch_image", { artifact: "x".repeat(257) }],
@@ -3340,25 +3314,16 @@ function parameterDescribed(tool, parameter) {
 
 /**
  * What the server does that no answer shows until it is too late to act on:
- * that the refusal ledgers hold none of a command's refusals, that a
- * submission repeated in one turn answers the settled operation, that a
- * project has no lead before a release, who may release a program running
- * less than its plan, that stages run in order and a stage's evaluators side
- * by side, which stage a brief's checks join, what a ticket's run totals sum,
- * and what a binding says of its repository. Each is said in the description
+ * that a submission repeated in one turn answers the settled operation, who
+ * may release a program running less than its plan, that stages run in order
+ * and a stage's evaluators side by side, which stage a brief's checks join,
+ * what a ticket's run totals sum, and what a binding says of its repository. Each is said in the description
  * of the tool the session reads it from.
  */
 test("the descriptions say what the server does where a session reads it", () => {
   const described = (tool) =>
     chuggyProjectTools.find(({ name }) => name === tool).description;
-  const ledger = [
-    /refusals to dispatch a released ticket/,
-    /and nothing else/,
-    /read_operation/,
-  ];
   const said = {
-    read_refusals: ledger,
-    read_ticket_refusals: ledger,
     release_draft: [
       /same turn is the same operation/,
       /other than Pending/,
@@ -3367,16 +3332,6 @@ test("the descriptions say what the server does where a session reads it", () =>
     ],
     update_ticket: programShortClaims,
     revoke_ticket: [/same turn is the same operation/, /other than Pending/],
-    read_lead: [
-      /None, and `absence\.reason` says why/,
-      /`Paused`: [^.]*, so no ticket is picked up automatically; it must be resumed by someone who may, and this reason is answered ahead of the others\./,
-      /`NotNeeded`: no refusal stands/,
-      /before anything is released/,
-      /release a ticket/,
-      /`absence\.since` is when that refusal began/,
-      /`RunnerOffline`: [^.]*, so the project's runner must be running\./,
-      /`HostedRunsNotGranted`: [^.]*, so an admin must grant them\./,
-    ],
     initialize_draft: [
       /run in that order/,
       /a failed stage ends evaluation/,
@@ -3604,29 +3559,7 @@ test("release_draft says releasing starts no work, and who starts it", () => {
   );
   assert.match(
     description,
-    /Releasing makes the ticket Pending and starts no work: once its dependencies are Done it runs when it is dispatched, by the project's lead or by someone who may dispatch\./,
-  );
-  assert.match(
-    description,
-    /read_lead answers whether a lead will dispatch it: none does where it answers a lead standing with `held` or a `refusal`, or no lead for a reason other than `NotNeeded` or `AwaitingSelector`, and the ticket then waits for a dispatch, which dispatch_ticket submits on your owner's word\./,
-  );
-});
-
-/**
- * A paused selector, or one that lost its grant, keeps its lead session, so a
- * lead that reads `Open` may dispatch nothing. The tools that say who starts a
- * ticket say so.
- */
-test("read_lead and dispatch_ticket say a standing lead may dispatch nothing", () => {
-  const described = (tool) =>
-    chuggyProjectTools.find(({ name }) => name === tool).description;
-  assert.match(
-    described("read_lead"),
-    /A lead that stands dispatches nothing where it carries `held` or a `refusal`, though its session may read `Open`: `held\.reason` is `Paused`, given below, or `SelectorNotGranted`, where the site's selector may not read the project and so never sweeps it, and a `refusal` is one of the refusals below\./,
-  );
-  assert.match(
-    described("dispatch_ticket"),
-    /starts its work now, whether or not a lead is dispatching\./,
+    /Releasing makes the ticket Pending and starts no work: once its dependencies are Done it runs when it is dispatched, by the project's lead or by someone who may dispatch; dispatch_ticket submits one on your owner's word\./,
   );
 });
 
@@ -4110,13 +4043,8 @@ const projectToolArguments = {
   list_drafts: {},
   list_configurations: {},
   read_configuration: { revision: "r1" },
-  read_decision_log: {},
-  read_refusals: {},
-  read_ticket_refusals: { ticket: 7 },
   read_ticket_landings: { ticket: 7 },
   read_landing_queues: {},
-  read_lead: {},
-  read_lead_transcript: {},
   list_executions: {},
   read_execution: { execution: "e-1" },
   read_run_transcript: { execution: "e-1", attempt: "a-1" },

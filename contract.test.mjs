@@ -122,6 +122,7 @@ import {
 import { sessionMailbox } from "./sessionMailbox.mjs";
 import { sessionStopWatch } from "./sessionStop.mjs";
 import { sessionStoreAdapter } from "./sessionStore.mjs";
+import { sessionTicketWakesDefinitions } from "./sessionTicketWakes.mjs";
 import { sessionRequest, sessionRequestOnce } from "./sessionTransport.mjs";
 import { readTicketImages } from "./ticketImages.mjs";
 import { workerFeaturesImplemented, workerRequest } from "./transport.mjs";
@@ -208,6 +209,8 @@ function sessionSuccess(route, nth) {
       return { status: 200, body: { streams: [] } };
     case "storePage":
       return { status: 200, body: { batches: [] } };
+    case "ticketWakes":
+      return { status: 200, body: { thread: "On", effective: "On" } };
     default:
       return { status: 204 };
   }
@@ -433,6 +436,12 @@ const sessionCallers = {
   turnStopped: watchedStop,
   held: sessionRun(() => [rejection, result("error_during_execution")]),
   standing: standingReported,
+  ticketWakes: (request) =>
+    sessionTicketWakesDefinitions({
+      task: sessionTask,
+      bearer,
+      request,
+    })[0].call(undefined, { choice: "On" }),
   storeStreams: (request) =>
     sessionStoreOver(request).listSubkeys({ sessionId: "runtime-1" }),
   storeBatch: (request) =>
@@ -586,6 +595,7 @@ const sessionReactions = {
   },
   held: { 204: "reads", 401: "stops", 409: "stops" },
   standing: { 204: "reads", 400: "reads", 401: "stops", 409: "stops" },
+  ticketWakes: { 200: "reads", 400: "stops", 401: "stops", 409: "stops" },
   storeStreams: {
     200: "reads",
     400: "stops",

@@ -158,6 +158,7 @@ import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
  * @property {number} [idleSecs] how long a session it claims may sit idle, which each poll names; none where absent
  * @property {number} [deadlineSecs] how long a session it claims may run, which each `Start` names; none where absent
  * @property {ChatHostConfig["sessionCapabilities"]} [sessionCapabilities] the capabilities its threads may hold, which each poll to a plane that reads them names, and without which it claims no session; its threads' rosters whole where absent
+ * @property {ChatHostConfig["ticketWakes"]} [ticketWakes] whether its threads that made no choice of their own are woken for their tickets, which each poll to a plane that reads it names; chuggy's default, no wakes, where absent
  * @property {number} outputBytesMax what a session may write of its output
  * @property {ChatHostImageSetting} [image] the host's own image, run in place of the plane's
  * @property {ChatSupervisorPlaces} places
@@ -271,6 +272,8 @@ export const chatHostConfigSchema = z.strictObject({
     .optional(),
   /** The capabilities its threads may hold, which narrow each thread's roster; the roster whole where absent. */
   sessionCapabilities: chatHostSettingsSchema.shape.sessionCapabilities,
+  /** Whether its threads that made no choice of their own are woken for their tickets; chuggy's default, no wakes, where absent. */
+  ticketWakes: chatHostSettingsSchema.shape.ticketWakes,
   /** The most output a session may report; the runner's own where absent. */
   outputBytesMax: chatHostPositiveSchema.optional(),
 });
@@ -947,6 +950,13 @@ function chatHostSettingsLineCapabilities(
   return capabilities.length === 0 ? "none" : capabilities.join(" ");
 }
 
+/** Whether a host's threads are woken for their tickets, as a person says it. */
+function chatHostSettingsLineTicketWakes(
+  /** @type {ChatHostSettings["ticketWakes"]} */ ticketWakes,
+) {
+  return ticketWakes ?? "unset, so chuggy's default: no wakes";
+}
+
 /**
  * A host's settings, as a CLI's `status` and `doctor` say them.
  *
@@ -958,7 +968,7 @@ export function chatHostSettingsLine(settings) {
     settings.image === undefined
       ? "the one chuggy names"
       : `${settings.image.image}, pulled ${chatHostPulls[settings.image.pull]}`;
-  return `sessionsMax ${String(settings.sessionsMax)}, sessionMemoryMib ${mib(settings.sessionMemoryBytes)}, so the supervisor is capped at ${mib(chatHostMemoryBytes(settings))} MiB, idleSecs ${settings.idleSecs === undefined ? "none" : String(settings.idleSecs)}, deadlineSecs ${settings.deadlineSecs === undefined ? "none" : String(settings.deadlineSecs)}, sessionCapabilities ${chatHostSettingsLineCapabilities(settings.sessionCapabilities)}, outputBytesMax ${String(settings.outputBytesMax)}, image ${image}`;
+  return `sessionsMax ${String(settings.sessionsMax)}, sessionMemoryMib ${mib(settings.sessionMemoryBytes)}, so the supervisor is capped at ${mib(chatHostMemoryBytes(settings))} MiB, idleSecs ${settings.idleSecs === undefined ? "none" : String(settings.idleSecs)}, deadlineSecs ${settings.deadlineSecs === undefined ? "none" : String(settings.deadlineSecs)}, sessionCapabilities ${chatHostSettingsLineCapabilities(settings.sessionCapabilities)}, ticketWakes ${chatHostSettingsLineTicketWakes(settings.ticketWakes)}, outputBytesMax ${String(settings.outputBytesMax)}, image ${image}`;
 }
 
 /**
@@ -1016,6 +1026,7 @@ export function chatHostConfigured(config, outputBytesMax) {
     idleSecs,
     deadlineSecs,
     sessionCapabilities,
+    ticketWakes,
   } = config ?? {};
   return {
     sessionsMax: sessionsMax ?? chatHostSessionsMaxDefault,
@@ -1027,6 +1038,7 @@ export function chatHostConfigured(config, outputBytesMax) {
     ...(idleSecs === undefined ? {} : { idleSecs }),
     ...(deadlineSecs === undefined ? {} : { deadlineSecs }),
     ...(sessionCapabilities === undefined ? {} : { sessionCapabilities }),
+    ...(ticketWakes === undefined ? {} : { ticketWakes }),
     ...(image === undefined ? {} : { image }),
   };
 }
@@ -1145,6 +1157,9 @@ export function chatHost(credentials, settings, seams) {
       ...(checked.sessionCapabilities === undefined
         ? {}
         : { sessionCapabilities: checked.sessionCapabilities }),
+      ...(checked.ticketWakes === undefined
+        ? {}
+        : { ticketWakes: checked.ticketWakes }),
     },
   );
   /** @type {ChatHostState} */

@@ -195,7 +195,6 @@ import { sessionStoreBatchBytesMax } from "@chuggy/worker-contract/sessionPlane"
 import {
   accountAgents,
   agentAccountSettingsSchema,
-  agenticRefusalsAnsweredMax,
   allChuggyTools,
   authoringSchema,
   briefLineCharsMax,
@@ -233,7 +232,6 @@ import {
   nativeHttpPageItemsMax,
   placementRoutes,
   projectArtifactEncoding,
-  selectorHistoryLimitMax,
   selectorProjectOverridesSchema,
   threadOfferReleaseSchema,
   threadOfferRevokeSchema,
@@ -391,9 +389,6 @@ const chuggyNewDraftConfigurationDescription = {
 
 /** What a draft write is fenced on, which is a field of the draft and not of its ticket. */
 const chuggyExpectedVersionDescription = `The draft's \`authoringVersion\`, as read_draft answers it or as the write that last changed the draft did; a new draft is at 1. A stale one is refused with the draft's \`currentVersion\`.`;
-
-/** What a refusal ledger holds, which is what an empty one is read against. */
-const chuggyRefusalLedgerDescription = `A refusal ledger holds the lead's refusals to dispatch a released ticket and their lifts, and nothing else, so it is empty until the lead refuses one. A refused command is never in it: read_operation answers a refused release, revocation or update, and a refused draft write is answered by that write itself.`;
 
 /**
  * How many times the entry the runtime mirrors carries one answer's text. The
@@ -2105,44 +2100,6 @@ export const chuggyProjectTools = [
       ),
   },
   {
-    name: "read_decision_log",
-    description:
-      "One page of this project's past selector decisions, oldest first: what each chose and under which settings. Call it for why a ticket was or was not dispatched.",
-    shape: (z) => ({
-      after: count(z)
-        .describe(
-          "The `nextAfter` the previous page answered, for the page after it; left out, the first page.",
-        )
-        .optional(),
-      limit: limit(z, selectorHistoryLimitMax),
-    }),
-    call: (context, { after, limit: pageLimit }) =>
-      read(
-        context,
-        `${projectPath(context, "selectorHistory")}${search({ after, limit: pageLimit })}`,
-      ),
-  },
-  {
-    name: "read_refusals",
-    description: `The refusals standing across this project, each a ticket whose latest ledger entry is a refusal, with the ticket version each names. Call it for which released tickets the lead will not dispatch. ${chuggyRefusalLedgerDescription}`,
-    shape: (z) => ({ limit: limit(z, agenticRefusalsAnsweredMax) }),
-    call: (context, { limit: pageLimit }) =>
-      read(
-        context,
-        `${projectPath(context, "agenticRefusals")}${search({ limit: pageLimit })}`,
-      ),
-  },
-  {
-    name: "read_ticket_refusals",
-    description: `One ticket's refusal ledger, oldest first: the refusals recorded on it and their lifts. Call it for why the lead has not dispatched it. \`more\` says the ledger holds further entries than one answer carries. ${chuggyRefusalLedgerDescription}`,
-    shape: (z) => ({ ticket: ticket(z) }),
-    call: (context, args) =>
-      read(
-        context,
-        projectPath(context, "ticketAgenticRefusals", { ticket: args.ticket }),
-      ),
-  },
-  {
     name: "read_ticket_landings",
     description:
       "One ticket's landings, each finalizing its work into its repository. Call it for how a ticket's work lands or why it has not. It answers the newest one answer holds, oldest first, `truncated` where it leaves older ones out; a ticket not yet at landing has none. Answers JSON. Each landing carries its `state`, such as Proposed (its pull request opened for a person to merge) or Unavailable (it could not go through and escalated: as the newest, its ticket waits on a person; an older one stays after a resume), its `cycle`, `attempts` and newest `attempt` where it made one: its `outcome`, `targetRef` and `failureKind` where it failed, such as MergeConflict, QueueChecksFailed (the merge queue removed its pull request twice for failed checks; its work went back to Work) or RecheckRequired, with `recheck` unless recorded before re-checks kept one: its `reason`, TargetMoved (the target moved past the accepted commit), StackTreeDiffers (the merge's tree is not its stack's) or MergedTreeDiffers (its merged pull request left a tree its work was not checked on), and `baseRef`, the base checked against, where present. A Held landing carries `hold`, and an Unavailable one the `hold` it escalated from where one is recorded: its `kind`, what holds it, and `since`, when a hold of that kind began. `hold.removal`, where its pull request left the merge queue, is the forge's `reason`, such as `manual`, and the `actor` removing it, where named. An AwaitingMerge landing carries `wait`: its `reason` (Blocked by the forge's rules, as where the queue will not take it yet; HeadMoved; or Queued, waiting its turn) and `checkedAt`, when the forge was last heard about its merge. A Landed one carries `landedCommit`. `proposal` is the pull request it opened, where it did: its `url`, `headRef`, `baseRef`, its `status` as chuggy last read it, so a Proposed landing's is the one it opened with, its `mergeability`, and `mergeState`, GitHub's `mergeable_state`. `conflict` is the paths its newest attempt conflicted on, `truncated` where they were cut.",
@@ -2160,27 +2117,6 @@ export const chuggyProjectTools = [
     shape: () => ({}),
     call: (context) =>
       readLandingQueues(context, projectPath(context, "landingQueues")),
-  },
-  {
-    name: "read_lead",
-    description:
-      "This project's lead session: its state, its mailbox tail and its transcript streams. Call it for why released tickets are or are not being dispatched. A lead that stands dispatches nothing where it carries `held` or a `refusal`, though its session may read `Open`: `held.reason` is `Paused`, given below, or `SelectorNotGranted`, where the site's selector may not read the project and so never sweeps it, and a `refusal` is one of the refusals below. A project with no lead answers None, and `absence.reason` says why. `Paused`: the project's selector is paused, for the project or the whole installation, so no ticket is picked up automatically; it must be resumed by someone who may, and this reason is answered ahead of the others. `NotNeeded`: no refusal stands, which is expected before anything is released, because the selector opens a lead only when a released ticket waits on a dispatch decision; release a ticket. Otherwise the last decision that needed a lead was refused it, and `absence.since` is when that refusal began. `RunnerOffline`: the project runs its lead on its runners and none is live, so the project's runner must be running. `HostedRunsNotGranted`: the project runs its lead hosted and its tenant has not granted the lead hosted runs, so an admin must grant them.",
-    shape: () => ({}),
-    call: (context) => read(context, projectPath(context, "lead")),
-  },
-  {
-    name: "read_lead_transcript",
-    description: `One page of the lead's own raw transcript, which is how it reads past its own compaction. A page read answers JSON: \`entries\` whole where they fit, an entry too large as {uuid, type, bytes, preview}, and \`next\` — pass its \`after\` and \`entry\` back for the page after this one. An answer with no \`next\` has read to the stream's end. ${transcriptAnswerDescription} A read that fails answers the reason instead.`,
-    shape: (z) => ({
-      stream: transcriptStream(z, "read_lead"),
-      ...transcriptPlace(z),
-    }),
-    call: (context, { stream, after, entry }) =>
-      readTranscript(
-        context,
-        `${projectPath(context, "leadTranscript")}${search({ stream, after, limit: chuggyTranscriptBatchesRead })}`,
-        { after: after ?? 0, entry: entry ?? 0 },
-      ),
   },
   {
     name: "list_executions",
@@ -2569,7 +2505,7 @@ export const chuggyProjectTools = [
   },
   {
     name: "release_draft",
-    description: `Submits the release of one draft. Releasing makes the ticket Pending and starts no work: once its dependencies are Done it runs when it is dispatched, by the project's lead or by someone who may dispatch. read_lead answers whether a lead will dispatch it: none does where it answers a lead standing with \`held\` or a \`refusal\`, or no lead for a reason other than \`NotNeeded\` or \`AwaitingSelector\`, and the ticket then waits for a dispatch, which dispatch_ticket submits on your owner's word. ${chuggySubmissionDescription} A release refused for its brief or its configuration is refused again at that authoring version, so revise_draft the draft and release the \`authoringVersion\` and \`configurationRevision\` the revision answers. ${chuggyProgramShortDescription}`,
+    description: `Submits the release of one draft. Releasing makes the ticket Pending and starts no work: once its dependencies are Done it runs when it is dispatched, by the project's lead or by someone who may dispatch; dispatch_ticket submits one on your owner's word. ${chuggySubmissionDescription} A release refused for its brief or its configuration is refused again at that authoring version, so revise_draft the draft and release the \`authoringVersion\` and \`configurationRevision\` the revision answers. ${chuggyProgramShortDescription}`,
     shape: (z) => ({
       ticket: ticket(z).describe(
         "The ticket number the draft holds, as read_draft answers it.",
@@ -3050,8 +2986,10 @@ export const chuggyOfferTools = [
  * Every tool this session holds, project, member, offer and decision alike,
  * filtered by the capability roster its row carries. A tool the roster does
  * not admit is not registered at all, so the runtime's own tool list is the
- * proof rather than this source. The tools of a job host (`./jobHost.mjs`)
- * are the session's, held where it holds one, and no roster names them.
+ * proof rather than this source. The session's own tools, a job host's
+ * (`./jobHost.mjs`) and a thread's `ticket_wakes`
+ * (`./sessionTicketWakes.mjs`), are held where it holds them, and no roster
+ * names them.
  */
 export function chuggyToolDefinitions(context) {
   const admitted = new Set(
@@ -3071,7 +3009,7 @@ export function chuggyToolDefinitions(context) {
     ...[...served, ...context.staging.definitions].filter((definition) =>
       admitted.has(definition.name),
     ),
-    ...(context.jobHost?.definitions ?? []).map((definition) => ({
+    ...context.own.map((definition) => ({
       ...definition,
       call: (args) => definition.call(context, args),
     })),
@@ -3228,7 +3166,7 @@ export function chuggyToolServer(context, sdk) {
   });
 }
 
-/** What one session's tools are held in: its task, its bearer, this turn's staging, where its images are written, how the public docs are fetched, the scrub of what they send, and its job host where it holds one. */
+/** What one session's tools are held in: its task, its bearer, this turn's staging, where its images are written, how the public docs are fetched, the scrub of what they send, and its own tools. */
 export function chuggyToolContext(task, bearer, services = {}) {
   return {
     task,
@@ -3241,6 +3179,6 @@ export function chuggyToolContext(task, bearer, services = {}) {
     staging: services.staging ?? leadDecisionStaging(),
     imageFile: services.imageFile ?? chuggyToolImageFiles(),
     docsFetch: services.docsFetch ?? globalThis.fetch,
-    ...(services.jobHost === undefined ? {} : { jobHost: services.jobHost }),
+    own: services.own ?? [],
   };
 }

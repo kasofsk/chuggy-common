@@ -20,6 +20,8 @@ import {
   parseChatHostFrame,
 } from "@chuggy/worker-contract/chatHost";
 import {
+  workerContractFeaturesHeader,
+  workerContractFeaturesText,
   workerContractHeader,
   workerContractRelease,
 } from "@chuggy/worker-contract/workerContract";
@@ -74,6 +76,7 @@ import {
 import { chatSupervisorSettings } from "./chatSupervisor.mjs";
 import { controlAsked, controlServer, controlSocketPath } from "./control.mjs";
 import { poolLabelValue } from "./poolIdentity.mjs";
+import { workerFeaturesImplemented } from "./transport.mjs";
 
 const bearer = "chgs_0123456789abcdef0123456789abcdef";
 
@@ -309,6 +312,7 @@ async function hostOf(
     handed = (handle) => handle,
     engine = "docker",
     updates,
+    features,
   },
 ) {
   const runtimeDir = await mkdtemp(join(tmpdir(), "chuggy-chat-host-"));
@@ -355,6 +359,7 @@ async function hostOf(
       fetch: planeOf(seen, answers, supervisors, {
         nowMs: now,
         status: () => host?.status(),
+        features,
       }),
     },
   );
@@ -364,7 +369,8 @@ async function hostOf(
 /**
  * A plane answering each poll with the next of `answers`, or what the next,
  * a function of the supervisors started and of the host's clock and status,
- * settles to, and denying the host past them; every settlement and
+ * settles to, listing the host's `features` where it is given any, and
+ * denying the host past them; every settlement and
  * session's end is taken, and the credentials each poll names are taken
  * apart from it.
  */
@@ -383,6 +389,9 @@ function planeOf(seen, answers, supervisors, host) {
       wantedSessions: url.searchParams.get("wantedSessions"),
       held: url.searchParams.getAll("held"),
       idleSecs: url.searchParams.get("idleSecs"),
+      ...(url.searchParams.has("ticketWakes")
+        ? { ticketWakes: url.searchParams.get("ticketWakes") }
+        : {}),
       waitSecs: init.headers[workerRunnerPollWaitHeader],
     });
     seen.sessionCapabilities.push(url.searchParams.get("sessionCapabilities"));
@@ -393,9 +402,19 @@ function planeOf(seen, answers, supervisors, host) {
     if (typeof next === "function")
       next = await next(supervisors, host.nowMs(), host.status);
     await settled();
-    return next === undefined
-      ? answered(404, {})
-      : answered(200, { assignments: [], sessions: [], stop: [], ...next });
+    if (next === undefined) return answered(404, {});
+    const polled = answered(200, {
+      assignments: [],
+      sessions: [],
+      stop: [],
+      ...next,
+    });
+    if (host.features !== undefined)
+      polled.headers.set(
+        workerContractFeaturesHeader,
+        workerContractFeaturesText(host.features),
+      );
+    return polled;
   };
 }
 
@@ -449,6 +468,37 @@ test("a host polls with the idle bound its settings name, and with none where th
     await run.host.run();
     assert.ok(run.seen.polls.length > 0);
     for (const poll of run.seen.polls) assert.equal(poll.idleSecs, idleSecs);
+  }
+});
+
+/** Catches a host's ticket wakes lost between its settings and its poll, or named to a plane that cannot read them. */
+test("a host polls with the ticket wakes its settings name only where the plane lists ThreadTicketWakes, and claims sessions either way", async (t) => {
+  for (const [given, features, named] of [
+    [{ ticketWakes: "On" }, [...workerFeaturesImplemented], "On"],
+    [{ ticketWakes: "Off" }, [...workerFeaturesImplemented], "Off"],
+    [{}, [...workerFeaturesImplemented], undefined],
+    [
+      { ticketWakes: "On" },
+      workerFeaturesImplemented.filter(
+        (feature) => feature !== "ThreadTicketWakes",
+      ),
+      undefined,
+    ],
+  ]) {
+    const run = await hostOf(t, {
+      answers: [
+        { chatImage: one },
+        { chatImage: one, sessions: [sessionOf("a")] },
+      ],
+      given,
+      features,
+    });
+    await run.host.run();
+    const [first, ...rest] = run.seen.polls;
+    assert.equal(first.ticketWakes, undefined);
+    assert.ok(rest.length > 0);
+    for (const poll of rest) assert.equal(poll.ticketWakes, named);
+    assert.equal(run.supervisors[0].frames[0].frame, "Start");
   }
 });
 
@@ -1291,6 +1341,16 @@ test("a host's settings from a runner's file are its defaults where the file nam
       ).sessionCapabilities,
       sessionCapabilities,
     );
+  for (const ticketWakes of ["On", "Off"])
+    assert.equal(
+      chatHostConfigured(chatHostConfigSchema.parse({ ticketWakes }), 1_000)
+        .ticketWakes,
+      ticketWakes,
+    );
+  assert.equal(
+    chatHostConfigSchema.safeParse({ ticketWakes: "Host" }).success,
+    false,
+  );
 });
 
 /** Catches a setting that would cap a supervisor below what a session is claimed into, or a key misspelled into silence. */
@@ -1824,16 +1884,17 @@ test("a supervisor's container is asked of the engine: none, its state and wheth
 test("a host's settings and its service's status are said in lines a CLI prints", () => {
   assert.equal(
     chatHostSettingsLine(chatHostConfigured(undefined, 4_096)),
-    "sessionsMax 4, sessionMemoryMib 2048, so the supervisor is capped at 8192 MiB, idleSecs none, deadlineSecs none, sessionCapabilities every capability of the roster, outputBytesMax 4096, image the one chuggy names",
+    "sessionsMax 4, sessionMemoryMib 2048, so the supervisor is capped at 8192 MiB, idleSecs none, deadlineSecs none, sessionCapabilities every capability of the roster, ticketWakes unset, so chuggy's default: no wakes, outputBytesMax 4096, image the one chuggy names",
   );
   assert.equal(
     chatHostSettingsLine({
       ...settings,
       deadlineSecs: 7_200,
       sessionCapabilities: ["ProjectRead", "RunCommands"],
+      ticketWakes: "On",
       image: { image: "ghcr.io/geoff/chat:dev", pull: "always" },
     }),
-    "sessionsMax 2, sessionMemoryMib 3072, so the supervisor is capped at 6144 MiB, idleSecs 600, deadlineSecs 7200, sessionCapabilities ProjectRead RunCommands, outputBytesMax 4096, image ghcr.io/geoff/chat:dev, pulled before each start",
+    "sessionsMax 2, sessionMemoryMib 3072, so the supervisor is capped at 6144 MiB, idleSecs 600, deadlineSecs 7200, sessionCapabilities ProjectRead RunCommands, ticketWakes On, outputBytesMax 4096, image ghcr.io/geoff/chat:dev, pulled before each start",
   );
   assert.match(
     chatHostSettingsLine({ ...settings, sessionCapabilities: [] }),
