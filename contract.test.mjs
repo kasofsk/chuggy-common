@@ -87,6 +87,7 @@ import { envelope, fetchedAnswer, pushed } from "./envelope.fixture.mjs";
 import { heldCredentials } from "./heldCredentials.mjs";
 import { heartbeatIntervalMilliseconds, keepWorkerLease } from "./lease.mjs";
 import { leadDecisionStaging } from "./leadDecision.mjs";
+import { localToolCapabilities, localToolContext } from "./localTools.mjs";
 import {
   planeCredential,
   planeCredentialAnswered,
@@ -1429,6 +1430,29 @@ test("every roster registers, allows and disallows exactly what the contract's c
       named,
     );
   }
+});
+
+test("a person's own agent is served exactly the contract's roster for its capabilities, every capability no session can hold among them", () => {
+  const context = localToolContext({
+    site: "https://chuggy.test",
+    tenant: "t-1",
+    project: "p-1",
+    version: "1",
+    signIn: { token: async () => "token", invalidate: () => {} },
+  });
+  const personal = Object.keys(chuggyToolCapabilities).filter(
+    (capability) => !sessionCapabilities.includes(capability),
+  );
+
+  assert.ok(personal.length > 0);
+  for (const capability of personal)
+    assert.ok(localToolCapabilities.includes(capability), capability);
+  assert.deepEqual(
+    chuggyToolDefinitions(context).map(
+      ({ name }) => `${chuggyToolPrefix}${name}`,
+    ),
+    toolNamesBuilt(localToolCapabilities),
+  );
 });
 
 test("every built-in a capability admits is one the pod names, and the runtime names the server's tools by its prefix", () => {
