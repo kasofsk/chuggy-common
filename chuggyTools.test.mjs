@@ -1265,6 +1265,8 @@ function landingQueueOf(
     repository: `${"\\".repeat(repositoryChars)}${repositorySuffix}`,
     ...(target === undefined ? {} : { target }),
     holder,
+    holderSince: "2026-11-16T19:23:22.000000Z",
+    holderPhase: "Finalization",
     waiting: Array.from({ length: waiters }, (_, at) => holder * 1_000 + at),
   };
 }
@@ -1273,11 +1275,19 @@ test("a project's landing queues that fit one answer are answered as the route a
   for (const truncated of [false, true]) {
     const body = {
       queues: [
-        { repository: "https://git.test/a.git", holder: 3, waiting: [] },
+        {
+          repository: "https://git.test/a.git",
+          holder: 3,
+          holderSince: "2026-11-16T19:23:22.123456Z",
+          holderPhase: "Work",
+          waiting: [],
+        },
         {
           repository: "https://git.test/b.git",
           target: "release",
           holder: 5,
+          holderSince: "2026-11-15T08:00:00.000000Z",
+          holderPhase: "Escalated",
           waiting: [8, 13],
         },
       ],
@@ -1411,7 +1421,7 @@ test("a landing queues answer at its draw bound is read, and one past it is refu
   );
 });
 
-test("read_landing_queues says what a holder and a waiter are, that a lone ticket waits on nobody, that no target is not the default branch, and what truncated means", () => {
+test("read_landing_queues says what a holder and a waiter are, the holder's phase and since when it holds, that a lone ticket waits on nobody, that no target is not the default branch, and what truncated means", () => {
   const { description } = chuggyProjectTools.find(
     ({ name }) => name === "read_landing_queues",
   );
@@ -1419,6 +1429,8 @@ test("read_landing_queues says what a holder and a waiter are, that a lone ticke
     /Its `holder` is the one ticket that may land on that reference now/,
     /`waiting` the tickets ranked behind it, in rank order, none of which lands there before the holder stops holding it/,
     /A ticket alone in a queue is its holder and waits on nobody/,
+    /`holderPhase` is the holder's phase/,
+    /`holderSince` when it became the holder, in UTC: the later of when it took its rank and when the ticket holding the queue before it stopped/,
     /a queue naming no `target` being its tickets' that name none, which is a different queue from one naming the default branch/,
     /It answers the route's first whole queues one answer holds, in the route's order, by repository and then target, `truncated` where it leaves later ones out or the route left tickets out/,
   ])
@@ -3992,22 +4004,7 @@ const epicContentKeptGiven = {
 
 /** A project's lead settings as the route answers them, `overrides` replacing what the project sets. */
 function leadSettingsRead(overrides = leadSettingsOverrides, revision = 5) {
-  const effective = {
-    revision: 9,
-    projectRevision: revision,
-    mode: "Running",
-    installationMode: "Running",
-    dispatchMode: "Automatic",
-    basePrompt: "Base.",
-    northStar: "North.",
-    threadStandingRules: "Rules.",
-    modelAllowlist: [],
-    toolAllowlist: [],
-    limits: {},
-    installationLimits: {},
-    operationalContextMaxAgeMs: 60_000,
-    leadOffering: "Own",
-  };
+  const effective = { northStar: "North.", threadStandingRules: "Rules." };
   return {
     partition: { tenant: task.tenant, project: task.project },
     revision,
@@ -4019,10 +4016,8 @@ function leadSettingsRead(overrides = leadSettingsOverrides, revision = 5) {
 /** What a project's settings override, each kind of field among them. */
 const leadSettingsOverrides = {
   northStar: "Ship the worker core.",
-  basePrompt: "You are the lead.",
-  mode: "Running",
-  modelAllowlist: ["claude-opus-5-5"],
-  limits: { tokensPerDecision: 100, toolCallsPerDecision: 20 },
+  threadModel: "claude-opus-5-5",
+  threadEffort: "high",
 };
 
 /** A project's placement as the route answers it. */
@@ -4092,7 +4087,7 @@ const projectToolArguments = {
   add_epic_tickets: { epic: 3, tickets: [9] },
   remove_epic_tickets: { epic: 3, tickets: [4] },
   read_lead_settings: {},
-  update_lead_settings: { expectedRevision: 5, set: { mode: "Paused" } },
+  update_lead_settings: { expectedRevision: 5, set: { threadEffort: "low" } },
   read_placement: {},
   update_placement: { lead: "Pool" },
   read_usage: {},
@@ -5328,38 +5323,26 @@ function admittedMost(admits) {
 }
 
 /**
- * The heaviest settings the contract admits: every text and allowlist of the
- * overrides and of the effective settings at the most its schema admits, each
- * character one JSON escapes into six.
+ * The heaviest settings the contract admits: every text of the overrides and
+ * of the effective settings, and the model the overrides name, at the most its
+ * schema admits, each text's characters ones JSON escapes into six and the
+ * model's, which admits no control character, ones it escapes into two.
  */
 function leadSettingsHeaviest() {
-  const { basePrompt, modelAllowlist } = selectorProjectOverridesSchema.shape;
+  const { northStar, threadModel } = selectorProjectOverridesSchema.shape;
   const heavy = (chars) => "\u0001".repeat(chars);
   const text = heavy(
-    admittedMost((chars) => basePrompt.safeParse(heavy(chars)).success),
+    admittedMost((chars) => northStar.safeParse(heavy(chars)).success),
   );
-  const nameChars = admittedMost(
-    (chars) => modelAllowlist.safeParse([heavy(chars)]).success,
+  const modelHeavy = (chars) => "\\".repeat(chars);
+  const model = modelHeavy(
+    admittedMost((chars) => threadModel.safeParse(modelHeavy(chars)).success),
   );
-  const allowlist = Array.from(
-    {
-      length: admittedMost(
-        (names) =>
-          modelAllowlist.safeParse(Array(names).fill(heavy(nameChars))).success,
-      ),
-    },
-    (_, index) => `${heavy(nameChars - 1)}${String(index % 10)}`,
-  );
-  const texts = {
-    basePrompt: text,
-    northStar: text,
-    threadStandingRules: text,
-    modelAllowlist: allowlist,
-    toolAllowlist: allowlist,
-  };
+  const texts = { northStar: text, threadStandingRules: text };
   const settings = leadSettingsRead({
     ...leadSettingsOverrides,
     ...texts,
+    threadModel: model,
   });
   assert.ok(
     selectorProjectOverridesSchema.safeParse(settings.overrides).success,
@@ -5446,9 +5429,11 @@ test("read_lead_settings answers settings that fit as the route answered them, a
   );
   assert.deepEqual(
     configurationRead(
-      await fits.call("read_lead_settings", { path: ["overrides", "limits"] }),
+      await fits.call("read_lead_settings", {
+        path: ["overrides", "threadModel"],
+      }),
     ),
-    leadSettingsOverrides.limits,
+    leadSettingsOverrides.threadModel,
   );
   const missing = await fits.call("read_lead_settings", {
     path: ["overrides", "leadModel"],
@@ -5463,13 +5448,13 @@ test("read_lead_settings answers settings that fit as the route answered them, a
   assert.equal(answer.isError, true);
 });
 
-test("update_lead_settings keeps a field it is not sent, at its longest, drops one it clears and replaces limits whole, under the revision it was given", async () => {
+test("update_lead_settings keeps a field it is not sent, at its longest, drops one it clears and replaces one it sets, under the revision it was given", async () => {
   const heaviest = leadSettingsHeaviest();
   const { api, call } = leadSettingsToolsOf(heaviest);
 
   const answer = await call("update_lead_settings", {
     expectedRevision: 4,
-    set: { mode: "Paused", limits: { dispatchesPerDecision: 1 } },
+    set: { threadEffort: "low" },
     clear: ["northStar"],
   });
 
@@ -5486,11 +5471,7 @@ test("update_lead_settings keeps a field it is not sent, at its longest, drops o
   delete kept.northStar;
   assert.deepEqual(JSON.parse(api.calls[1].init.body), {
     expectedRevision: 4,
-    overrides: {
-      ...kept,
-      mode: "Paused",
-      limits: { dispatchesPerDecision: 1 },
-    },
+    overrides: { ...kept, threadEffort: "low" },
   });
 });
 
@@ -5510,7 +5491,7 @@ test("update_lead_settings relays settings that moved as their code and revision
 
   const answer = await call("update_lead_settings", {
     expectedRevision: 5,
-    set: { mode: "Paused" },
+    set: { threadEffort: "low" },
   });
 
   assert.equal(
@@ -5529,7 +5510,7 @@ test("update_lead_settings relays every other answer of its write as the API gav
     [
       409,
       JSON.stringify({
-        error: { code: "AutomaticDispatchUnavailable", message: "a" },
+        error: { code: "Fenced", message: "f" },
       }),
     ],
     [
@@ -5551,7 +5532,7 @@ test("update_lead_settings relays every other answer of its write as the API gav
 
     const answer = await call("update_lead_settings", {
       expectedRevision: 5,
-      clear: ["basePrompt"],
+      clear: ["northStar"],
     });
 
     assert.equal(textOf(answer), `HTTP ${String(status)}\n${body}`);
@@ -5566,7 +5547,7 @@ test("a settings read the API refuses is relayed by update_lead_settings, which 
 
   const answer = await call("update_lead_settings", {
     expectedRevision: 5,
-    set: { mode: "Paused" },
+    set: { threadEffort: "low" },
   });
 
   assert.equal(textOf(answer), `HTTP 404\n${body}`);
@@ -5584,24 +5565,23 @@ test("each settings and placement tool's refusal sends no request", async () => 
     ["read_lead_settings", { offset: -1 }],
     ["update_lead_settings", { expectedRevision: 5 }],
     ["update_lead_settings", { expectedRevision: 5, set: {}, clear: [] }],
-    ["update_lead_settings", { set: { mode: "Paused" } }],
-    ["update_lead_settings", { expectedRevision: 5, set: { mode: "Off" } }],
-    ["update_lead_settings", { expectedRevision: 5, set: { pause: true } }],
+    ["update_lead_settings", { set: { threadEffort: "low" } }],
     [
       "update_lead_settings",
-      { expectedRevision: 5, set: { basePrompt: "b".repeat(2 ** 20) } },
+      { expectedRevision: 5, set: { threadEffort: "least" } },
     ],
+    ["update_lead_settings", { expectedRevision: 5, set: { mode: "Paused" } }],
     [
       "update_lead_settings",
-      { expectedRevision: 5, set: { limits: { dispatchesPerDecision: 0 } } },
+      { expectedRevision: 5, set: { northStar: "b".repeat(2 ** 20) } },
     ],
-    ["update_lead_settings", { expectedRevision: 5, clear: ["pause"] }],
+    ["update_lead_settings", { expectedRevision: 5, clear: ["mode"] }],
     [
       "update_lead_settings",
       {
         expectedRevision: 5,
-        set: { northStar: "n", mode: "Paused" },
-        clear: ["mode"],
+        set: { northStar: "n", threadEffort: "low" },
+        clear: ["threadEffort"],
       },
     ],
     ["update_placement", {}],

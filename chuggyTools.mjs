@@ -2113,7 +2113,7 @@ export const chuggyProjectTools = [
   {
     name: "read_landing_queues",
     description:
-      "This project's landing queues, one for each reference a Serialized or Stacked ticket lands on. Call it for why a ticket's landing waits on another ticket's. Answers JSON. Each queue carries its `repository` and its `target`, a queue naming no `target` being its tickets' that name none, which is a different queue from one naming the default branch. Its `holder` is the one ticket that may land on that reference now, and `waiting` the tickets ranked behind it, in rank order, none of which lands there before the holder stops holding it. A ticket alone in a queue is its holder and waits on nobody. It answers the route's first whole queues one answer holds, in the route's order, by repository and then target, `truncated` where it leaves later ones out or the route left tickets out.",
+      "This project's landing queues, one for each reference a Serialized or Stacked ticket lands on. Call it for why a ticket's landing waits on another ticket's. Answers JSON. Each queue carries its `repository` and its `target`, a queue naming no `target` being its tickets' that name none, which is a different queue from one naming the default branch. Its `holder` is the one ticket that may land on that reference now, and `waiting` the tickets ranked behind it, in rank order, none of which lands there before the holder stops holding it. `holderPhase` is the holder's phase, and `holderSince` when it became the holder, in UTC: the later of when it took its rank and when the ticket holding the queue before it stopped, which a re-check, a re-stack, a re-evaluation and an invalidation leave as it was. A ticket alone in a queue is its holder and waits on nobody. It answers the route's first whole queues one answer holds, in the route's order, by repository and then target, `truncated` where it leaves later ones out or the route left tickets out.",
     shape: () => ({}),
     call: (context) =>
       readLandingQueues(context, projectPath(context, "landingQueues")),
@@ -2677,11 +2677,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_lead_settings",
-    description: `This project's lead settings: what the project sets for its lead, and what the lead runs with. Call it before update_lead_settings, and for why the lead is paused or how it is prompted. \`overrides\` is what the project sets, a field it leaves out taking the installation default; \`effective\` is what the lead runs with; \`revision\` is what update_lead_settings is written against. \`effective.installationMode\` Paused is a pause for the whole installation, which no project setting lifts. Reading and writing both need \`manageSelector\` in read_abilities, and without it the route answers 404. Settings larger than one answer are read by \`path\`, keys walking into the settings: ${chuggyPathReadDescription} With no \`path\`, the settings are answered whole where they fit and otherwise as their outline. A \`path\` the settings do not hold is refused, naming the keys where it stopped.`,
+    description: `This project's lead settings: what the project sets for its threads, and what they run under. Call it before update_lead_settings, and for how a thread is prompted. \`overrides\` is what the project sets, a field it leaves out taking the default; \`effective\` is its North Star and the standing rules its threads run under; \`revision\` is what update_lead_settings is written against. Reading and writing both need \`manageSelector\` in read_abilities, and without it the route answers 404. Settings larger than one answer are read by \`path\`, keys walking into the settings: ${chuggyPathReadDescription} With no \`path\`, the settings are answered whole where they fit and otherwise as their outline. A \`path\` the settings do not hold is refused, naming the keys where it stopped.`,
     shape: (z) =>
       pathArguments(
         z,
-        'The keys walking into the settings, an array\'s entries by index, such as ["overrides", "basePrompt"]; left out, the whole settings.',
+        'The keys walking into the settings, an array\'s entries by index, such as ["overrides", "northStar"]; left out, the whole settings.',
       ),
     call: (context, { path, offset }) =>
       readAtPath(
@@ -2694,21 +2694,21 @@ export const chuggyProjectTools = [
   },
   {
     name: "update_lead_settings",
-    description: `Changes this project's lead settings, on your owner's word only. Call it after read_lead_settings, whose \`revision\` it is written against. It reads the settings and writes the whole override set back with \`set\` applied and \`clear\` dropped, so a field named in neither keeps what the settings hold, and a long text is never sent again. An edit takes effect at the lead's next decision. \`mode\` Running resumes the lead and Paused pauses it, but neither lifts a pause set for the whole installation, which read_lead_settings answers as \`effective.installationMode\`. A write needs \`manageSelector\` in read_abilities, and without it the route answers 404. read_docs's page "Writing a project's lead prompt" is how to write \`basePrompt\` and \`northStar\`. A write is answered as its status and the \`revision\` the settings are now at; 409 with the \`code\` SettingsRevisionConflict is settings that moved since they were read, and is never asked again, so read them and decide again. Every other answer is the API's, its status and body unaltered: 409 AutomaticDispatchUnavailable, 503 SettingsWriteContended, which may be sent again, 404, and a body larger than the API takes.`,
+    description: `Changes this project's lead settings, on your owner's word only. Call it after read_lead_settings, whose \`revision\` it is written against. It reads the settings and writes the whole override set back with \`set\` applied and \`clear\` dropped, so a field named in neither keeps what the settings hold, and a long text is never sent again. A write needs \`manageSelector\` in read_abilities, and without it the route answers 404. read_docs's page "Writing a project's lead prompt" is how to write \`northStar\`. A write is answered as its status and the \`revision\` the settings are now at; 409 with the \`code\` SettingsRevisionConflict is settings that moved since they were read, and is never asked again, so read them and decide again. Every other answer is the API's, its status and body unaltered: 503 SettingsWriteContended, which may be sent again, 404, and a body larger than the API takes.`,
     shape: (z) => ({
       expectedRevision: count(z).describe(
         "The settings' `revision`, as read_lead_settings answers it.",
       ),
       set: anyObject(z)
         .describe(
-          "The override fields to write, each replacing that field whole, `limits` included, as read_lead_settings answers `overrides`; left out, none. A set the contract does not admit is refused before anything is read.",
+          "The override fields to write, each replacing that field whole, as read_lead_settings answers `overrides`; left out, none. A set the contract does not admit is refused before anything is read.",
         )
         .optional(),
       clear: z
         .array(z.enum(updateLeadSettingsFields))
         .max(updateLeadSettingsFields.length)
         .describe(
-          "The override fields to return to the installation default; left out, none. A field named here and in `set` is refused.",
+          "The override fields to return to the default; left out, none. A field named here and in `set` is refused.",
         )
         .optional(),
     }),
