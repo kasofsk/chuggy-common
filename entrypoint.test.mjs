@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { Buffer, constants } from "node:buffer";
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import {
   chmod,
   copyFile,
@@ -192,6 +192,12 @@ import {
   ticketCheckpoint,
 } from "./source.mjs";
 import { workerPlaneAwayMillisecondsMax, workerRequest } from "./transport.mjs";
+
+/** A HOME of the suite's own, so a run's Claude Code user settings are never this machine's. */
+const suiteHome = mkdtempSync(join(tmpdir(), "chuggy-entrypoint-home-"));
+process.env.HOME = suiteHome;
+delete process.env.CLAUDE_CONFIG_DIR;
+test.after(() => rmSync(suiteHome, { recursive: true, force: true }));
 
 const task = {
   workerPlane: { url: "http://worker-plane.test:3001" },

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { access, constants } from "node:fs/promises";
+import { access, constants, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath, URL } from "node:url";
 
@@ -64,6 +66,8 @@ test("each agent is spawned by its path in the runtime", () => {
 });
 
 /** Catches the runtime's CA bundle handed to Claude Code, which verifies its API against its own roots. */
-test("Claude Code is given no CA bundle", () => {
-  assert.equal(claudeAgent.prepareEnvironment, undefined);
+test("Claude Code is given no CA bundle", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "chuggy-core-runtime-home-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  assert.deepEqual(await claudeAgent.prepareEnvironment({ HOME: home }), {});
 });
