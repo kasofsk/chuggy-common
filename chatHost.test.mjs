@@ -297,7 +297,8 @@ function hostSeenOf() {
  * on `gate`; its clock is as `clockOf` keeps it, `hasty` or not. Each
  * supervisor answers as `answering` says, and a start answers what `handed`
  * makes of its handle, given what the host has logged. Its site's engine is
- * `engine`.
+ * `engine`. A session's end the plane answers as `endedAnswer` does, and
+ * at once where it is not given.
  */
 async function hostOf(
   t,
@@ -313,6 +314,7 @@ async function hostOf(
     engine = "docker",
     updates,
     features,
+    endedAnswer,
   },
 ) {
   const runtimeDir = await mkdtemp(join(tmpdir(), "chuggy-chat-host-"));
@@ -360,6 +362,7 @@ async function hostOf(
         nowMs: now,
         status: () => host?.status(),
         features,
+        endedAnswer,
       }),
     },
   );
@@ -371,8 +374,8 @@ async function hostOf(
  * a function of the supervisors started and of the host's clock and status,
  * settles to, listing the host's `features` where it is given any, and
  * denying the host past them; every settlement and
- * session's end is taken, and the credentials each poll names are taken
- * apart from it.
+ * session's end is taken, and answered as `host.endedAnswer` does where it
+ * is given, and the credentials each poll names are taken apart from it.
  */
 function planeOf(seen, answers, supervisors, host) {
   return async (input, init) => {
@@ -381,7 +384,7 @@ function planeOf(seen, answers, supervisors, host) {
     if (url.pathname.endsWith("/session/ended")) {
       seen.ended.push(JSON.parse(String(init.body)).phase);
       seen.events.push("ended");
-      return answered(204);
+      return host.endedAnswer?.() ?? answered(204);
     }
     if (init.method === "POST") return answered(204);
     seen.events.push("poll");
@@ -677,6 +680,67 @@ test("a host whose runner has no update pending drains no supervisor", async (t)
     run.supervisors[0].frames.map(({ frame }) => frame),
     ["Start"],
   );
+});
+
+test("a host ended mid-run polls no more, closes its supervisor, names each session it held as ended to the plane once, and answers Ended", async (t) => {
+  /** @type {Awaited<ReturnType<typeof hostOf>> | undefined} */
+  let run;
+  run = await hostOf(t, {
+    answers: [
+      { chatImage: one },
+      { chatImage: one, sessions: [sessionOf("a"), sessionOf("b")] },
+      () => {
+        run?.host.end(60_000);
+        return { chatImage: one };
+      },
+      { chatImage: one },
+    ],
+    answering: { lingering: true },
+  });
+  assert.deepEqual(await run.host.run(), { passed: "Ended" });
+  assert.equal(run.supervisors.length, 1);
+  assert.equal(run.supervisors[0].handle.input.writableEnded, true);
+  assert.deepEqual(run.seen.ended, ["Failed", "Failed"]);
+  assert.ok(
+    run.logged.includes(
+      "this chat host ended, and 2 sessions were named to the plane as ended",
+    ),
+    run.logged.join("\n"),
+  );
+  await moment();
+  assert.deepEqual(run.seen.ended, ["Failed", "Failed"]);
+  assert.equal(run.seen.polls.length, 3);
+});
+
+test("a host ended where the plane does not answer a session's end answers Ended within the time its end was given", async (t) => {
+  /** @type {Awaited<ReturnType<typeof hostOf>> | undefined} */
+  let run;
+  run = await hostOf(t, {
+    answers: [
+      { chatImage: one },
+      { chatImage: one, sessions: [sessionOf("a")] },
+      () => {
+        run?.host.end(20);
+        return { chatImage: one };
+      },
+    ],
+    answering: { lingering: true },
+    endedAnswer: () => new Promise(() => undefined),
+  });
+  assert.deepEqual(await run.host.run(), { passed: "Ended" });
+  assert.deepEqual(run.seen.ended, ["Failed"]);
+  assert.ok(
+    run.logged.includes(
+      "this chat host ended without its supervisor and its sessions' ends settled within 20 ms, which the plane is left to notice",
+    ),
+    run.logged.join("\n"),
+  );
+});
+
+test("a host's end is given a positive integer of ms", async (t) => {
+  const run = await hostOf(t, { answers: [] });
+  for (const waitMs of [0, -1, 1.5, Number.NaN])
+    assert.throws(() => run.host.end(waitMs), RangeError);
 });
 
 test("a drained supervisor's sessions are named as ended before a supervisor is started in the image named anew", async (t) => {
