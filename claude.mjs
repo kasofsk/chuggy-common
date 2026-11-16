@@ -1,6 +1,6 @@
-import { writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 
 import {
   claudeCredentialEnvironment,
@@ -178,6 +178,71 @@ export function claudeCredentialPrepared(text, given = {}) {
   };
 }
 
+/** The compaction window, in tokens, of a Claude Code run whose settings name none. */
+export const claudeAutoCompactWindowDefault = 250_000;
+
+/**
+ * The user settings file Claude Code reads when started on `environment`:
+ * under `CLAUDE_CONFIG_DIR` where that is named, its `.claude` under HOME
+ * otherwise.
+ */
+export function claudeUserSettingsPath(environment) {
+  return join(
+    environment.CLAUDE_CONFIG_DIR ||
+      join(environment.HOME || homedir(), ".claude"),
+    "settings.json",
+  );
+}
+
+/**
+ * Whether `file` is under the HOME `environment` names, which is the run's
+ * own: the image's in a pod, the job's place on a host.
+ */
+function prepareClaudeEnvironmentOwns(environment, file) {
+  const within = relative(environment.HOME || homedir(), file);
+  return (
+    within !== ".." && !within.startsWith(`..${sep}`) && !isAbsolute(within)
+  );
+}
+
+/**
+ * What a Claude run's own process is started with beside `environment`:
+ * nothing, once its user settings name a compaction window. Where they name
+ * none, `claudeAutoCompactWindowDefault` is added to them, every key they hold
+ * kept. The user layer is the lowest Claude Code reads, so a repository's own
+ * settings and a workload's `--settings` each outrank it.
+ * `CLAUDE_CODE_AUTO_COMPACT_WINDOW` would outrank them all, so it is never set.
+ * A file that is not a JSON object, or that is outside the run's HOME and so
+ * someone else's, is left as it is.
+ */
+export async function prepareClaudeEnvironment(environment) {
+  const file = claudeUserSettingsPath(environment);
+  if (!prepareClaudeEnvironmentOwns(environment, file)) return {};
+  const text = await readFile(file, "utf8").catch((error) => {
+    if (error?.code === "ENOENT") return "{}";
+    throw error;
+  });
+  let settings;
+  try {
+    settings = JSON.parse(text);
+  } catch {
+    return {};
+  }
+  if (
+    typeof settings !== "object" ||
+    settings === null ||
+    Array.isArray(settings) ||
+    Object.hasOwn(settings, "autoCompactWindow")
+  )
+    return {};
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(
+    file,
+    `${JSON.stringify({ ...settings, autoCompactWindow: claudeAutoCompactWindowDefault }, null, 2)}\n`,
+  );
+  return {};
+}
+
 /** What a result frame says beyond its verdict: the runtime's own sentence and the conversation it ended. */
 function claudeEnded(event) {
   return { sentence: event?.result, session: event?.session_id };
@@ -196,6 +261,7 @@ export const claudeAgent = {
   ended: claudeEnded,
   prepareCredential: claudeCredentialPrepared,
   prepareShell: prepareClaudeShell,
+  prepareEnvironment: prepareClaudeEnvironment,
   configurationEvent: (event) =>
     event?.type === "system" && event.subtype === "init",
   resultEvent: (event) => event?.type === "result",

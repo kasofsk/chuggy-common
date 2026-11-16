@@ -962,6 +962,38 @@ test("a job's environment is the runner's less chuggy's, then the owner's, then 
   );
 });
 
+/** Catches a host job's Claude Code reading and writing its runner's own config directory as the job's. */
+test("a job is not handed its runner's CLAUDE_CONFIG_DIR, though the owner's environment may name one", () => {
+  for (const platform of /** @type {const} */ (["linux", "win32"]))
+    assert.ok(
+      !(
+        "CLAUDE_CONFIG_DIR" in
+        hostJobEnvironment(
+          { CLAUDE_CONFIG_DIR: "/Users/owner/.claude" },
+          {},
+          "/jobs/job-1",
+          "{}",
+          platform,
+        )
+      ),
+      platform,
+    );
+  assert.equal(
+    hostJobEnvironment(
+      { CLAUDE_CONFIG_DIR: "/Users/owner/.claude" },
+      { CLAUDE_CONFIG_DIR: "/srv/claude" },
+      "/jobs/job-1",
+      "{}",
+      "linux",
+    ).CLAUDE_CONFIG_DIR,
+    "/srv/claude",
+  );
+  assert.equal(
+    hostEnvironmentRefusal({ CLAUDE_CONFIG_DIR: "/srv/claude" }),
+    undefined,
+  );
+});
+
 test("on Windows a job's places are also where Windows' programs look, a runner's own of any case is withheld, and the owner's names win whatever their case", () => {
   const started = hostJobEnvironment(
     {

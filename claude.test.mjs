@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -18,12 +25,15 @@ import {
 } from "./checks.mjs";
 import {
   claudeAgent,
+  claudeAutoCompactWindowDefault,
   claudeBrief,
   claudeCredentialPrepared,
   claudeInvocation,
   claudeResult,
   claudeResumeInvocation,
   claudeShellScript,
+  claudeUserSettingsPath,
+  prepareClaudeEnvironment,
   prepareClaudeShell,
 } from "./claude.mjs";
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
@@ -333,6 +343,123 @@ test("a Claude run's shell script is under HOME where none is named", async (t) 
   const prepared = await prepareClaudeShell({});
 
   assert.equal(dirname(prepared.environment.CLAUDE_ENV_FILE), home);
+});
+
+/** A run whose workload's mode carries `args`, and the user settings it is started on, under a HOME of its own. */
+async function claudeWindowRun(t, args, settings) {
+  const home = await mkdtemp(join(tmpdir(), "chuggy-claude-window-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const environment = { HOME: home };
+  const file = claudeUserSettingsPath(environment);
+  if (settings !== undefined) {
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, settings);
+  }
+  const argv = claudeInvocation({
+    worker: { mode: { type: "SingleAgent", agent: "Claude", arguments: args } },
+    briefing: { text: "briefing" },
+  });
+  const added = await claudeAgent.prepareEnvironment(environment);
+  return { argv, added, user: JSON.parse(await readFile(file, "utf8")) };
+}
+
+/** The window a run's settings layers name, each layer outranking the ones before it as Claude Code's precedence does. */
+function claudeWindowEffective(user, argv) {
+  const flag = argv
+    .filter((argument) => argument.startsWith("--settings="))
+    .map((argument) => JSON.parse(argument.slice("--settings=".length)));
+  return Object.assign({}, user, ...flag).autoCompactWindow;
+}
+
+/** Catches a run with no window named compacting at Claude Code's own default. */
+test("a Claude run whose settings name no window compacts at the default", async (t) => {
+  const run = await claudeWindowRun(t, []);
+  assert.equal(claudeAutoCompactWindowDefault, 250_000);
+  assert.deepEqual(run.user, { autoCompactWindow: 250_000 });
+  assert.equal(claudeWindowEffective(run.user, run.argv), 250_000);
+  assert.equal(claudeAgent.prepareEnvironment, prepareClaudeEnvironment);
+});
+
+/** Catches the default outranking the window a workload's own `--settings` names. */
+test("a workload's --settings naming a window keeps its own", async (t) => {
+  const named = '--settings={"autoCompactWindow":400000}';
+  const run = await claudeWindowRun(t, [named]);
+  assert.ok(run.argv.includes(named));
+  assert.equal(claudeWindowEffective(run.user, run.argv), 400_000);
+});
+
+/** Catches a workload's other settings dropped, or its window-less `--settings` taken for a choice of window. */
+test("a workload's --settings naming other keys keeps them and gets the default", async (t) => {
+  const named = '--settings={"model":"opus"}';
+  const run = await claudeWindowRun(t, [named]);
+  assert.ok(run.argv.includes(named));
+  assert.equal(claudeWindowEffective(run.user, run.argv), 250_000);
+});
+
+/** Catches the image's own user settings written over, its own window among them. */
+test("an image's user settings keep every key and any window they name", async (t) => {
+  assert.deepEqual((await claudeWindowRun(t, [], '{"model":"opus"}')).user, {
+    model: "opus",
+    autoCompactWindow: 250_000,
+  });
+  assert.deepEqual(
+    (await claudeWindowRun(t, [], '{"autoCompactWindow":600000}')).user,
+    { autoCompactWindow: 600_000 },
+  );
+});
+
+/** Catches the default written where Claude Code does not read user settings. */
+test("a Claude run's user settings are under CLAUDE_CONFIG_DIR where it is named", () => {
+  assert.equal(
+    claudeUserSettingsPath({ HOME: "/home/a", CLAUDE_CONFIG_DIR: "/config" }),
+    "/config/settings.json",
+  );
+  assert.equal(
+    claudeUserSettingsPath({ HOME: "/home/a" }),
+    "/home/a/.claude/settings.json",
+  );
+});
+
+/** Catches the default written into a settings file outside the run's HOME, which is its user's and read by their own sessions. */
+test("user settings under a CLAUDE_CONFIG_DIR outside the run's HOME are left unchanged", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "chuggy-claude-config-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const config = join(root, "operator");
+  const environment = {
+    HOME: join(root, "job", "home"),
+    CLAUDE_CONFIG_DIR: config,
+  };
+  await mkdir(config, { recursive: true });
+  await writeFile(join(config, "settings.json"), '{"model":"opus"}');
+
+  assert.deepEqual(await prepareClaudeEnvironment(environment), {});
+  assert.equal(
+    await readFile(join(config, "settings.json"), "utf8"),
+    '{"model":"opus"}',
+  );
+
+  const owned = {
+    ...environment,
+    CLAUDE_CONFIG_DIR: join(environment.HOME, "config"),
+  };
+  await prepareClaudeEnvironment(owned);
+  assert.deepEqual(
+    JSON.parse(await readFile(claudeUserSettingsPath(owned), "utf8")),
+    { autoCompactWindow: 250_000 },
+  );
+});
+
+/** Catches the window set by the variable that outranks every settings layer, so no workload could choose one. */
+test("a Claude run never sets CLAUDE_CODE_AUTO_COMPACT_WINDOW", async (t) => {
+  const run = await claudeWindowRun(t, []);
+  assert.deepEqual(run.added, {});
+  assert.ok(
+    !Object.hasOwn(
+      claudeAgent.prepareCredential("token").environment,
+      "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+    ),
+  );
+  assert.ok(!run.argv.some((argument) => argument.includes("AUTO_COMPACT")));
 });
 
 const token = "sk-ant-oat01-exampleexampleexample";
