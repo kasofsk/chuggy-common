@@ -186,7 +186,7 @@ import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
 export const chatHostSessionsMaxDefault = 4;
 
 /** The memory a host's supervisor is given for each session it runs at once, where its setting names no other. */
-export const chatSessionMemoryBytesDefault = 2 * 2 ** 30;
+export const chatSessionMemoryBytesDefault = 2 ** 30;
 
 /** The least memory a setting may give a session: the least a job is claimed into. */
 const chatSessionMemoryBytesMin = memoryRoomMibMin * 2 ** 20;
