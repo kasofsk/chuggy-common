@@ -9,7 +9,11 @@
  * `jobHostWakeSender`, naming the reason and the job, watch or timer's name
  * under an event identity of its own, and carrying no log text: the thread
  * reads a job's log, or the lines a watch matched, with its own tools, at the
- * paths the tools answer. A job `job_stop` ended wakes nobody.
+ * paths the tools answer. A job `job_stop` ended wakes nobody. What each wake
+ * came to is kept as its job's, watch's or timer's last wake, written with the
+ * state and answered by the list tools; a refusal that will refuse the next
+ * wake too is answered by the tools that set one, from this attempt's wakes
+ * alone, since a refusal of the attempt before may have ended with it.
  *
  * WHAT IT HOLDS OUTLIVES THE ATTEMPT AS A FILE, NOT AS A PROCESS. The thread's
  * user's processes end with its attempt (`./chatSession.mjs`), so every change
@@ -50,6 +54,7 @@ import { join, relative, resolve, sep } from "node:path";
 import {
   allThreadJobWakeReasons,
   sessionIdentityCharsMax,
+  sessionPlaneAnswers,
   sessionPlaneRoutes,
   sessionWokenAnswerSchema,
 } from "@chuggy/worker-contract/sessionPlane";
@@ -111,6 +116,11 @@ export const jobHostWakeTriesMax = 5;
 export const jobHostWakePauseMs = 5_000;
 export const jobHostWakesQueuedMax = 64;
 
+/** The most timers it no longer holds whose last wake the host keeps, and so the most last wakes it keeps of every kind. */
+export const jobHostTimersFiredMax = jobHostTimersMax;
+const jobHostWakesKeptMax =
+  jobHostJobsMax + jobHostWatchesMax + jobHostTimersMax + jobHostTimersFiredMax;
+
 /** The largest state file read back. */
 const jobHostStateBytesMax = 1024 * 1024;
 
@@ -130,6 +140,42 @@ const jobAttemptEnded = "AttemptEnded";
 /** What answers the plane's wake route, as `jobHostWakeSender` reads it. */
 const wokenStatus = 200;
 const deliveredWokens = new Set(["Woken", "AlreadyWoken"]);
+
+/**
+ * What became of one wake the host offered: woken, refused in the plane's
+ * word or with the status it gave none with, every post failed, or dropped
+ * for the wakes already waiting.
+ */
+const wakeDelivered = "Delivered";
+const wakeRefused = "Refused";
+const wakePostsFailed = "PostsFailed";
+const wakeQueueFull = "QueueFull";
+const wakeOutcomes = [
+  wakeDelivered,
+  wakeRefused,
+  wakePostsFailed,
+  wakeQueueFull,
+];
+
+/**
+ * The wake route's refusals, as against its mailbox's answers, which hold for
+ * the attempt: the plane is deployed without wakes, the thread is not
+ * admitted, the attempt is not a chat host's thread's, or it is fenced.
+ */
+export const jobHostWakeRefusalsStanding = [
+  "NotConfigured",
+  "NotAdmitted",
+  "NotChatHostThread",
+  "Fenced",
+];
+
+/** The kind of what each wake is about, whose record of its last wake it is kept as. */
+const wakeKinds = {
+  [jobExited]: "job",
+  [attemptEnded]: "job",
+  [watchMatched]: "watch",
+  [timerDue]: "timer",
+};
 
 /** `ms` later, `act` run, unless the returned function is called first. */
 function jobHostSchedule(act, ms) {
@@ -225,8 +271,8 @@ export function jobHostStateParsed(text) {
   } catch {
     return undefined;
   }
-  const { jobs, watches, timers } = read ?? {};
-  if (![jobs, watches, timers].every(Array.isArray)) return undefined;
+  const { jobs, watches, timers, wakes = [] } = read ?? {};
+  if (![jobs, watches, timers, wakes].every(Array.isArray)) return undefined;
   const fine =
     jobs.every((job) =>
       jobHostRecord(job, {
@@ -246,7 +292,8 @@ export function jobHostStateParsed(text) {
     ) &&
     timers.every((timer) =>
       jobHostRecord(timer, { reason: "string", dueAtMs: "number" }),
-    );
+    ) &&
+    wakes.every(jobHostWakeRecordParsed);
   if (!fine) return undefined;
   try {
     for (const { name } of [...jobs, ...watches]) jobHostName(name);
@@ -260,12 +307,29 @@ export function jobHostStateParsed(text) {
     jobs: jobs.slice(0, jobHostJobsMax),
     watches: watches.slice(0, jobHostWatchesMax),
     timers: timers.slice(0, jobHostTimersMax),
+    wakes: wakes.slice(-jobHostWakesKeptMax),
   };
+}
+
+/** Whether `wake` is a record of one wake's end the host wrote. */
+function jobHostWakeRecordParsed(wake) {
+  return (
+    jobHostRecord(wake, {
+      wake: "string",
+      resource: "string",
+      atMs: "number",
+      outcome: "string",
+      refusal: "string?",
+      status: "number?",
+    }) &&
+    Object.hasOwn(wakeKinds, wake.wake) &&
+    wakeOutcomes.includes(wake.outcome)
+  );
 }
 
 /** The state at `path`, empty where there is none, and empty where it cannot be read, which `warn` says. */
 async function jobHostStateRead(path, warn) {
-  const empty = { jobs: [], watches: [], timers: [] };
+  const empty = { jobs: [], watches: [], timers: [], wakes: [] };
   let text;
   try {
     const handle = await open(path, "r");
@@ -321,6 +385,7 @@ function jobHostStateWritten(host) {
       reason,
       dueAtMs,
     })),
+    wakes: Object.values(host.wakesLast).flatMap((kept) => [...kept.values()]),
   };
 }
 
@@ -364,10 +429,69 @@ function jobHostStandingChanged(host) {
   );
 }
 
-/** One wake offered for `resource`, under an event identity of its own. */
+/** One wake offered for `resource`, under an event identity of its own, and what it came to kept. */
 function jobHostWake(host, wake, resource) {
   if (host.closing) return;
-  host.wake({ wake, resource, event: randomUUID() });
+  const atMs = host.now();
+  void Promise.resolve(host.wake({ wake, resource, event: randomUUID() })).then(
+    (answered) => {
+      if (answered === undefined || host.closing) return;
+      jobHostWakeKept(host, { wake, resource, atMs, ...answered });
+      void jobHostPersist(host);
+    },
+  );
+}
+
+/**
+ * `record` kept as the last wake of its job, watch or timer: a job's or a
+ * watch's only while the host holds it, and a timer's whether or not it does,
+ * the oldest of those it does not hold forgotten past `jobHostTimersFiredMax`.
+ */
+function jobHostWakeKept(host, record) {
+  const kind = wakeKinds[record.wake];
+  const kept = host.wakesLast[kind];
+  const held = { job: host.jobs, watch: host.watches, timer: host.timers }[
+    kind
+  ];
+  host.wakeAnsweredLast = record;
+  if (kind !== "timer" && !held.has(record.resource)) return;
+  kept.delete(record.resource);
+  kept.set(record.resource, record);
+  const fired = [...kept.keys()].filter((reason) => !held.has(reason));
+  for (const reason of fired.slice(0, -jobHostTimersFiredMax))
+    kept.delete(reason);
+}
+
+/** What a tool answers of one wake's end. */
+function jobHostWakeAnswered({ wake, atMs, outcome, refusal, status }) {
+  return {
+    wake,
+    at: new Date(atMs).toISOString(),
+    outcome,
+    ...(refusal === undefined ? {} : { refusal }),
+    ...(status === undefined ? {} : { status }),
+  };
+}
+
+/** `answer` with the last wake of `resource` of `kind` beside it, where the host keeps one. */
+function jobHostWithLastWake(host, kind, resource, answer) {
+  const last = host.wakesLast[kind].get(resource);
+  return last === undefined
+    ? answer
+    : { ...answer, lastWake: jobHostWakeAnswered(last) };
+}
+
+/** `answer` saying where the last wake this attempt's host offered was refused for a reason that refuses the next. */
+function jobHostWithWakesRefused(host, answer) {
+  const last = host.wakeAnsweredLast;
+  if (!jobHostWakeRefusalsStanding.includes(last?.refusal)) return answer;
+  return {
+    ...answer,
+    wakesRefused: {
+      resource: last.resource,
+      ...jobHostWakeAnswered(last),
+    },
+  };
 }
 
 /** A previous log of `path` moved aside, so a job's start keeps the run before it and no other. */
@@ -477,7 +601,9 @@ async function jobHostStart(host, { name, command, cwd, restart = false }) {
   });
   await jobHostPersist(host);
   jobHostStandingChanged(host);
-  return jobHostAnswer(host, job);
+  return JSON.stringify(
+    jobHostWithWakesRefused(host, jobHostAnswer(host, job)),
+  );
 }
 
 /** `job_stop`: a running job ended, TERM then KILL past the grace, or one that is not running forgotten. */
@@ -486,6 +612,7 @@ async function jobHostStop(host, { name }) {
   if (job === undefined) throw new Error(`no job is named ${name}`);
   if (job.status !== jobRunning) {
     host.jobs.delete(name);
+    host.wakesLast.job.delete(name);
     await jobHostPersist(host);
     return `the job ${name}, which was not running, is forgotten`;
   }
@@ -496,15 +623,12 @@ async function jobHostStop(host, { name }) {
     await job.ended;
   }
   await host.writing;
-  return jobHostAnswer(host, host.jobs.get(name));
+  return JSON.stringify(jobHostAnswer(host, host.jobs.get(name)));
 }
 
 /** What a tool answers of one job. */
 function jobHostAnswer(host, job) {
-  return JSON.stringify({
-    ...jobHostJobWritten(job),
-    log: host.places.log(job.name),
-  });
+  return { ...jobHostJobWritten(job), log: host.places.log(job.name) };
 }
 
 /** `job_list`: every job the host holds, each without the directory it runs in, which keeps the list inside one answer. */
@@ -513,7 +637,10 @@ function jobHostList(host) {
     [...host.jobs.values()].map((job) => {
       const listed = jobHostJobWritten(job);
       delete listed.cwd;
-      return { ...listed, log: host.places.log(job.name) };
+      return jobHostWithLastWake(host, "job", job.name, {
+        ...listed,
+        log: host.places.log(job.name),
+      });
     }),
   );
 }
@@ -645,7 +772,9 @@ async function jobHostWatchAdd(host, { name, path, pattern }) {
     pattern,
   });
   await jobHostPersist(host);
-  return JSON.stringify(jobHostWatchAnswer(host, watch));
+  return JSON.stringify(
+    jobHostWithWakesRefused(host, jobHostWatchAnswer(host, watch)),
+  );
 }
 
 /** What a tool answers of one watch. */
@@ -657,6 +786,7 @@ function jobHostWatchAnswer(host, { name, path, pattern }) {
 async function jobHostUnwatch(host, { name }) {
   if (!host.watches.delete(jobHostName(name)))
     throw new Error(`no watch is named ${name}`);
+  host.wakesLast.watch.delete(name);
   await jobHostPersist(host);
   return `the watch ${name} is ended; what it matched stays at ${host.places.matches(name)}`;
 }
@@ -700,12 +830,34 @@ async function jobHostWakeAt(host, { seconds, reason }) {
   const timer = { reason, dueAtMs: host.now() + seconds * 1_000 };
   jobHostTimerArmed(host, timer);
   await jobHostPersist(host);
-  return JSON.stringify(jobHostTimerAnswer(timer));
+  return JSON.stringify(
+    jobHostWithWakesRefused(host, jobHostTimerAnswer(timer)),
+  );
 }
 
 /** What a tool answers of one timer. */
 function jobHostTimerAnswer({ reason, dueAtMs }) {
   return { reason, dueAt: new Date(dueAtMs).toISOString() };
+}
+
+/** `wake_list`: every timer the host holds, then every one that fired and is not held again, each with its last wake where one is kept. */
+function jobHostTimerList(host) {
+  const fired = [...host.wakesLast.timer.keys()].filter(
+    (reason) => !host.timers.has(reason),
+  );
+  return JSON.stringify([
+    ...[...host.timers.values()].map((timer) =>
+      jobHostWithLastWake(
+        host,
+        "timer",
+        timer.reason,
+        jobHostTimerAnswer(timer),
+      ),
+    ),
+    ...fired.map((reason) =>
+      jobHostWithLastWake(host, "timer", reason, { reason }),
+    ),
+  ]);
 }
 
 /** `wake_cancel`: the timer for `reason` cancelled. */
@@ -762,6 +914,8 @@ async function jobHostRestore(host) {
   const due = read.timers.filter(({ dueAtMs }) => dueAtMs <= host.now());
   for (const timer of read.timers)
     if (!due.includes(timer)) jobHostTimerArmed(host, { ...timer });
+  for (const record of read.wakes) jobHostWakeKept(host, record);
+  host.wakeAnsweredLast = undefined;
   if (changed || due.length > 0) await jobHostPersist(host);
   for (const name of ended) jobHostWake(host, attemptEnded, name);
   for (const { reason } of due) jobHostWake(host, timerDue, reason);
@@ -816,6 +970,8 @@ export function jobHost(services) {
     jobs: new Map(),
     watches: new Map(),
     timers: new Map(),
+    wakesLast: { job: new Map(), watch: new Map(), timer: new Map() },
+    wakeAnsweredLast: undefined,
     writing: Promise.resolve(),
     reporting: Promise.resolve(),
     told: undefined,
@@ -861,13 +1017,19 @@ const jobHostReasonShape = (z) =>
 /** What every wake the host offers is, which each tool that sets one says. */
 const jobHostWakeSays = `A wake is a turn of this thread naming why and the name, and carrying no text of what happened.`;
 
+/** What a tool that sets a wake answers where the next is refused, which it says. */
+const jobHostWakesRefusedSays = `Where the last wake this attempt offered was refused ${jobHostWakeRefusalsStanding.join(", ")}, which refuse the next too, it also answers \`wakesRefused\`: that wake's resource, wake, at, outcome and refusal, and this thread will not be woken.`;
+
+/** What a list tool answers of a wake's end, which each says. */
+const jobHostLastWakeSays = `\`lastWake\`, where one was offered, is its last wake: why, when, and its outcome, Delivered, Refused with the plane's \`refusal\` or the \`status\` it gave none with, PostsFailed after ${String(jobHostWakeTriesMax)} posts, or QueueFull past ${String(jobHostWakesQueuedMax)} waiting; none but Delivered woke this thread.`;
+
 /** The job tools. */
 function jobHostJobDefinitions(host) {
   const { jobStart, jobStop, jobList } = jobHostToolNames;
   return [
     {
       name: jobStart,
-      description: `Starts a command as a job that runs on outside your turns, as /bin/sh -c in a process group of its own, its output and error written to its log. It wakes this thread when it exits on its own, and never when ${jobStop} ends it. ${jobHostWakeSays} With \`restart\`, a job running when this attempt ends is started again by the thread's next attempt, which keeps an attempt running for the thread while it runs; without it, the next attempt only says it ended. The host holds at most ${String(jobHostJobsMax)} jobs. Answers its pid and its log's path, which you read with your own tools.`,
+      description: `Starts a command as a job that runs on outside your turns, as /bin/sh -c in a process group of its own, its output and error written to its log. It wakes this thread when it exits on its own, and never when ${jobStop} ends it. ${jobHostWakeSays} With \`restart\`, a job running when this attempt ends is started again by the thread's next attempt, which keeps an attempt running for the thread while it runs; without it, the next attempt only says it ended. The host holds at most ${String(jobHostJobsMax)} jobs. Answers its pid and its log's path, which you read with your own tools. ${jobHostWakesRefusedSays}`,
       shape: (z) => ({
         name: jobHostNameShape(z),
         command: z
@@ -902,7 +1064,7 @@ function jobHostJobDefinitions(host) {
     },
     {
       name: jobList,
-      description: `Lists every job the host holds, with its command, its pid while it runs, its status and its log's path. A status is Running, Exited with its code or signal, Stopped by ${jobStop}, or AttemptEnded where an attempt ended under it.`,
+      description: `Lists every job the host holds, with its command, its pid while it runs, its status and its log's path. A status is Running, Exited with its code or signal, Stopped by ${jobStop}, or AttemptEnded where an attempt ended under it. ${jobHostLastWakeSays}`,
       shape: () => ({}),
       call: () => jobHostList(host),
     },
@@ -915,7 +1077,7 @@ function jobHostWatchDefinitions(host) {
   return [
     {
       name: watch,
-      description: `Wakes this thread on new lines of a file that match a regular expression, read every ${String(jobHostWatchPollMs / 1_000)} seconds from the file's end as it is now. ${jobHostWakeSays} Each read that matched wakes it once, keeping at most ${String(jobHostWatchBatchLinesMax)} of its lines in the matched file it answers, which you read with your own tools. The host holds at most ${String(jobHostWatchesMax)} watches, and one of the same name is replaced.`,
+      description: `Wakes this thread on new lines of a file that match a regular expression, read every ${String(jobHostWatchPollMs / 1_000)} seconds from the file's end as it is now. ${jobHostWakeSays} Each read that matched wakes it once, keeping at most ${String(jobHostWatchBatchLinesMax)} of its lines in the matched file it answers, which you read with your own tools. The host holds at most ${String(jobHostWatchesMax)} watches, and one of the same name is replaced. ${jobHostWakesRefusedSays}`,
       shape: (z) => ({
         name: jobHostNameShape(z),
         path: z
@@ -943,13 +1105,17 @@ function jobHostWatchDefinitions(host) {
     },
     {
       name: watchList,
-      description:
-        "Lists every watch the host holds: its file, its pattern and its matched file's path.",
+      description: `Lists every watch the host holds: its file, its pattern and its matched file's path. ${jobHostLastWakeSays}`,
       shape: () => ({}),
       call: () =>
         JSON.stringify(
           [...host.watches.values()].map((held) =>
-            jobHostWatchAnswer(host, held),
+            jobHostWithLastWake(
+              host,
+              "watch",
+              held.name,
+              jobHostWatchAnswer(host, held),
+            ),
           ),
         ),
     },
@@ -962,7 +1128,7 @@ function jobHostTimerDefinitions(host) {
   return [
     {
       name: wakeAt,
-      description: `Wakes this thread once, a number of seconds from now, for a reason. ${jobHostWakeSays} A timer that falls due while no attempt runs fires as the next one starts. The host holds at most ${String(jobHostTimersMax)} timers, and one for the same reason is replaced.`,
+      description: `Wakes this thread once, a number of seconds from now, for a reason. ${jobHostWakeSays} A timer that falls due while no attempt runs fires as the next one starts. The host holds at most ${String(jobHostTimersMax)} timers, and one for the same reason is replaced. ${jobHostWakesRefusedSays}`,
       shape: (z) => ({
         seconds: z
           .number()
@@ -984,11 +1150,9 @@ function jobHostTimerDefinitions(host) {
     },
     {
       name: wakeList,
-      description:
-        "Lists every timer the host holds: its reason and when it falls due.",
+      description: `Lists every timer the host holds: its reason and when it falls due; then each of the last ${String(jobHostTimersFiredMax)} that fired and is not set again, by its reason alone. ${jobHostLastWakeSays}`,
       shape: () => ({}),
-      call: () =>
-        JSON.stringify([...host.timers.values()].map(jobHostTimerAnswer)),
+      call: () => jobHostTimerList(host),
     },
   ];
 }
@@ -1002,15 +1166,34 @@ function jobHostDefinitions(host) {
   ];
 }
 
-/** What the plane's wake route answered one offer with, in words, or nothing where it woke the thread. */
+/**
+ * What the plane's wake route answered one offer with: what it came to, the
+ * refusal in the plane's word where it gave one and the status where it gave
+ * none, and in words where it is not a wake.
+ */
 async function jobHostWakeAnswer(response) {
+  const { status } = response;
   const body = await response.json().catch(() => undefined);
-  if (response.status === wokenStatus) {
+  if (status === wokenStatus) {
     const woken = sessionWokenAnswerSchema.safeParse(body);
-    if (!woken.success) return `an answer it could not read`;
-    return deliveredWokens.has(woken.data.woken) ? undefined : woken.data.woken;
+    if (!woken.success)
+      return {
+        came: { outcome: wakeRefused, status },
+        said: "an answer it could not read",
+      };
+    const { woken: word } = woken.data;
+    return deliveredWokens.has(word)
+      ? { came: { outcome: wakeDelivered } }
+      : { came: { outcome: wakeRefused, refusal: word }, said: word };
   }
-  return `${String(response.status)}${typeof body?.reason === "string" ? ` ${body.reason}` : ""}`;
+  const refusal =
+    sessionPlaneAnswers.wake[status]?.safeParse(body).data?.reason;
+  return refusal === undefined
+    ? { came: { outcome: wakeRefused, status }, said: String(status) }
+    : {
+        came: { outcome: wakeRefused, refusal },
+        said: `${String(status)} ${refusal}`,
+      };
 }
 
 /**
@@ -1019,7 +1202,8 @@ async function jobHostWakeAnswer(response) {
  * `Backlogged`, `Closed` and `NoThread` among them, is dropped and said on
  * `warn`; a post that failed is posted again under the same event identity,
  * at most `jobHostWakeTriesMax` times, and then dropped and said. At most
- * `jobHostWakesQueuedMax` wait, and one past that is dropped and said.
+ * `jobHostWakesQueuedMax` wait, and one past that is dropped and said. Each
+ * offer answers what it came to, and nothing where the attempt ended first.
  */
 export function jobHostWakeSender(task, bearer, services) {
   const { request, pause, warn } = services;
@@ -1043,9 +1227,10 @@ export function jobHostWakeSender(task, bearer, services) {
             body: JSON.stringify(offer),
           },
         );
-        const refused = await jobHostWakeAnswer(response);
-        if (refused !== undefined) said(offer, `was answered ${refused}`);
-        return;
+        const answered = await jobHostWakeAnswer(response);
+        if (answered.said !== undefined)
+          said(offer, `was answered ${answered.said}`);
+        return answered.came;
       } catch (failure) {
         warn(
           `the ${offer.wake} wake for ${offer.resource} could not be posted: ${failure instanceof Error ? failure.message : String(failure)}\n`,
@@ -1053,23 +1238,23 @@ export function jobHostWakeSender(task, bearer, services) {
         if (tries < jobHostWakeTriesMax) await pause(jobHostWakePauseMs);
       }
     }
-    said(
-      offer,
-      closed
-        ? "was not posted before the attempt ended"
-        : `failed ${String(jobHostWakeTriesMax)} posts`,
-    );
+    if (closed) {
+      said(offer, "was not posted before the attempt ended");
+      return undefined;
+    }
+    said(offer, `failed ${String(jobHostWakeTriesMax)} posts`);
+    return { outcome: wakePostsFailed };
   };
   return {
-    offer: (offer) => {
-      if (closed) return;
-      if (queued.length >= jobHostWakesQueuedMax)
-        return said(
-          offer,
-          `found ${String(jobHostWakesQueuedMax)} wakes waiting`,
-        );
+    offer: async (offer) => {
+      if (closed) return undefined;
+      if (queued.length >= jobHostWakesQueuedMax) {
+        said(offer, `found ${String(jobHostWakesQueuedMax)} wakes waiting`);
+        return { outcome: wakeQueueFull };
+      }
       queued.push(offer);
       posting = posting.then(() => post(queued.shift()));
+      return posting;
     },
     settled: () => posting,
     close: () => {

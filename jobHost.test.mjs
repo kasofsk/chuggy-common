@@ -12,7 +12,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { allThreadJobWakeReasons } from "@chuggy/worker-contract/sessionPlane";
+import {
+  allThreadJobWakeReasons,
+  sessionPlaneAnswers,
+} from "@chuggy/worker-contract/sessionPlane";
 
 import {
   chuggyToolAnswerBytes,
@@ -27,8 +30,11 @@ import {
   jobHostTimerSecsMax,
   jobHostTimersMax,
   jobHostToolNames,
+  jobHostTimersFiredMax,
+  jobHostWakeRefusalsStanding,
   jobHostWakeSender,
   jobHostWakeTriesMax,
+  jobHostWakesQueuedMax,
   jobHostWatchBatchLinesMax,
   jobHostWatchesMax,
 } from "./jobHost.mjs";
@@ -73,9 +79,8 @@ function handClock(start = 1_700_000_000_000) {
 }
 
 /** A thread's directory of its own, and a host over it whose wakes, standings and lines are kept. */
-async function hostOf(t, seams = {}) {
+async function hostOf(t, { answered = () => undefined, ...seams } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "chuggy-job-host-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
   const clock = handClock();
   const wakes = [];
   const standings = [];
@@ -84,7 +89,10 @@ async function hostOf(t, seams = {}) {
     jobHost({
       directory,
       environment: { PATH: process.env.PATH, JOB_HOST_CASE: "case" },
-      wake: (offer) => wakes.push(offer),
+      wake: (offer) => {
+        wakes.push(offer);
+        return answered(offer);
+      },
       standing: async (standing) => {
         standings.push(standing);
       },
@@ -94,7 +102,11 @@ async function hostOf(t, seams = {}) {
       ...seams,
     });
   const host = open();
-  t.after(() => host.close());
+  t.after(async () => {
+    await host.close();
+    await host.settled();
+    await rm(directory, { recursive: true, force: true });
+  });
   const tool = (opened, name) =>
     opened.definitions.find((definition) => definition.name === name);
   const call = async (name, args = {}, opened = host) =>
@@ -719,21 +731,41 @@ test("each tool's description states the bounds it is held to from the host's co
       `at most ${String(jobHostTimersMax)} timers`,
     ),
   );
+  assert.ok(
+    said(jobHostToolNames.wakeList).includes(
+      `the last ${String(jobHostTimersFiredMax)} that fired`,
+    ),
+  );
   assert.deepEqual(
     host.definitions.map(({ name }) => name),
     Object.values(jobHostToolNames),
   );
 });
 
-test("job_list of the most jobs the host holds, each at its longest, fits one tool answer", async (t) => {
-  const { call } = await hostOf(t);
-  const command = `sleep 600 #${'"'.repeat(jobHostCommandCharsMax - 11)}`;
-  for (let index = 0; index < jobHostJobsMax; index += 1)
-    await call(jobHostToolNames.jobStart, {
-      name: `${String(index)}`.padEnd(jobHostNameCharsMax, "n"),
-      command,
-      restart: true,
-    });
+test("job_list of the most jobs the host holds, each at its longest and with its last wake refused, fits one tool answer", async (t) => {
+  const { call } = await hostOf(t, {
+    answered: async () => ({
+      outcome: "Refused",
+      refusal: "NotChatHostThread",
+      status: 409,
+    }),
+  });
+  const name = (index) => `${String(index)}`.padEnd(jobHostNameCharsMax, "n");
+  for (const command of ["exit 3", "sleep 600"])
+    for (let index = 0; index < jobHostJobsMax; index += 1)
+      await call(jobHostToolNames.jobStart, {
+        name: name(index),
+        command: `${command} #${'"'.repeat(jobHostCommandCharsMax - command.length - 2)}`,
+        restart: true,
+      });
+  await until(
+    async () =>
+      JSON.parse(await call(jobHostToolNames.jobList)).every(
+        ({ lastWake, status }) =>
+          lastWake !== undefined && status === "Running",
+      ),
+    "every job running again with the last wake of its exit",
+  );
 
   const listed = await call(jobHostToolNames.jobList);
 
@@ -869,5 +901,257 @@ test("a restored timer due further off than the longest a timer is set for fires
   assert.deepEqual(
     wakes.map(({ wake, resource }) => [wake, resource]),
     [["TimerDue", "far"]],
+  );
+});
+
+/** A host whose wakes a sender posts to a route answering as `answers` says, and the route. */
+async function hostSending(t, answers, request) {
+  const route = wakeRoute(answers);
+  const sender = jobHostWakeSender({}, "bearer", {
+    request: request ?? route.request,
+    pause: async () => undefined,
+    warn: () => undefined,
+  });
+  t.after(() => sender.close());
+  const hosted = await hostOf(t, { answered: sender.offer });
+  return { ...hosted, route, sender };
+}
+
+/** What a list tool answers of the one named, once it answers a last wake for it. */
+async function lastWakeOf(call, list, field, name) {
+  return until(
+    async () =>
+      JSON.parse(await call(list)).find(
+        (held) => held[field] === name && held.lastWake !== undefined,
+      )?.lastWake,
+    `the last wake of ${name} in ${list}`,
+  );
+}
+
+const notConfigured = {
+  status: 404,
+  body: { action: "stop", reason: "NotConfigured" },
+};
+
+test("the wake route's refusals that hold for the attempt are the route's own, and no mailbox answer is one", () => {
+  for (const refusal of jobHostWakeRefusalsStanding)
+    assert.ok(
+      [404, 409].some(
+        (status) =>
+          sessionPlaneAnswers.wake[status].safeParse({
+            action: "stop",
+            reason: refusal,
+          }).data?.reason === refusal,
+      ),
+      refusal,
+    );
+  for (const woken of ["Backlogged", "Closed", "NoThread"])
+    assert.ok(!jobHostWakeRefusalsStanding.includes(woken), woken);
+});
+
+test("a watch whose wake the plane refused NotConfigured answers it in watch_list, and is still said on warn", async (t) => {
+  const warned = [];
+  const route = wakeRoute([notConfigured]);
+  const sender = jobHostWakeSender({}, "bearer", {
+    request: route.request,
+    pause: async () => undefined,
+    warn: (text) => warned.push(text),
+  });
+  const { directory, clock, call } = await hostOf(t, {
+    answered: sender.offer,
+  });
+  const file = join(directory, "dispatcher.log");
+  await writeFile(file, "");
+  await call(jobHostToolNames.watch, { name: "w", path: file, pattern: "x" });
+  await appendFile(file, "x\n");
+  clock.advance(1_000);
+
+  const lastWake = await lastWakeOf(
+    call,
+    jobHostToolNames.watchList,
+    "name",
+    "w",
+  );
+
+  assert.deepEqual(lastWake, {
+    wake: "WatchMatched",
+    at: new Date(clock.now()).toISOString(),
+    outcome: "Refused",
+    refusal: "NotConfigured",
+  });
+  assert.ok(
+    warned.some((line) => line.includes("answered 404 NotConfigured")),
+    warned.join(""),
+  );
+});
+
+test("a job whose wake the mailbox answered Backlogged answers it in job_list, and a timer set after it is told of no standing refusal", async (t) => {
+  const { call } = await hostSending(t, [
+    { status: 200, body: { woken: "Backlogged" } },
+  ]);
+  await call(jobHostToolNames.jobStart, { name: "j", command: "true" });
+
+  const lastWake = await lastWakeOf(
+    call,
+    jobHostToolNames.jobList,
+    "name",
+    "j",
+  );
+  const set = JSON.parse(
+    await call(jobHostToolNames.wakeAt, { seconds: 60, reason: "r" }),
+  );
+
+  assert.equal(lastWake.wake, "JobExited");
+  assert.equal(lastWake.outcome, "Refused");
+  assert.equal(lastWake.refusal, "Backlogged");
+  assert.equal(set.wakesRefused, undefined);
+});
+
+test("a timer that fired and whose wake failed every post is still answered by wake_list, as failed", async (t) => {
+  const { clock, route, call } = await hostSending(t, [new Error("down")]);
+  await call(jobHostToolNames.wakeAt, { seconds: 5, reason: "check" });
+  clock.advance(5_000);
+
+  const lastWake = await lastWakeOf(
+    call,
+    jobHostToolNames.wakeList,
+    "reason",
+    "check",
+  );
+
+  assert.equal(route.posted.length, jobHostWakeTriesMax);
+  assert.deepEqual(JSON.parse(await call(jobHostToolNames.wakeList)), [
+    { reason: "check", lastWake },
+  ]);
+  assert.equal(lastWake.wake, "TimerDue");
+  assert.equal(lastWake.outcome, "PostsFailed");
+});
+
+test("a job whose wake found the most waiting answers it in job_list as dropped for the queue", async (t) => {
+  let release;
+  const released = new Promise((resolve) => {
+    release = resolve;
+  });
+  const route = wakeRoute([
+    { status: 200, body: { woken: "Woken", ordinal: 1 } },
+  ]);
+  let asked = 0;
+  const { sender, call } = await hostSending(t, [], async (...request) => {
+    asked += 1;
+    await released;
+    return route.request(...request);
+  });
+  t.after(() => release());
+  const offered = (index) =>
+    void sender.offer({
+      wake: "TimerDue",
+      resource: "r",
+      event: `e-${String(index)}`,
+    });
+  offered(0);
+  await until(() => asked === 1, "the first wake's post");
+  for (let index = 1; index <= jobHostWakesQueuedMax; index += 1)
+    offered(index);
+  await call(jobHostToolNames.jobStart, { name: "j", command: "true" });
+
+  const lastWake = await lastWakeOf(
+    call,
+    jobHostToolNames.jobList,
+    "name",
+    "j",
+  );
+
+  assert.equal(lastWake.outcome, "QueueFull");
+  assert.equal(asked, 1);
+});
+
+test("watch and wake_at set after a wake refused NotConfigured say so, and the next attempt keeps the record but not the warning", async (t) => {
+  const { directory, clock, host, open, call } = await hostSending(t, [
+    notConfigured,
+  ]);
+  await call(jobHostToolNames.wakeAt, { seconds: 1, reason: "first" });
+  clock.advance(1_000);
+  await lastWakeOf(call, jobHostToolNames.wakeList, "reason", "first");
+
+  const watched = JSON.parse(
+    await call(jobHostToolNames.watch, {
+      name: "w",
+      path: join(directory, "f"),
+      pattern: "x",
+    }),
+  );
+  const set = JSON.parse(
+    await call(jobHostToolNames.wakeAt, { seconds: 60, reason: "second" }),
+  );
+
+  for (const answer of [watched, set])
+    assert.deepEqual(answer.wakesRefused, {
+      resource: "first",
+      wake: "TimerDue",
+      at: new Date(clock.now()).toISOString(),
+      outcome: "Refused",
+      refusal: "NotConfigured",
+    });
+
+  await host.settled();
+  await host.close();
+  const next = open();
+  t.after(() => next.close());
+  await next.restore();
+  const restored = JSON.parse(await call(jobHostToolNames.wakeList, {}, next));
+  const again = JSON.parse(
+    await call(jobHostToolNames.wakeAt, { seconds: 60, reason: "third" }, next),
+  );
+
+  assert.equal(
+    restored.find(({ reason }) => reason === "first").lastWake.refusal,
+    "NotConfigured",
+  );
+  assert.equal(again.wakesRefused, undefined);
+});
+
+test("wake_list keeps the last wakes of at most the most timers that fired, the oldest forgotten first", async (t) => {
+  const { clock, host, call } = await hostOf(t, {
+    answered: async () => ({ outcome: "Delivered" }),
+  });
+  const reasons = Array.from(
+    { length: jobHostTimersFiredMax + 1 },
+    (_, index) => `t${String(index)}`,
+  );
+  for (const reason of reasons) {
+    await call(jobHostToolNames.wakeAt, { seconds: 1, reason });
+    clock.advance(1_000);
+    await lastWakeOf(call, jobHostToolNames.wakeList, "reason", reason);
+  }
+  await host.settled();
+
+  assert.deepEqual(
+    JSON.parse(await call(jobHostToolNames.wakeList)).map(
+      ({ reason }) => reason,
+    ),
+    reasons.slice(1),
+  );
+});
+
+test("a watch unwatched and a job forgotten take their last wakes with them", async (t) => {
+  const { directory, clock, call } = await hostOf(t, {
+    answered: async () => ({ outcome: "Delivered" }),
+  });
+  const file = join(directory, "f");
+  await writeFile(file, "");
+  await call(jobHostToolNames.watch, { name: "w", path: file, pattern: "x" });
+  await call(jobHostToolNames.jobStart, { name: "j", command: "true" });
+  await appendFile(file, "x\n");
+  clock.advance(1_000);
+  await lastWakeOf(call, jobHostToolNames.watchList, "name", "w");
+  await lastWakeOf(call, jobHostToolNames.jobList, "name", "j");
+
+  await call(jobHostToolNames.unwatch, { name: "w" });
+  await call(jobHostToolNames.jobStop, { name: "j" });
+  await call(jobHostToolNames.watch, { name: "w", path: file, pattern: "x" });
+
+  assert.equal(
+    JSON.parse(await call(jobHostToolNames.watchList))[0].lastWake,
+    undefined,
   );
 });
