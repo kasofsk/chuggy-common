@@ -188,3 +188,39 @@ test("a chat host's thread whose job host holds a restart job reports it standin
     "the attempt's end left it to the next restore",
   );
 });
+
+test("a chat host's thread whose plane refuses its wake NotConfigured keeps that refusal as the timer's last wake for its next attempt", async (t) => {
+  const directory = await threadDirectory(t, {
+    jobs: [],
+    watches: [],
+    timers: [{ reason: "check the deploy", dueAtMs: 0 }],
+  });
+  const plane = planeOf([turnOne], threadFacts, (path) =>
+    path === wakePath
+      ? { status: 404, body: { action: "stop", reason: "NotConfigured" } }
+      : undefined,
+  );
+
+  const { code } = await jobRun(plane, directory, { chatHost: true });
+
+  assert.equal(code, 0);
+  const { wakes } = JSON.parse(
+    await readFile(jobHostPlaces(directory).state, "utf8"),
+  );
+  assert.deepEqual(
+    wakes.map(({ wake, resource, outcome, refusal }) => ({
+      wake,
+      resource,
+      outcome,
+      refusal,
+    })),
+    [
+      {
+        wake: "TimerDue",
+        resource: "check the deploy",
+        outcome: "Refused",
+        refusal: "NotConfigured",
+      },
+    ],
+  );
+});

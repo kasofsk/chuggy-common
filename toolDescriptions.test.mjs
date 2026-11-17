@@ -25,7 +25,11 @@ import {
   chuggyToolsUnbuilt,
   sessionCapabilityTools,
 } from "./chuggyTools.mjs";
-import { jobHost, jobHostToolNames } from "./jobHost.mjs";
+import {
+  jobHost,
+  jobHostToolNames,
+  jobHostWakeRefusalsStanding,
+} from "./jobHost.mjs";
 import { leadDecisionStaging } from "./leadDecision.mjs";
 import { localToolContext, localToolServer } from "./localTools.mjs";
 import { sessionTicketWakesDefinitions } from "./sessionTicketWakes.mjs";
@@ -169,6 +173,31 @@ for (const [server, built, roster] of [
     assert.deepEqual(tools.map(({ name }) => name).sort(), [...roster].sort());
     assert.deepEqual(tools.flatMap(toolDescriptionFaults), []);
   });
+
+test("a job host's list tools say what lastWake answers, and the tools that set a wake what wakesRefused does", async () => {
+  const tools = await listed(podServerJobs());
+  const said = (name) => tools.find((tool) => tool.name === name).description;
+  const { jobList, watchList, wakeList, jobStart, watch, wakeAt } =
+    jobHostToolNames;
+
+  for (const name of [jobList, watchList, wakeList])
+    for (const field of [
+      "`lastWake`",
+      "Delivered",
+      "Refused",
+      "`refusal`",
+      "`status`",
+      "PostsFailed",
+      "QueueFull",
+    ])
+      assert.ok(said(name).includes(field), `${name} names ${field}`);
+  assert.ok(said(wakeList).includes("that fired"));
+  for (const name of [jobStart, watch, wakeAt]) {
+    assert.ok(said(name).includes("`wakesRefused`"), name);
+    for (const refusal of jobHostWakeRefusalsStanding)
+      assert.ok(said(name).includes(refusal), `${name} names ${refusal}`);
+  }
+});
 
 test("a tool listed with an undescribed parameter or a long opening is found wanting", async () => {
   const server = new McpServer({ name: "wanting", version: "1" });
