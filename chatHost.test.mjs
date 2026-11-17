@@ -1366,7 +1366,7 @@ test("a host's supervisor is capped at its memory for each session it runs at on
 
 test("a host's settings from a runner's file are its defaults where the file names none", () => {
   assert.equal(chatHostSessionsMaxDefault, 4);
-  assert.equal(chatSessionMemoryBytesDefault, 2 * gib);
+  assert.equal(chatSessionMemoryBytesDefault, gib);
   assert.deepEqual(chatHostConfigured(undefined, 1_000), {
     sessionsMax: chatHostSessionsMaxDefault,
     sessionMemoryBytes: chatSessionMemoryBytesDefault,
@@ -1378,7 +1378,7 @@ test("a host's settings from a runner's file are its defaults where the file nam
       chatHostConfigSchema.parse({
         image,
         sessionsMax: 3,
-        sessionMemoryMib: 1_024,
+        sessionMemoryMib: 3_072,
         idleSecs: 60,
         deadlineSecs: 7_200,
         outputBytesMax: 5,
@@ -1387,7 +1387,7 @@ test("a host's settings from a runner's file are its defaults where the file nam
     ),
     {
       sessionsMax: 3,
-      sessionMemoryBytes: gib,
+      sessionMemoryBytes: 3 * gib,
       idleSecs: 60,
       deadlineSecs: 7_200,
       outputBytesMax: 5,
@@ -1948,7 +1948,7 @@ test("a supervisor's container is asked of the engine: none, its state and wheth
 test("a host's settings and its service's status are said in lines a CLI prints", () => {
   assert.equal(
     chatHostSettingsLine(chatHostConfigured(undefined, 4_096)),
-    "sessionsMax 4, sessionMemoryMib 2048, so the supervisor is capped at 8192 MiB, idleSecs none, deadlineSecs none, sessionCapabilities every capability of the roster, ticketWakes unset, so chuggy's default: no wakes, outputBytesMax 4096, image the one chuggy names",
+    "sessionsMax 4, sessionMemoryMib 1024, so the supervisor is capped at 4096 MiB, idleSecs none, deadlineSecs none, sessionCapabilities every capability of the roster, ticketWakes unset, so chuggy's default: no wakes, outputBytesMax 4096, image the one chuggy names",
   );
   assert.equal(
     chatHostSettingsLine({
