@@ -76,13 +76,13 @@ test("a listing missing one admitted tool names the one it is missing", async ()
 
 test("a listing carrying tools nothing admitted is not what is asked", async () => {
   const named = await chuggyListedTools(
-    serverOf([...admitted, "read_lead"]),
+    serverOf([...admitted, "read_unadmitted"]),
     admitted,
     wait,
   );
 
   assert.ok(
-    named.includes("read_lead"),
+    named.includes("read_unadmitted"),
     "the check is the roster against the listing, not the listing against the roster",
   );
 });

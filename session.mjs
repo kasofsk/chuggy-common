@@ -23,27 +23,11 @@
  * granularity would be a blank page for the whole turn.
  *
  * WHAT A TURN SPENT IS READ OFF THE RUNTIME'S OWN MESSAGES, NEVER OFF THE
- * RESULT TEXT. The controls the selector runs over a decision check the model,
- * the tools, the tokens and the duration it took; a count taken from the
- * answer's prose would be a count the thing being controlled wrote. So the pod
- * is the measuring host, and a turn the runtime accounted for nothing on
- * carries no measurement at all rather than one of zeroes — the reader of the
- * envelope is what refuses a decision with no provenance.
- *
- * AN INQUIRY FORKS THE PARENT OR IT DOES NOT RUN. What it resumes is
- * `forkFrom`, the lead's own runtime reference, and never its own: its own
- * store is never written, so resuming it would load nothing. An inquiry the
- * plane named no `forkFrom` for therefore fails its turn instead of opening a
- * query — a fresh session under the lead's objectives answers confidently out
- * of nothing, and the member reading the answer cannot tell that from the
- * lead's own thinking.
- *
- * AN INQUIRY IS ONE EXCHANGE, AND THE POD ENDS ITS MAILBOX AFTER IT. Leaving
- * the loop is not enough: the mailbox's generator is still driven by the live
- * query, so it would claim a second turn and abandon it claimed. The door is
- * what bounds an inquiry — nothing enqueues a second turn on one — so this is
- * the weaker of the two walls, and it is here because the pod is what would
- * otherwise spend the account's attempt on a turn the member never asked for.
+ * RESULT TEXT. A turn's measurement names the model, the tools, the tokens and
+ * the duration it took; a count taken from the answer's prose would be a count
+ * the thing being measured wrote. So the pod is the measuring host, and a turn
+ * the runtime accounted for nothing on carries no measurement at all rather
+ * than one of zeroes.
  *
  * A TURN ITS MEMBER STOPPED IS INTERRUPTED, AND ITS RESULT IS NOT DRAINED PAST.
  * `./sessionStop.mjs` interrupts the runtime, whose query stays open, and the
@@ -65,13 +49,6 @@
  * at `summary` detail, since `full` spends a token-count call per category. A
  * reading the contract would refuse, or a window the runtime does not answer
  * within `sessionContextUsageWaitMs`, is left out, never the answer.
- *
- * A LEAD'S OBSERVATION THAT ENDS WITH NO DECISION IS ASKED FOR ONE, ONCE, IN
- * THE SAME TURN, because the selector refuses its prose. A result that staged
- * nothing, failed nothing, and is not a decision written as text is answered
- * with `sessionDecisionAsk` through the mailbox, and the turn settles on its
- * next result: one store turn and one measurement, whose duration adds both
- * results' own.
  */
 
 import { execFile } from "node:child_process";
@@ -96,7 +73,6 @@ import {
   chuggyToolPrefix,
   chuggyToolServerName,
 } from "@chuggy/worker-contract/sessionTools";
-import { leadDecisionDocumentSchema } from "@chuggy/worker-contract/workerDocuments";
 import {
   mintedCredentialDirectory,
   sessionApiOriginVariable,
@@ -121,7 +97,6 @@ import {
   chuggyToolContext,
   chuggyToolServer,
   sessionAllowedTools,
-  sessionBuiltInTools,
 } from "./chuggyTools.mjs";
 import { claudeCredentialPrepared } from "./claude.mjs";
 import {
@@ -130,7 +105,6 @@ import {
   contextWindow,
 } from "./contextReading.mjs";
 import { jobHost, jobHostWakeSender } from "./jobHost.mjs";
-import { leadDecisionStaging } from "./leadDecision.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import {
   observeRateLimit,
@@ -211,13 +185,6 @@ const executeFile = promisify(execFile);
 
 /** The capability that admits the runtime's shell. */
 const runCommands = rosterLabel(sessionCapabilities, "RunCommands");
-
-/** The capability that admits the lead's decision tools. */
-const leadDecision = rosterLabel(sessionCapabilities, "LeadDecision");
-
-/** What a lead's observation turn that decided nothing is asked in that turn. */
-export const sessionDecisionAsk =
-  "This turn ended without a decision, and the decision tools are how it is answered.";
 
 /** What each secret this session holds is. */
 const sessionSecretKinds = {
@@ -406,8 +373,8 @@ function messageToolResults(message) {
  * What every model call the runtime made through its query pipeline has spent so
  * far, or nothing where the runtime named no model to account for. This is the
  * runtime's own field for token accounting rather than the per-turn one beside
- * it: that one declares itself the main agent loop alone, so a lead with tools
- * would spend its subagents outside every budget.
+ * it: that one declares itself the main agent loop alone, so a session with
+ * tools would spend its subagents outside every budget.
  *
  * A RECORD THAT COUNTS NOTHING IS NOT A TOTAL OF ZERO. A running total read as
  * zero moves the mark back to the start of the session, and the next turn
@@ -471,16 +438,10 @@ export function sessionMeasure() {
   const tokensSince = runningTotal();
   let calls = new Map();
   let awaiting = new Map();
-  let askedMs = 0;
   return {
     startTurn() {
       calls = new Map();
       awaiting = new Map();
-      askedMs = 0;
-    },
-    /** A result the turn was asked past, whose duration is the turn's too. */
-    asked(result) {
-      askedMs += measuredCount(result?.duration_ms);
     },
     saw(message) {
       if (message.type === "system" && message.subtype === "init") {
@@ -519,7 +480,7 @@ export function sessionMeasure() {
         costMicros: measuredCount(
           dollarsSince(result.total_cost_usd) * microsPerDollar,
         ),
-        durationMs: askedMs + measuredCount(result.duration_ms),
+        durationMs: measuredCount(result.duration_ms),
         tools: [...calls]
           .filter(([, call]) => call.refused < call.made)
           .map(([name]) => name),
@@ -557,20 +518,7 @@ export function messageReader(stream, pause) {
 }
 
 /**
- * The transcript this attempt forks from, where the plane named one. It is read
- * through one function so the refusal and the query option cannot come to
- * disagree about what "the plane named one" means, and an empty reference is
- * absent here exactly as it is to `bindReference`.
- */
-function sessionForkFrom(facts) {
-  return typeof facts.forkFrom === "string" && facts.forkFrom.length > 0
-    ? facts.forkFrom
-    : undefined;
-}
-
-/**
- * The objectives the session carries, appended to the runtime's own preset,
- * or, for a session on its own prompt, the whole prompt.
+ * The objectives the session carries, appended to the runtime's own preset.
  *
  * THE PRESET RATHER THAN A CUSTOM PROMPT, because the preset is what loads the
  * checkout's `CLAUDE.md`, and `settingSources` must name `'project'` for it to.
@@ -581,104 +529,35 @@ function sessionForkFrom(facts) {
  * WHAT THAT ADMITS IS THE BOUND REPOSITORY'S OWN `.claude/settings.json`, all
  * of it — hooks and permissions included, under `permissionMode:
  * "bypassPermissions"`, beside this pod's credentials. That is the project's
- * tree deciding what its own lead may do, which is the same authority the tree
+ * tree deciding what its own threads may do, which is the same authority the tree
  * already has over the work attempts it runs; it is stated here because
  * `settingSources` is where it is granted. Of what one tree happened to
  * contain: plugins are measured rather than assumed — the marketplace a pod
  * cannot reach means the runtime reports none loaded, with no warning and no
  * start it delayed.
  *
- * A SESSION ITS FACTS MARK `systemPromptOwn` IS GRANTED NONE OF THAT. It runs
- * on chuggy's credential for a tenant whose tree it reads, so its prompt is the
- * environment lines this pod writes and then the objectives, its
- * `settingSources` is empty, and `sessionQueryOptions` confines its tools.
- *
  * `snapshot: false` RENDERS THE PROMPT FROM EACH QUERY'S OWN OPTIONS, which
- * every pod start passes in full, on either prompt. It is said rather than
+ * every pod start passes in full. It is said rather than
  * omitted because omitting it is the runtime's default, and the default records
  * the rendered prompt in the transcript and sends that record on every later
  * request and every resume, whatever the resume passes. A record carrying the
  * session's tools can outweigh a store batch, and a pod resuming from the store
- * would run under what the store kept of it. A record buys nothing here: chuggy
- * replaces a lead whose prompt changed rather than resuming it.
+ * would run under what the store kept of it, where every start renders the
+ * prompt anew without one.
  *
  * A SESSION WITH NO OBJECTIVES STILL TAKES ITS TURN. An older session row, or a
- * project whose settings the host has not pushed yet, carries no prompt; a lead
- * with the preset's own objectives is worse than one with the project's and is
+ * project whose settings the host has not pushed yet, carries no prompt; a
+ * thread with the preset's own objectives is worse than one with the project's and is
  * not a reason to refuse the turn.
  */
-function sessionSystemPrompt(facts, checkout, tools) {
+function sessionSystemPrompt(facts) {
   const append = facts.systemPrompt;
-  const objectives =
-    typeof append === "string" && append.length > 0 ? append : undefined;
-  if (sessionPromptOwn(facts))
-    return {
-      type: "custom",
-      prompt: [
-        sessionPromptOwnLines(facts, checkout, tools).join(" "),
-        ...(objectives === undefined ? [] : [objectives]),
-      ].join("\n\n"),
-      snapshot: false,
-    };
   return {
     type: "preset",
     preset: "claude_code",
     snapshot: false,
-    ...(objectives === undefined ? {} : { append: objectives }),
+    ...(typeof append === "string" && append.length > 0 ? { append } : {}),
   };
-}
-
-const sessionToolList = new Intl.ListFormat("en", { type: "conjunction" });
-
-/** Whether the session runs on its own prompt and loads nothing of its project's settings. */
-function sessionPromptOwn(facts) {
-  return facts.systemPromptOwn === true;
-}
-
-/**
- * The environment a session on its own prompt is told it runs in: what a
- * lead's turn hands it and how the turn ends, an inquiry's reader, and where
- * the checkout `tools` read is.
- */
-function sessionPromptOwnLines(facts, checkout, tools) {
-  const reads =
-    tools.length === 0 ? "" : `; ${sessionToolList.format(tools)} read it`;
-  return [
-    ...(facts.kind === "Lead"
-      ? [
-          "Each turn's user message is the selector's observation document (JSON).",
-        ]
-      : []),
-    checkout?.directory === undefined
-      ? "This session holds no checkout of the project's repository."
-      : `A read-only checkout of the project's repository is at ${checkout.directory}${reads}.`,
-    ...((facts.capabilities ?? []).includes(leadDecision)
-      ? [
-          "End the turn by calling the decision tools; your final text is not read by anyone.",
-        ]
-      : []),
-    ...(facts.kind === "Inquiry"
-      ? ["Your final text is your answer, and the member who asked reads it."]
-      : []),
-  ];
-}
-
-/**
- * Whether this session reports its answer while its model writes it, which a
- * thread does and no other kind: it is what asks the runtime for partial
- * messages, and what a live sender is opened for.
- */
-function sessionReportsLive(facts) {
-  return facts.kind === "Thread";
-}
-
-/**
- * Whether a member can stop a turn of this session, which the plane's door
- * lets them of a thread and of no other kind: it is what a watch on each turn
- * is opened for.
- */
-function sessionTakesStops(facts) {
-  return facts.kind === "Thread";
 }
 
 /**
@@ -689,27 +568,12 @@ function sessionTakesStops(facts) {
  * `settingSources: ["project"]` load the tree's own `CLAUDE.md` rather than the
  * bare workspace's absence of one. `CLAUDE_CONFIG_DIR` does NOT move with it:
  * it is the runtime's local mirror, and a mirror written inside a git working
- * tree is pod state the lead would read back as the project's.
- *
- * A SESSION ON ITS OWN PROMPT IS CONFINED TO ITS `cwd`, which is never the
- * workspace that holds `CLAUDE_CONFIG_DIR`: the checkout, or
- * `sessionTreeEmpty` where there is none. Under `"dontAsk"` with no settings
- * loaded, the runtime's file tools read inside `cwd` and are refused outside
- * it, the credential mount and `/proc/self/root/` included, where
- * `"bypassPermissions"` reads any path the process can. So `tools` is exactly
- * the built-ins its capabilities grant, which leaves no built-in the roster
- * does not name, and `allowedTools` names only the chuggy tools, since a bare
- * built-in there is a rule allowing it on every path. `confinementProbe.mjs`
- * holds this against the installed runtime.
+ * tree is pod state the session would read back as the project's.
  *
  * MOVING `cwd` DOES NOT MOVE A STORE STREAM. The runtime derives `projectKey`
  * from the sanitised `cwd` and `./sessionStore.mjs` discards it, so a session
  * resumed into a pod with a checkout finds the transcript a pod without one
  * wrote. `sessionStore.test.mjs` and this module's suite both hold that.
- *
- * `settings` CARRIES THE COMPACTION WINDOW A LEAD'S FACTS NAME, as flag-level
- * settings that outrank the tree's own. `CLAUDE_CODE_AUTO_COMPACT_WINDOW` would
- * override it, so this module never sets that variable.
  *
  * `model` AND `effort` ARE THE FACTS' WHERE THEY NAME THEM, the model otherwise
  * the site's. `CLAUDE_CODE_EFFORT_LEVEL` outranks `effort`, so the runtime's
@@ -744,49 +608,29 @@ export function sessionQueryOptions(
   ];
   const { disallowedTools } = roster;
   const model = facts.model ?? environment[sessionModelVariable];
-  const fork = sessionForkFrom(facts);
-  const own = sessionPromptOwn(facts);
-  const builtIns = allowedTools.filter((tool) =>
-    sessionBuiltInTools.includes(tool),
-  );
   return {
     sessionStore: store,
     sessionStoreFlush: "eager",
-    cwd: checkout?.directory ?? (own ? sessionTreeEmpty(workspace) : workspace),
+    cwd: checkout?.directory ?? workspace,
     env: sessionRuntimeEnvironment(task, facts, environment, credential, {
       git,
       bearer,
     }),
     mcpServers: servers,
-    systemPrompt: sessionSystemPrompt(facts, checkout, builtIns),
-    ...(own
-      ? {
-          settingSources: [],
-          tools: builtIns,
-          allowedTools: allowedTools.filter((tool) => !builtIns.includes(tool)),
-          disallowedTools,
-          permissionMode: "dontAsk",
-        }
-      : {
-          settingSources: ["project"],
-          allowedTools,
-          disallowedTools,
-          permissionMode: "bypassPermissions",
-        }),
+    systemPrompt: sessionSystemPrompt(facts),
+    settingSources: ["project"],
+    allowedTools,
+    disallowedTools,
+    permissionMode: "bypassPermissions",
     maxTurns: task.bounds.turnsMax,
     maxBudgetUsd: task.bounds.budgetUsd,
     loadTimeoutMs: task.bounds.loadTimeoutMs,
-    ...(fork !== undefined
-      ? { resume: fork, forkSession: true }
-      : typeof facts.agentReference === "string"
-        ? { resume: facts.agentReference }
-        : {}),
+    ...(typeof facts.agentReference === "string"
+      ? { resume: facts.agentReference }
+      : {}),
     ...(typeof model === "string" && model.length > 0 ? { model } : {}),
     ...(facts.effort === undefined ? {} : { effort: facts.effort }),
-    ...(facts.autoCompactWindow !== undefined
-      ? { settings: { autoCompactWindow: facts.autoCompactWindow } }
-      : {}),
-    ...(sessionReportsLive(facts) ? { includePartialMessages: true } : {}),
+    includePartialMessages: true,
   };
 }
 
@@ -843,11 +687,6 @@ function sessionShellCredential(task, facts, bearer) {
     [sessionTenantVariable]: facts.tenant,
     [sessionProjectVariable]: facts.project,
   };
-}
-
-/** The empty directory a session on its own prompt runs in where it holds no checkout. */
-export function sessionTreeEmpty(workspace) {
-  return join(workspace, "empty");
 }
 
 function sessionConfigDirectory(environment, workspace) {
@@ -969,43 +808,14 @@ async function observe(context, message) {
 
 /**
  * One turn's messages, read to its result and then drained past it, unless its
- * member stopped the turn, and read once more where the turn is asked for the
- * decision it did not make.
+ * member stopped the turn.
  */
 export async function runSessionTurn(context) {
   context.store.startTurn();
   context.sightings = rateLimitSightings();
   context.compactions = [];
   context.measure.startTurn();
-  const read = await runSessionTurnRead(context);
-  if (!runSessionTurnAsks(context, read)) return read;
-  context.measure.asked(read.result);
-  context.mailbox.ask(sessionDecisionAsk);
   return await runSessionTurnRead(context);
-}
-
-/** Whether a turn's text is itself a decision, which the prose arm answers with. */
-function runSessionTurnTextDecides(text) {
-  try {
-    return leadDecisionDocumentSchema.safeParse(JSON.parse(text)).success;
-  } catch {
-    return false;
-  }
-}
-
-/** Whether a lead's observation turn ended in a result that decided nothing and failed nothing. */
-function runSessionTurnAsks(context, { result, ended }) {
-  const turn = context.mailbox.claimed();
-  return (
-    !ended &&
-    context.leadDecides === true &&
-    turn?.inputKind === "Observation" &&
-    !context.staging.staged() &&
-    !context.mirrored &&
-    !context.stops?.stopped(turn.turn) &&
-    sessionTurnFailure(result, context.sightings) === undefined &&
-    !runSessionTurnTextDecides(sessionResultText(result, context.scrub))
-  );
 }
 
 /** The turn's messages to its next result and through the drain after it. */
@@ -1081,7 +891,7 @@ async function settleTurn(context, turn, result) {
   const readings = await sessionTurnReadings(context);
   await post(context, sessionPlaneRoutes.turnAnswer.path, {
     turn: turn.turn,
-    result: sessionAnswerText(context, turn, result),
+    result: sessionResultText(result, context.scrub),
     ...context.store.turnBatches(),
     ...(measured === undefined ? {} : { measured }),
     ...(readings.length === 0 ? {} : { readings }),
@@ -1134,24 +944,6 @@ async function sessionTurnWindow(context) {
   return usage === undefined ? undefined : contextWindow(usage, context.scrub);
 }
 
-/**
- * What one turn answers with: the document its decision tools composed, or the
- * model's own text. The prose arm is not a fallback to be removed — a lead
- * resumed from before the decision tools existed answers in text, and the
- * runtime's one parser reads whichever arrived. A composed document belongs only
- * to an observation: a user's message and a wake are answered to a reader, not
- * to the selector.
- */
-function sessionAnswerText(context, turn, result) {
-  const document =
-    turn.inputKind === "Observation" ? context.staging?.document() : undefined;
-  return document === undefined
-    ? sessionResultText(result, context.scrub)
-    : context
-        .scrub(JSON.stringify(document))
-        .slice(0, sessionTurnResultCharsMax);
-}
-
 /** Every turn the mailbox hands over, until it stops handing them over. */
 export async function runSessionTurns(context) {
   for (;;) {
@@ -1170,10 +962,6 @@ export async function runSessionTurns(context) {
       return 1;
     }
     context.mailbox.settled();
-    if (context.inquiry) {
-      context.mailbox.stop();
-      return 0;
-    }
     if (ended) return 0;
   }
 }
@@ -1403,7 +1191,6 @@ function sessionToolServers(context, facts, environment, services, sdk, own) {
         capabilities: facts.capabilities,
         version: environment.CHUG_SESSION_IMAGE_VERSION ?? "1",
         turn: () => context.mailbox.claimed()?.turn,
-        staging: context.staging,
         scrub: context.scrub,
         ...(services.chuggyRequest === undefined
           ? {}
@@ -1416,26 +1203,21 @@ function sessionToolServers(context, facts, environment, services, sdk, own) {
 }
 
 /**
- * The mailbox and the buffer its claims reset, hung on the context as one thing
- * rather than two: the reset is bound to the claim, so a turn that fails leaves
- * nothing for the next one to inherit. A claim is also where the watch for a
- * member's stop of the turn begins, in a session that holds one, and a claim
- * and a settlement are what `turnHeld` is told of, which a chat supervisor's
- * drain waits on. Its idle bound waits while the session's job host is busy.
+ * The mailbox, hung on the context. A claim is where the watch for a member's
+ * stop of the turn begins, and a claim and a settlement are what `turnHeld` is
+ * told of, which a chat supervisor's drain waits on. Its idle bound waits while
+ * the session's job host is busy.
  */
-function sessionStagedMailbox(
+function sessionTurnMailbox(
   context,
   { request, wait: pause, now, turnHeld = () => undefined },
 ) {
-  const staging = leadDecisionStaging();
-  context.staging = staging;
   context.mailbox = sessionMailbox(context.task, context.bearer, {
     request,
     wait: pause,
     now,
     claim: (turn) => {
       turnHeld(true);
-      staging.reset(turn.input);
       context.stops?.watching(turn.turn);
     },
     settle: () => turnHeld(false),
@@ -1446,8 +1228,7 @@ function sessionStagedMailbox(
 /**
  * The runtime this session speaks through, opened once over the mailbox's own
  * stream of turns. The checkout reaches it only as `cwd`, so a session with no
- * tree opens the same runtime over the bare workspace, or over
- * `sessionTreeEmpty` where it runs on its own prompt.
+ * tree opens the same runtime over the bare workspace.
  */
 async function sessionRuntime(
   context,
@@ -1481,11 +1262,7 @@ async function sessionRuntime(
   });
 }
 
-/**
- * Whether this session's agent has a shell, which is the one tool a session
- * holds that runs git: a lead reads its tree through tools that run nothing,
- * and an inquiry is placed with no tree.
- */
+/** Whether this session's agent has a shell, which is the one tool a session holds that runs git. */
 function sessionRunsCommands(facts) {
   return (facts.capabilities ?? []).includes(runCommands);
 }
@@ -1530,14 +1307,13 @@ async function sessionReads(context, facts, { environment, warn }) {
 }
 
 /**
- * The live sender a session that reports live holds, under the session's own
+ * The live sender a session holds, under the session's own
  * clock, pauses and scrub. It reaches the plane through the request that is
  * asked once, because `context.request` waits out a plane that is down. A
  * turn the plane answers a post of as stopped is handed to the session's
  * watch, where it holds one.
  */
-function sessionLive(context, facts, { services, pause, warn }) {
-  if (!sessionReportsLive(facts)) return undefined;
+function sessionLive(context, { services, pause, warn }) {
   return sessionLiveSender(context.task, context.bearer, {
     request: services.requestOnce ?? sessionRequestOnce,
     now: context.now,
@@ -1551,13 +1327,12 @@ function sessionLive(context, facts, { services, pause, warn }) {
 }
 
 /**
- * The watch a session whose turns a member can stop holds, under the session's
+ * The watch a session holds for a member's stop of its turns, under the session's
  * own clock and pauses and through the request that is asked once. What it
  * interrupts is the runtime the session then opens, which is why it is handed
  * the context and not the runtime.
  */
-function sessionStops(context, facts, { services, pause, warn }) {
-  if (!sessionTakesStops(facts)) return undefined;
+function sessionStops(context, { services, pause, warn }) {
   return sessionStopWatch(context.task, context.bearer, {
     request: services.requestOnce ?? sessionRequestOnce,
     now: context.now,
@@ -1569,15 +1344,11 @@ function sessionStops(context, facts, { services, pause, warn }) {
 }
 
 /**
- * Whether this session holds a job host, which a thread a chat host runs
+ * Whether this session holds a job host, which a session a chat host runs
  * does where its agent has a shell, and no other session does.
  */
 function sessionHoldsJobHost(facts, services) {
-  return (
-    services.chatHost === true &&
-    facts.kind === "Thread" &&
-    sessionRunsCommands(facts)
-  );
+  return services.chatHost === true && sessionRunsCommands(facts);
 }
 
 /**
@@ -1650,12 +1421,11 @@ function sessionStopHeard(context, stopped) {
 }
 
 /**
- * The session once everything it runs on is in hand: the store its kind decides
- * the mode of, the mailbox its turns arrive through, and either the runtime it
- * speaks with or one of the refusals that stands in place of one. Both
- * refusals are a session the site placed and did not equip — with no
- * transcript to fork, or with no repository it can reach — and both are
- * checked after the mailbox, because the refusal is a failed turn. A job host
+ * The session once everything it runs on is in hand: its store, the mailbox
+ * its turns arrive through, and either the runtime it speaks with or the
+ * refusal that stands in place of one. The refusal is a session the site
+ * placed with no repository it can reach, and is checked after the mailbox,
+ * because the refusal is a failed turn. A job host
  * the session holds is restored before the runtime opens, and so before its
  * first turn, and closed as the session ends.
  *
@@ -1669,30 +1439,21 @@ function sessionStopHeard(context, stopped) {
  */
 async function sessionRun(context, facts, opened) {
   const { pause, warn } = opened;
-  context.inquiry = facts.kind === "Inquiry";
-  context.leadDecides = (facts.capabilities ?? []).includes(leadDecision);
   context.store = sessionStoreAdapter(context.task, context.bearer, {
     request: context.request,
-    retain: !context.inquiry,
     scrub: context.scrub,
     warn,
   });
-  sessionStagedMailbox(context, {
+  sessionTurnMailbox(context, {
     request: context.request,
     wait: pause,
     now: context.now,
     turnHeld: opened.services.turnHeld,
   });
   sessionStopHeard(context, opened.services.stopped);
-  if (context.inquiry && sessionForkFrom(facts) === undefined)
-    return await refuseSession(
-      context,
-      warn,
-      "an inquiry was placed with no transcript to fork from",
-    );
   if (opened.checkout?.refused !== undefined)
     return await refuseSession(context, warn, opened.checkout.refused);
-  context.stops = sessionStops(context, facts, opened);
+  context.stops = sessionStops(context, opened);
   const reads = await sessionReads(context, facts, opened);
   try {
     context.jobHost = sessionJobHost(context, facts, opened, reads.git);
@@ -1703,7 +1464,7 @@ async function sessionRun(context, facts, opened) {
       git: reads.git,
     });
     context.reader = messageReader(context.runtime, pause);
-    context.live = sessionLive(context, facts, opened);
+    context.live = sessionLive(context, opened);
     return await runSessionTurns(context);
   } catch (failure) {
     context.runtime?.close();
@@ -1788,12 +1549,12 @@ function sessionMainContext(task, bearer, { request, ...held }) {
 }
 
 /**
- * The standing a session reports where it is a chat host's thread, and
- * nowhere else, as it starts, where it holds no job host: one that does
+ * The standing a session reports where a chat host runs it, and nowhere
+ * else, as it starts, where it holds no job host: one that does
  * reports its own once it is restored.
  */
 async function sessionMainStanding(context, facts, services, warn) {
-  if (services.chatHost !== true || facts.kind !== "Thread") return;
+  if (services.chatHost !== true) return;
   if (sessionHoldsJobHost(facts, services)) return;
   await sessionStandingReported(context.task, context.bearer, {
     request: context.request,
@@ -1847,8 +1608,6 @@ export async function sessionMain(services = {}) {
         ...held.checkout,
       },
     );
-    if (sessionPromptOwn(facts) && checkout === undefined)
-      await ensureDirectory(sessionTreeEmpty(workspace));
     return await sessionRun(context, facts, {
       environment,
       credential,

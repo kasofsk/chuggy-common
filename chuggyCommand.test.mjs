@@ -169,7 +169,6 @@ for (const variable of [
 
 for (const [what, argv] of [
   ["the tool is unknown", ["no_such_tool", "{}"]],
-  ["the tool is a lead's decision", ["dispatch", "{}"]],
   [
     "the tool is an owner's offer",
     ["offer_release", '{"ticket":7,"authoringVersion":1}'],

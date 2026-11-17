@@ -5,9 +5,8 @@
  *
  * THE TOOLS ARE THE POD'S, unchanged: `chuggyProjectTools`, their handler and
  * their bounds, for one site's one project. What differs is only what
- * `chuggyToolContext` is handed. The roster is every project tool and no
- * decision tool, since there is no lead here to decide for, and the API is the
- * control: it authorizes the person's token through their membership as it
+ * `chuggyToolContext` is handed. The roster is every project tool, and the API
+ * is the control: it authorizes the person's token through their membership as it
  * does the console's.
  *
  * A CALL IS ITS OWN TURN. Nothing over stdio says which turn of a chat a call
@@ -96,9 +95,8 @@ To file a ticket:
 6. read_draft: the draft as filed.
 7. release_draft.
 8. read_operation: every command is submitted, and this is how its outcome is read.
-Releasing starts nothing: once its dependencies are Done the ticket waits Pending until it is dispatched, by the project's lead, by dispatch_ticket on the word of the person you act for, or by another person who may dispatch.
-To change the lead's prompt: read_docs the page "Writing a project's lead prompt", then read_lead_settings and update_lead_settings.
-To move the lead onto the subsidized lead: read_docs the page "The subsidized lead", then update_placement.
+Releasing starts nothing: once its dependencies are Done the ticket waits Pending until a person who may dispatch dispatches it: by dispatch_ticket on the word of the person you act for, or by another person who may dispatch.
+To change the project's thread settings: read_docs the page "A project's thread settings", then read_lead_settings and update_lead_settings.
 To merge a ticket's pull request: read_ticket_landings, ask the person whether they want chuggy to merge it, then merge_pull_request.`;
 }
 

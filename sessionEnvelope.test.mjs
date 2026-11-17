@@ -18,7 +18,7 @@ import { overPlane, planeFetch, planes } from "./plane.fixture.mjs";
 import { sessionEnvelopeServices } from "./session.mjs";
 import {
   facts,
-  leadRoster,
+  readerRoster,
   queryOf,
   result,
   run,
@@ -53,7 +53,7 @@ function sessionPlane() {
   const plane = planeFetch(planes.session, (route) => {
     switch (route) {
       case "facts":
-        return { status: 200, body: { ...facts, capabilities: leadRoster } };
+        return { status: 200, body: { ...facts, capabilities: readerRoster } };
       case "turn":
         claims += 1;
         return claims === 1 ? { status: 200, body: turnOne } : { status: 204 };

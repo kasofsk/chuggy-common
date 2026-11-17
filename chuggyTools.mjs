@@ -9,7 +9,7 @@
  * operation row records which session issued it. The API also confines that
  * bearer to its own session's tenant and project, whatever else the membership
  * reaches, so every project tool a session holds reaches that project's routes
- * alone. A decision tool (`./leadDecision.mjs`) writes nothing at all.
+ * alone.
  *
  * A MEMBER'S OWN SESSION READS ITS OWNER AND NO PROJECT. It is placed in the
  * partition reserved for its owner, which is no project, and the API refuses
@@ -26,12 +26,9 @@
  * A ROSTER IS NOT A CONTROL. `allowedTools` and `disallowedTools` are enforced
  * by the agent runtime inside the pod, and the pod is the thing being
  * controlled. The controls that are not the pod's are the membership, enforced
- * by the database when it authorizes a project access, the API's confinement
- * of the bearer to its own project, and the decision controls the selector
- * applies to a finished turn — and the last is post-hoc: the tool has already
- * run and its command has already landed, and what the selector refuses is the
- * decision that used it. A control described as stronger than it is, is worse
- * than none.
+ * by the database when it authorizes a project access, and the API's
+ * confinement of the bearer to its own project. A control described as
+ * stronger than it is, is worse than none.
  *
  * A READ ANSWERS ONE PAGE, WHOLE OR NOT AT ALL. Nothing here walks a
  * collection: the caller's page bound and cursor go through, the route's own
@@ -80,9 +77,8 @@
  * and otherwise an object or an array as the outline of its entries and a
  * string cut to fit, each read on by `offset`. `initialize_draft` draws its
  * route's body under the same bound, since that body carries the canonical
- * too. `read_lead_settings` answers a project's lead settings the same way,
- * its body the document, since its texts and allowlists can far outweigh
- * one answer.
+ * too. `read_lead_settings` answers a project's thread settings the same
+ * way, its body the document, since its texts can far outweigh one answer.
  *
  * ANOTHER IS AN EPIC, ANSWERED WITH ITS DESCRIPTION CUT where it is larger than
  * one answer. Its route answers the description whole, bounded by what an epic
@@ -140,13 +136,13 @@
  * writes the one the epic holds against the revision the model gave, so an epic
  * that has moved is still refused as stale and never retried.
  *
- * BOTH SETTINGS WRITES READ FIRST, and neither retries. `update_lead_settings`
+ * THE SETTINGS WRITE READS FIRST, and does not retry. `update_lead_settings`
  * writes the whole override set read, with what the call sets and clears, under
  * the revision the model gave, so a field the call does not name survives a
  * write without passing through the model, and settings that moved since the
- * model read them are refused as stale. `update_placement` writes the routes
- * read with the ones the call names, and always names the lead's offering,
- * since the API keeps the stored one for an offering left out, not the one read.
+ * model read them are refused as stale. `update_placement` reads nothing: the
+ * thread route is the one field it writes, beside the `lead` the request still
+ * requires.
  *
  * WHAT A PROJECT TOOL SENDS IS SCRUBBED. Its arguments are the model's, and the
  * model has read whatever its shell could, so every string of them, a key's
@@ -207,7 +203,6 @@ import {
   chuggyToolEpicViewResponseBytesMax,
   chuggyToolImageResponseBytesMax,
   chuggyToolLandingQueuesResponseBytesMax,
-  chuggyToolLeadSettingsResponseBytesMax,
   chuggyToolNames,
   chuggyToolPrefix,
   chuggyToolResponseBytesMax,
@@ -227,12 +222,12 @@ import {
   epicTitleCharsMax,
   imageMediaTypes,
   landingQueueTicketsAnsweredMax,
-  leadOfferings,
   nativeHttpMediaType,
   nativeHttpPageItemsMax,
   placementRoutes,
   projectArtifactEncoding,
   selectorProjectOverridesSchema,
+  selectorSettingsTextCharsMax,
   threadOfferReleaseSchema,
   threadOfferRevokeSchema,
   threadTurnsAnsweredMax,
@@ -243,10 +238,9 @@ import { workerRunCredentialSchema } from "@chuggy/worker-contract/workerPlane";
 import { boundedResponseBytes } from "./boundedResponse.mjs";
 import { chuggyBoundedBody, chuggyRequest } from "./chuggyApi.mjs";
 import { workerTemporaryFile } from "./checks.mjs";
-import { leadDecisionStaging } from "./leadDecision.mjs";
 import { ticketImageExtension } from "./ticketImages.mjs";
 import { runTranscriptPage, transcriptPageAnswer } from "./transcriptPage.mjs";
-import { routeFilled } from "./wire.mjs";
+import { rosterLabel, routeFilled } from "./wire.mjs";
 
 /** The `status` an execution is answered with, which the contract's responses parse by and none of its entries export until kasofsk/chuggy#1185. */
 const executionStatuses = [
@@ -1089,6 +1083,23 @@ function readAtPathLeadSettingsDocument(text) {
   }
 }
 
+/** The most one character weighs in a JSON string in UTF-8, escaped as `\uXXXX`. */
+const chuggyToolEscapedCharBytesMax = "\\u0000".length;
+
+/**
+ * What the thread settings' route may answer, which a write answers on success
+ * and inside its conflict alike: the North Star and standing rules of its
+ * overrides and of its effective settings, each at the longest a settings text
+ * may be with every character escaped, and an ordinary answer's bound for the
+ * rest. The contract states no bound for this route.
+ */
+export const chuggyToolThreadSettingsResponseBytesMax =
+  ["overrides", "effective"].length *
+    ["northStar", "threadStandingRules"].length *
+    selectorSettingsTextCharsMax *
+    chuggyToolEscapedCharBytesMax +
+  chuggyToolResponseBytesMax;
+
 /** What each read by `path` draws its body under, parses it as, and calls it whole, as a kind, and as what holds a `path`. */
 const readAtPathRoutes = {
   configuration: {
@@ -1099,11 +1110,11 @@ const readAtPathRoutes = {
     holds: "the configuration holds",
   },
   selectorSettings: {
-    bytesMax: chuggyToolLeadSettingsResponseBytesMax,
+    bytesMax: chuggyToolThreadSettingsResponseBytesMax,
     documentOf: readAtPathLeadSettingsDocument,
-    whole: "these lead settings",
-    what: "lead settings",
-    holds: "the lead settings hold",
+    whole: "these thread settings",
+    what: "thread settings",
+    holds: "the thread settings hold",
   },
 };
 
@@ -1647,10 +1658,15 @@ async function epicMembersChanged(context, epic, change, unchanged) {
   }
 }
 
-/** Every field a project's lead settings may override, each of which update_lead_settings sets or clears. */
+/** Every field a project's thread settings may override, each of which update_lead_settings sets or clears. */
 const updateLeadSettingsFields = Object.keys(
   selectorProjectOverridesSchema.shape,
 );
+
+/** The override fields as the settings tools' descriptions name them. */
+const updateLeadSettingsFieldsText = updateLeadSettingsFields
+  .map((field) => `\`${field}\``)
+  .join(", ");
 
 /** Why a settings write is refused before it reads anything, or nothing where it may go on: `set` is the contract's overrides, and every field is named once. */
 function updateLeadSettingsRefusal(set, clear) {
@@ -1706,7 +1722,7 @@ function updateLeadSettingsAnswer(status, text) {
 }
 
 /**
- * The lead settings written whole: the override set read, with `set` applied
+ * The thread settings written whole: the override set read, with `set` applied
  * and `clear` dropped, under the `expectedRevision` the model gave. A set that
  * moved since the model read it is refused as stale, a field neither names
  * keeps what the settings hold without passing through the model, and nothing
@@ -1720,14 +1736,14 @@ async function updateLeadSettings(context, args) {
   const body = await drawn(
     context,
     path,
-    chuggyToolLeadSettingsResponseBytesMax,
-    "these lead settings",
+    chuggyToolThreadSettingsResponseBytesMax,
+    "these thread settings",
   );
   if (body.refused !== undefined) return body.refused;
   const held = updateLeadSettingsHeld(body.text);
   if (held === undefined)
     return answered(
-      `the selectorSettings route answered HTTP ${String(body.status)} with a body that is not lead settings as the contract answers them.`,
+      `the selectorSettings route answered HTTP ${String(body.status)} with a body that is not thread settings as the contract answers them.`,
       true,
     );
   const overrides = { ...held, ...set };
@@ -1739,64 +1755,22 @@ async function updateLeadSettings(context, args) {
   });
   const { text } = await chuggyBoundedBody(
     response,
-    chuggyToolLeadSettingsResponseBytesMax,
+    chuggyToolThreadSettingsResponseBytesMax,
   );
   return updateLeadSettingsAnswer(response.status, text);
 }
 
-/** The routes and the offering a placement read holds, or nothing where its body is not a placement as the route answers one. */
-function updatePlacementHeld(text) {
-  let body;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-  const thread = body?.thread?.route;
-  const lead = body?.lead?.route;
-  const leadOffering = body?.leadOffering;
-  return placementRoutes.includes(thread) &&
-    placementRoutes.includes(lead) &&
-    leadOfferings.includes(leadOffering)
-    ? { thread, lead, leadOffering }
-    : undefined;
-}
-
 /**
- * Where the project's threads and lead run, written whole from the placement
- * read with what the call names in place. The offering is always named,
- * because one left out is the row's stored one rather than the one read, and
- * a lead moved to `Pool` with none named runs on its own.
+ * The `lead` a placement write sends, which the request still requires and
+ * the route ignores, at the value the route answers it as.
  */
-async function updatePlacement(context, args) {
-  if (
-    args.thread === undefined &&
-    args.lead === undefined &&
-    args.leadOffering === undefined
-  )
-    return answered(
-      "update_placement names no field to change, so nothing was read or written.",
-      true,
-    );
-  const path = projectPath(context, "sessionPlacement");
-  const body = await drawn(
-    context,
-    path,
-    chuggyToolResponseBytesMax,
-    "this placement",
-  );
-  if (body.refused !== undefined) return body.refused;
-  const held = updatePlacementHeld(body.text);
-  if (held === undefined)
-    return answered(
-      `the sessionPlacement route answered HTTP ${String(body.status)} with a body that is not a placement as the contract answers one.`,
-      true,
-    );
-  const ownOffering = args.lead === "Pool" ? "Own" : held.leadOffering;
-  return write(context, path, "PUT", {
-    thread: args.thread ?? held.thread,
-    lead: args.lead ?? held.lead,
-    leadOffering: args.leadOffering ?? ownOffering,
+const updatePlacementLead = rosterLabel(placementRoutes, "InCluster");
+
+/** Where the project's threads run, written whole with the route the call names. */
+function updatePlacement(context, args) {
+  return write(context, projectPath(context, "sessionPlacement"), "PUT", {
+    thread: args.thread,
+    lead: updatePlacementLead,
   });
 }
 
@@ -2505,7 +2479,7 @@ export const chuggyProjectTools = [
   },
   {
     name: "release_draft",
-    description: `Submits the release of one draft. Releasing makes the ticket Pending and starts no work: once its dependencies are Done it runs when it is dispatched, by the project's lead or by someone who may dispatch; dispatch_ticket submits one on your owner's word. ${chuggySubmissionDescription} A release refused for its brief or its configuration is refused again at that authoring version, so revise_draft the draft and release the \`authoringVersion\` and \`configurationRevision\` the revision answers. ${chuggyProgramShortDescription}`,
+    description: `Submits the release of one draft. Releasing makes the ticket Pending and starts no work: once its dependencies are Done it waits Pending until a person who may dispatch dispatches it; dispatch_ticket submits one on your owner's word. ${chuggySubmissionDescription} A release refused for its brief or its configuration is refused again at that authoring version, so revise_draft the draft and release the \`authoringVersion\` and \`configurationRevision\` the revision answers. ${chuggyProgramShortDescription}`,
     shape: (z) => ({
       ticket: ticket(z).describe(
         "The ticket number the draft holds, as read_draft answers it.",
@@ -2671,13 +2645,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "dispatch_ticket",
-    description: `Submits the dispatch of one released ticket, on your owner's word only, which starts its work now, whether or not a lead is dispatching. It is your owner's dispatch, so where they may not dispatch in this project the submission is answered 404, though the ticket exists. Only a Pending ticket whose dependencies are all Done can be dispatched, and any other is answered without anything being submitted. A ticket that moved between this tool reading it and submitting is refused (TicketChanged), so call again. ${chuggySubmissionDescription}`,
+    description: `Submits the dispatch of one released ticket, on your owner's word only, which starts its work now. It is your owner's dispatch, so where they may not dispatch in this project the submission is answered 404, though the ticket exists. Only a Pending ticket whose dependencies are all Done can be dispatched, and any other is answered without anything being submitted. A ticket that moved between this tool reading it and submitting is refused (TicketChanged), so call again. ${chuggySubmissionDescription}`,
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) => dispatchTicket(context, args.ticket),
   },
   {
     name: "read_lead_settings",
-    description: `This project's lead settings: what the project sets for its threads, and what they run under. Call it before update_lead_settings, and for how a thread is prompted. \`overrides\` is what the project sets, a field it leaves out taking the default; \`effective\` is its North Star and the standing rules its threads run under; \`revision\` is what update_lead_settings is written against. Reading and writing both need \`manageSelector\` in read_abilities, and without it the route answers 404. Settings larger than one answer are read by \`path\`, keys walking into the settings: ${chuggyPathReadDescription} With no \`path\`, the settings are answered whole where they fit and otherwise as their outline. A \`path\` the settings do not hold is refused, naming the keys where it stopped.`,
+    description: `This project's thread settings, under the name they had before: what the project sets for its threads, and what they run under. Call it before update_lead_settings, and for how a thread is prompted. read_docs's page "A project's thread settings" says what each field is. \`overrides\` is what the project sets of ${updateLeadSettingsFieldsText}, a field it leaves out taking the default; \`effective\` is its North Star and the standing rules its threads run under; \`revision\` is what update_lead_settings is written against. Reading and writing both need \`manageSelector\` in read_abilities, and without it the route answers 404. Settings larger than one answer are read by \`path\`, keys walking into the settings: ${chuggyPathReadDescription} With no \`path\`, the settings are answered whole where they fit and otherwise as their outline. A \`path\` the settings do not hold is refused, naming the keys where it stopped.`,
     shape: (z) =>
       pathArguments(
         z,
@@ -2694,7 +2668,7 @@ export const chuggyProjectTools = [
   },
   {
     name: "update_lead_settings",
-    description: `Changes this project's lead settings, on your owner's word only. Call it after read_lead_settings, whose \`revision\` it is written against. It reads the settings and writes the whole override set back with \`set\` applied and \`clear\` dropped, so a field named in neither keeps what the settings hold, and a long text is never sent again. A write needs \`manageSelector\` in read_abilities, and without it the route answers 404. read_docs's page "Writing a project's lead prompt" is how to write \`northStar\`. A write is answered as its status and the \`revision\` the settings are now at; 409 with the \`code\` SettingsRevisionConflict is settings that moved since they were read, and is never asked again, so read them and decide again. Every other answer is the API's, its status and body unaltered: 503 SettingsWriteContended, which may be sent again, 404, and a body larger than the API takes.`,
+    description: `Changes this project's thread settings, under the name they had before, on your owner's word only. Call it after read_lead_settings, whose \`revision\` it is written against, and see read_docs's page "A project's thread settings" for what each field is. The fields it sets or clears are ${updateLeadSettingsFieldsText}. It reads the settings and writes the whole override set back with \`set\` applied and \`clear\` dropped, so a field named in neither keeps what the settings hold, and a long text is never sent again. A write needs \`manageSelector\` in read_abilities, and without it the route answers 404. A write is answered as its status and the \`revision\` the settings are now at; 409 with the \`code\` SettingsRevisionConflict is settings that moved since they were read, and is never asked again, so read them and decide again. Every other answer is the API's, its status and body unaltered: 503 SettingsWriteContended, which may be sent again, 404, and a body larger than the API takes.`,
     shape: (z) => ({
       expectedRevision: count(z).describe(
         "The settings' `revision`, as read_lead_settings answers it.",
@@ -2717,42 +2691,29 @@ export const chuggyProjectTools = [
   {
     name: "read_placement",
     description:
-      "Where this project's threads and its lead run, and what decided each. Call it before update_placement. `thread` and `lead` are each a `route` and its `source`; `leadOffering` is how the lead runs on its route, and `leadOfferings` the offerings this project may choose; `choices` are the routes you may choose, none where you may not administer the project; `runners` says whether runners would take each.",
+      "Where this project's threads run, and what decided it. Call it before update_placement. `thread` is a `route` and its `source`; `choices` are the routes you may choose, none where you may not administer the project; `runners` says whether runners would take each.",
     shape: () => ({}),
     call: (context) => read(context, projectPath(context, "sessionPlacement")),
   },
   {
     name: "update_placement",
-    description: `Changes where this project's threads and its lead run, on your owner's word only. It reads the placement and writes it whole, each field the one given or else the one read. chuggy's subsidized lead is \`lead\` "InCluster" with \`leadOffering\` "Subsidized", and the project's own runners are \`lead\` "Pool"; read_placement's \`leadOfferings\` says which offerings the project may choose. A write needs \`administer\` in read_abilities. read_docs's page "The subsidized lead" says what changes. The answer is the API's, its status and body unaltered, a refusal included: 403 HostedRunsNotGranted where a route InCluster needs the tenant's hosted grant, and 422 LeadOfferingNotAdmitted where the deployment does not admit the offering on that route.`,
+    description: `Changes where this project's threads run, on your owner's word only. A write needs \`administer\` in read_abilities. The answer is the API's, its status and body unaltered, a refusal included: 403 HostedRunsNotGranted where a route InCluster needs the tenant's hosted grant.`,
     shape: (z) => ({
       thread: z
         .enum(placementRoutes)
-        .describe(
-          "Where the project's threads run; left out, where they run now.",
-        )
-        .optional(),
-      lead: z
-        .enum(placementRoutes)
-        .describe("Where the project's lead runs; left out, where it runs now.")
-        .optional(),
-      leadOffering: z
-        .enum(leadOfferings)
-        .describe(
-          "How the lead runs on its route; left out, the offering it has now, or Own where `lead` is Pool.",
-        )
-        .optional(),
+        .describe("Where the project's threads run."),
     }),
     call: updatePlacement,
   },
   {
     name: "read_usage",
-    description: `Your owner's own agent accounts: each agent's usage, its pause and its credentials. ${chuggyAgentAccountDescription} Call it for why an agent is paused, and before update_usage_settings, retry_paused_agent or retire_credential. Answers JSON: \`accounts\`, one per agent, each its \`agent\`; its \`settings\`, \`fiveHourPercent\` and \`sevenDayPercent\` being the share of each window a reading at or over pauses it at and \`pausesThreads\` whether your owner's threads and inquiries pause with it; \`readings\`, each window's newest across its credentials; \`limit\`, the newest a provider stopped it at; \`pause\`, absent where none holds, with the \`credentials\` holding it; and \`credentials\`, each by its \`name\` with its own \`readings\` and \`pause\`.`,
+    description: `Your owner's own agent accounts: each agent's usage, its pause and its credentials. ${chuggyAgentAccountDescription} Call it for why an agent is paused, and before update_usage_settings, retry_paused_agent or retire_credential. Answers JSON: \`accounts\`, one per agent, each its \`agent\`; its \`settings\`, \`fiveHourPercent\` and \`sevenDayPercent\` being the share of each window a reading at or over pauses it at and \`pausesThreads\` whether your owner's threads pause with it; \`readings\`, each window's newest across its credentials; \`limit\`, the newest a provider stopped it at; \`pause\`, absent where none holds, with the \`credentials\` holding it; and \`credentials\`, each by its \`name\` with its own \`readings\` and \`pause\`.`,
     shape: () => ({}),
     call: (context) => read(context, accountPath("agentAccounts")),
   },
   {
     name: "update_usage_settings",
-    description: `Changes how your owner's own account pauses one agent, on your owner's word only. ${chuggyAgentAccountDescription} It writes the agent's settings whole, so send every field, changed or not, from what read_usage answers as its \`settings\`. The lead of a pool your owner registered always pauses with the agent, whatever \`pausesThreads\` says. ${chuggyAgentAccountWriteDescription} 204 is the settings written.`,
+    description: `Changes how your owner's own account pauses one agent, on your owner's word only. ${chuggyAgentAccountDescription} It writes the agent's settings whole, so send every field, changed or not, from what read_usage answers as its \`settings\`. ${chuggyAgentAccountWriteDescription} 204 is the settings written.`,
     shape: (z) => ({
       agent: accountAgent(z),
       settings: described(agentAccountSettingsSchema, {
@@ -2760,8 +2721,7 @@ export const chuggyProjectTools = [
           "The share of the five-hour window, a whole percentage, a reading at or over which pauses the agent.",
         sevenDayPercent:
           "The share of the seven-day window, a whole percentage, a reading at or over which pauses the agent.",
-        pausesThreads:
-          "Whether your owner's threads and inquiries pause with the agent.",
+        pausesThreads: "Whether your owner's threads pause with the agent.",
       }).describe("The agent's settings, written whole."),
     }),
     call: (context, { agent, settings }) =>
@@ -2983,7 +2943,7 @@ export const chuggyOfferTools = [
 ];
 
 /**
- * Every tool this session holds, project, member, offer and decision alike,
+ * Every tool this session holds, project, member and offer alike,
  * filtered by the capability roster its row carries. A tool the roster does
  * not admit is not registered at all, so the runtime's own tool list is the
  * proof rather than this source. The session's own tools, a job host's
@@ -3006,9 +2966,7 @@ export function chuggyToolDefinitions(context) {
     call: (args) => definition.call(context, scrubbedArguments(args, context)),
   }));
   return [
-    ...[...served, ...context.staging.definitions].filter((definition) =>
-      admitted.has(definition.name),
-    ),
+    ...served.filter((definition) => admitted.has(definition.name)),
     ...context.own.map((definition) => ({
       ...definition,
       call: (args) => definition.call(context, args),
@@ -3084,12 +3042,10 @@ export function chuggyToolInput(definition, z) {
  * thing being controlled is a bound this tree does not count; parsing here is
  * what makes the bound a property a suite can drive.
  *
- * A DECISION TOOL ANSWERS TEXT AND THE PROTOCOL ANSWERS AN OBJECT, so text is
+ * A TOOL MAY ANSWER TEXT AND THE PROTOCOL ANSWERS AN OBJECT, so text is
  * wrapped here rather than at each call. A bare string reaches the model as an
- * invalid tool result naming a type mismatch — and it reaches it after the
- * call's side effect is staged, so the lead is told its dispatch errored by the
- * very call that staged it, and may dispatch again or report a failure that did
- * not happen.
+ * invalid tool result naming a type mismatch, after the call has done what it
+ * does, so the model may do it again or report a failure that did not happen.
  *
  * AND IT IS WHERE AN ANSWER IS WEIGHED, because it is the one boundary every
  * tool's answer crosses and the one place the tool that produced it is known.
@@ -3166,7 +3122,7 @@ export function chuggyToolServer(context, sdk) {
   });
 }
 
-/** What one session's tools are held in: its task, its bearer, this turn's staging, where its images are written, how the public docs are fetched, the scrub of what they send, and its own tools. */
+/** What one session's tools are held in: its task, its bearer, where its images are written, how the public docs are fetched, the scrub of what they send, and its own tools. */
 export function chuggyToolContext(task, bearer, services = {}) {
   return {
     task,
@@ -3176,7 +3132,6 @@ export function chuggyToolContext(task, bearer, services = {}) {
     version: services.version ?? "1",
     request: services.request ?? chuggyRequest,
     turn: services.turn ?? (() => undefined),
-    staging: services.staging ?? leadDecisionStaging(),
     imageFile: services.imageFile ?? chuggyToolImageFiles(),
     docsFetch: services.docsFetch ?? globalThis.fetch,
     own: services.own ?? [],

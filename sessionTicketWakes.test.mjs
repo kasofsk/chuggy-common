@@ -75,7 +75,7 @@ function ticketWakesOf(options) {
   );
 }
 
-test("every thread is served and allowed ticket_wakes by a plane listing ThreadTicketWakes, whatever runs it and whatever it holds, and no other session is", async () => {
+test("every thread is served and allowed ticket_wakes by a plane listing ThreadTicketWakes, whatever runs it and whatever it holds", async () => {
   for (const [named, sessionFacts, features, services, held] of [
     ["a chat host's thread", threadFacts, listing, { chatHost: true }, true],
     ["a pod's thread", threadFacts, listing, {}, true],
@@ -87,7 +87,6 @@ test("every thread is served and allowed ticket_wakes by a plane listing ThreadT
       true,
     ],
     ["a thread on a plane not listing it", threadFacts, unlisting, {}, false],
-    ["a lead", facts, listing, {}, false],
   ]) {
     const { code, options } = await wakesRun(
       wakesPlane(sessionFacts, features),

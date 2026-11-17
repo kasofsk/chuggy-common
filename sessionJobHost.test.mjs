@@ -76,7 +76,7 @@ async function jobRun(plane, directory, services = {}) {
   return { code, options: seen.options };
 }
 
-test("a chat host's thread with a shell is served and allowed the job host's tools, and no other session is", async (t) => {
+test("a chat host's thread with a shell is served and allowed the job host's tools, and no other thread is", async (t) => {
   const directory = await threadDirectory(t);
   for (const [named, sessionFacts, chatHost, held] of [
     ["a chat host's thread", threadFacts, true, true],
@@ -90,7 +90,6 @@ test("a chat host's thread with a shell is served and allowed the job host's too
       true,
       false,
     ],
-    ["a chat host's lead", facts, true, false],
   ]) {
     const { options } = await jobRun(
       wakingPlane([turnOne], sessionFacts),

@@ -10,7 +10,7 @@
     "chuggy": "chuggyCommand.mjs"
   },
   "dependencies": {
-    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.134.0/chuggy-worker-contract-1.134.0.tgz"
+    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.140.0/chuggy-worker-contract-1.140.0.tgz"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -47,7 +47,6 @@
     "claudeCredential.mjs",
     "codex.mjs",
     "codexRollout.mjs",
-    "confinementProbe.mjs",
     "containerBackend.mjs",
     "contextReading.mjs",
     "contractProbe.mjs",
@@ -70,7 +69,6 @@
     "job.mjs",
     "jobHost.mjs",
     "keptWorkspace.mjs",
-    "leadDecision.mjs",
     "lease.mjs",
     "localSignIn.mjs",
     "localTokenStore.mjs",

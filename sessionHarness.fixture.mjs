@@ -27,16 +27,12 @@ import { sessionMain } from "./session.mjs";
 import { sessionRequest, sessionRequestOnce } from "./sessionTransport.mjs";
 
 /**
- * The rosters the session suites open a lead and a thread with. They are cases
- * rather than copies: which roster a session is opened with is the provisioning
- * root's, and `contract.test.mjs` holds the pod over every roster there is.
+ * The rosters the session suites open a thread with, without a shell and with
+ * one. They are cases rather than copies: which roster a session is opened
+ * with is the provisioning root's, and `contract.test.mjs` holds the pod over
+ * every roster there is.
  */
-export const leadRoster = [
-  "RepositoryRead",
-  "ProjectRead",
-  "DraftAuthor",
-  "LeadDecision",
-];
+export const readerRoster = ["RepositoryRead", "ProjectRead", "DraftAuthor"];
 export const threadRoster = [
   "RepositoryRead",
   "RunCommands",
@@ -61,7 +57,7 @@ export const task = {
   tenant: "vteng",
   project: "chuggy",
   session: "session-1",
-  kind: "Lead",
+  kind: "Thread",
   attempt: "attempt-1",
   generation: 1,
   workerPlane: {
@@ -258,7 +254,7 @@ export const facts = {
   tenant: "vteng",
   project: "chuggy",
   session: "session-1",
-  kind: "Lead",
+  kind: "Thread",
   capabilities: ["RepositoryRead", "RunCommands"],
   credentialSlot: "claude-code",
 };

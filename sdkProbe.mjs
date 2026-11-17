@@ -5,7 +5,7 @@
  * `zod` IS A PEER OF THE AGENT SDK THAT THE POD'S OWN SCRIPTS IMPORT TOO. npm's
  * global install nests a package's peers inside that package's own tree, where
  * the scripts' resolution never looks, and nothing about a missing `zod` is
- * visible until a lead takes a turn: the tool shapes are zod raw shapes, so a
+ * visible until a session takes a turn: the tool shapes are zod raw shapes, so a
  * pod without it starts, claims a turn and then fails every one of them. So the
  * image installs `zod` beside the SDK at a pinned version, where npm places the
  * one copy both resolve, and this checks the two agree.

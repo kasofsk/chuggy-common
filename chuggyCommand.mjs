@@ -8,9 +8,8 @@
  * shapes and `chuggyToolHandler`, under a context of the command's own built
  * from the variables. Every tool that reaches the API is offered, and the API
  * is the control: it confines the bearer to the session's scope and
- * capabilities. No decision tool is offered, since a decision is staged for a
- * lead's turn and nothing here is one, and no offer tool, since an offer is the
- * call standing in the transcript and a shell's call stands in none.
+ * capabilities. No offer tool is offered, since an offer is the call standing
+ * in the transcript and a shell's call stands in none.
  *
  * A CALL IS ITS OWN TURN, as it is in `./localTools.mjs`: nothing in a shell
  * says which turn of the session a call belongs to, so each submitted command
@@ -98,7 +97,6 @@ function chuggyCommandContext(environment) {
             signal: chuggyToolSignal(),
           }),
         turn: () => randomUUID(),
-        staging: { definitions: [] },
         imageFile: chuggyToolImageFiles(environment),
       },
     ),

@@ -30,7 +30,6 @@ import {
   jobHostToolNames,
   jobHostWakeRefusalsStanding,
 } from "./jobHost.mjs";
-import { leadDecisionStaging } from "./leadDecision.mjs";
 import { localToolContext, localToolServer } from "./localTools.mjs";
 import { sessionTicketWakesDefinitions } from "./sessionTicketWakes.mjs";
 
@@ -75,7 +74,6 @@ function podServer(request, held) {
   return chuggyToolServer(
     chuggyToolContext({ tenant: "t", project: "p" }, "bearer", {
       capabilities: Object.keys(sessionCapabilityTools),
-      staging: leadDecisionStaging(),
       ...(request === undefined ? {} : { request }),
       ...(held === undefined ? {} : { own: held }),
     }),

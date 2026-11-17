@@ -8,8 +8,8 @@
  * (`./entrypoint.mjs`); a session has no ticket, so it has no decision and no
  * commit to freeze. A standing reader wants the tree as it is rather than as it
  * was, so the clone takes the remote's own default branch and a new pod is a
- * new read of the tree. The commit it landed on is logged, because a lead that
- * reasons about the tree leaves a record of which tree it was.
+ * new read of the tree. The commit it landed on is logged, because a session
+ * that reasons about the tree leaves a record of which tree it was.
  *
  * THE SITE'S MAP AND ITS GRANT CHECK ARE THE WORKER'S, REUSED RATHER THAN
  * COPIED. `workerRepository()` resolves the reference against
@@ -26,9 +26,9 @@
  * which `./session.mjs` fails the placed turn with — a raise here left the
  * reason on stderr and the attempt row carrying the label a pod that never
  * started carries. A clone that reached git and did not finish is the other
- * case — the network, the remote, the disk — and it returns nothing: a lead
- * that cannot read the tree can still read the project through the API and
- * decide, and refusing to start would trade a degraded lead for none.
+ * case — the network, the remote, the disk — and it returns nothing: a session
+ * that cannot read the tree can still read the project through the API, and
+ * refusing to start would trade a degraded session for none.
  *
  * THE REFERENCE IS WHAT THE PLACEMENT SAID AND IS NOT ALWAYS THE BINDING. A
  * site that mirrors its projects in-cluster names the mirror for the binding in
@@ -36,10 +36,11 @@
  * placement; whichever URL arrives is resolved here against the same map, under
  * the same rules, with its own credential.
  *
- * NOTHING WRITES TO THE CHECKOUT, AND THAT IS A POD-SIDE CONTROL. The lead's
- * roster does not carry `RepositoryWrite`, so `./chuggyTools.mjs` puts `Write`,
- * `Edit` and `NotebookEdit` in `disallowedTools` — which the runtime inside the
- * pod is what reads. The filesystem grants the pod write on its own workspace,
+ * A ROSTER WITHOUT `RepositoryWrite` KEEPS ONLY THE FILE-WRITING BUILT-INS OFF
+ * THE CHECKOUT, AND THAT IS A POD-SIDE CONTROL. `./chuggyTools.mjs` puts
+ * `Write`, `Edit` and `NotebookEdit` in `disallowedTools` — which the runtime
+ * inside the pod is what reads — while a roster holding `RunCommands` writes to
+ * the checkout through its shell, whose working directory it is. The filesystem grants the pod write on its own workspace,
  * so this is a roster the controlled thing enforces and not a permission; the
  * ceiling that is not the pod's is the session's membership at the API.
  */
@@ -71,7 +72,7 @@ const sessionCheckoutBufferBytesMax = 16 * 1024 * 1024;
  * `chuggyToolTimeoutMs` already has: a ceiling on one call the pod makes, not a
  * loop a deployment chose the size of, and the bounds `checkedSessionBounds`
  * refuses to invent are the latter. Exceeding it is the degraded arm below, so
- * a stalled remote is a lead with no tree rather than a pod nobody can settle.
+ * a stalled remote is a session with no tree rather than a pod nobody can settle.
  *
  * That it equals `attemptLeaseSecs` is a coincidence and not a derivation: the
  * lease is beating under the clone, so a clone may legitimately outlast one
@@ -91,7 +92,7 @@ export async function sessionCheckoutGit(args, options) {
 /**
  * What a clone that did not finish leaves. `git` cleans up after itself only
  * when it fails on its own; killed at the bound above it does not, and the
- * degraded arm would then hand the lead a half-tree where it reports none. It
+ * degraded arm would then hand the session a half-tree where it reports none. It
  * removes a whole tree too, where `rev-parse` was what failed, because "no
  * tree" is what that arm reports either way. The reason is logged before this
  * runs: `rm` takes no bound, and a removal that stalled would otherwise take

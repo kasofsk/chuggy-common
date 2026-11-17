@@ -36,7 +36,7 @@ import {
   environment,
   facts,
   inputReadingQueryOf,
-  leadRoster,
+  readerRoster,
   mintedCredential,
   planeOf,
   queryOf,
@@ -82,38 +82,37 @@ test("a mirror_error after the result fails the turn and never answers it", asyn
   );
 });
 
-test("a successful turn is answered with its result text and the batches it wrote, whichever kind wrote them", async () => {
-  for (const kind of ["Lead", "Thread"]) {
-    const plane = planeOf([turnOne], { ...facts, kind });
-    const { query } = queryOf((_asked, _index, options) => [
-      { type: "system", subtype: "init", session_id: "runtime-1" },
-      () =>
-        options.sessionStore.append({ sessionId: "runtime-1" }, [
-          { uuid: "a", type: "assistant" },
-        ]),
-      result("success", { result: "kestrel" }),
-    ]);
+test("a successful turn is answered with its result text and the batches it wrote", async () => {
+  const plane = planeOf([turnOne], facts);
+  const { query } = queryOf((_asked, _index, options) => [
+    { type: "system", subtype: "init", session_id: "runtime-1" },
+    () =>
+      options.sessionStore.append({ sessionId: "runtime-1" }, [
+        { uuid: "a", type: "assistant" },
+      ]),
+    result("success", { result: "kestrel" }),
+  ]);
 
-    const code = await run({
-      request: plane.request,
-      requestOnce: plane.requestOnce,
-      query,
-    });
+  const code = await run({
+    request: plane.request,
+    requestOnce: plane.requestOnce,
+    query,
+  });
 
-    assert.equal(code, 0, kind);
-    const answer = plane.calls.find(
-      ({ path }) => path === "/v1/session/turn/answer",
-    );
-    assert.deepEqual(
-      answer.body,
-      { turn: "turn-1", result: "kestrel", batchFirst: 1, batchLast: 1 },
-      kind,
-    );
-    assert.ok(
-      plane.calls.some(({ path }) => path === "/v1/session/store/runtime-1/1"),
-      `a ${kind}'s append never reached the plane`,
-    );
-  }
+  assert.equal(code, 0);
+  const answer = plane.calls.find(
+    ({ path }) => path === "/v1/session/turn/answer",
+  );
+  assert.deepEqual(answer.body, {
+    turn: "turn-1",
+    result: "kestrel",
+    batchFirst: 1,
+    batchLast: 1,
+  });
+  assert.ok(
+    plane.calls.some(({ path }) => path === "/v1/session/store/runtime-1/1"),
+    "the append never reached the plane",
+  );
 });
 
 const storePath = "/v1/session/store/runtime-1/1";
@@ -304,62 +303,17 @@ test("the query is opened eagerly against the store, with the session's own boun
   assert.deepEqual(options.allowedTools, ["Bash", "Glob", "Grep", "Read"]);
   assert.ok(options.disallowedTools.includes("Write"));
   assert.ok(!("resume" in options), "a session that never ran was resumed");
-  assert.ok(!("forkSession" in options), "a lead was forked");
+  assert.ok(!("forkSession" in options), "a session was forked");
 });
 
 test("a session that has run before resumes its own reference and is not forked", async () => {
-  for (const kind of ["Lead", "Thread"]) {
-    const plane = planeOf([], { ...facts, kind, agentReference: "runtime-1" });
-    const { seen, query } = queryOf(() => []);
+  const plane = planeOf([], { ...facts, agentReference: "runtime-1" });
+  const { seen, query } = queryOf(() => []);
 
-    await run({ request: plane.request, query });
+  await run({ request: plane.request, query });
 
-    assert.equal(seen.options.resume, "runtime-1", kind);
-    assert.ok(!("forkSession" in seen.options), `${kind} was forked`);
-  }
-});
-
-test("an inquiry forks the parent's transcript, never its own empty reference", async () => {
-  for (const agentReference of [undefined, "runtime-1"]) {
-    const plane = planeOf([], {
-      ...facts,
-      kind: "Inquiry",
-      capabilities: ["ProjectRead"],
-      forkFrom: "lead-1",
-      ...(agentReference === undefined ? {} : { agentReference }),
-    });
-    const { seen, query } = queryOf(() => []);
-
-    await run({ request: plane.request, query });
-
-    assert.equal(seen.options.resume, "lead-1", String(agentReference));
-    assert.equal(seen.options.forkSession, true, String(agentReference));
-  }
-});
-
-test("an inquiry with no transcript to fork from fails its turn and opens no query", async () => {
-  const plane = planeOf([{ ...turnOne, inputKind: "Inquiry" }], {
-    ...facts,
-    kind: "Inquiry",
-    capabilities: ["ProjectRead"],
-    agentReference: "runtime-1",
-  });
-  const { seen, query } = queryOf(() => [
-    result("success", { result: "answered from nothing" }),
-  ]);
-
-  const code = await run({ request: plane.request, query });
-
-  assert.equal(code, 1);
-  assert.equal(seen.options, undefined, "a query was opened");
-  assert.deepEqual(
-    plane.calls.find(({ path }) => path === "/v1/session/turn/failure").body,
-    { turn: "turn-1", failure: "AgentFailed" },
-  );
-  assert.ok(
-    !plane.calls.some(({ path }) => path === "/v1/session/turn/answer"),
-    "an inquiry forking nothing answered",
-  );
+  assert.equal(seen.options.resume, "runtime-1");
+  assert.ok(!("forkSession" in seen.options), "the session was forked");
 });
 
 /**
@@ -419,73 +373,6 @@ test("a session whose clone did not finish takes its turns with no tree", async 
     plane.calls.some(({ path }) => path === "/v1/session/turn/answer"),
     "a session with no tree answered nothing",
   );
-});
-
-test("an inquiry answers as the turn's result and writes no batch of its own", async () => {
-  const inquiryTurn = { ...turnOne, inputKind: "Inquiry", input: "why?" };
-  const plane = planeOf([inquiryTurn, { ...inquiryTurn, turn: "turn-2" }], {
-    ...facts,
-    kind: "Inquiry",
-    capabilities: ["ProjectRead"],
-    forkFrom: "lead-1",
-  });
-  const { query } = queryOf((_asked, _index, options) => [
-    async () => {
-      await options.sessionStore.append({ sessionId: "fork-1" }, [
-        { uuid: "a", type: "assistant" },
-      ]);
-    },
-    { type: "system", subtype: "init", session_id: "fork-1" },
-    result("success", { result: "because." }),
-  ]);
-
-  const code = await run({ request: plane.request, query });
-
-  assert.equal(code, 0);
-  assert.deepEqual(
-    plane.calls.find(({ path }) => path === "/v1/session/turn/answer").body,
-    { turn: "turn-1", result: "because." },
-  );
-  assert.ok(
-    !plane.calls.some(({ path }) => path.startsWith("/v1/session/store")),
-    "an inquiry posted a store batch",
-  );
-  assert.equal(
-    plane.calls.filter(({ path }) => path === "/v1/session/turn").length,
-    1,
-    "an inquiry claimed a second turn",
-  );
-});
-
-test("an inquiry's roster leaves every tool that writes disallowed by name", async () => {
-  const plane = planeOf([], {
-    ...facts,
-    kind: "Inquiry",
-    capabilities: ["ProjectRead"],
-    forkFrom: "lead-1",
-  });
-  const { seen, query } = queryOf(() => []);
-
-  await run({ request: plane.request, query });
-
-  const { allowedTools, disallowedTools } = seen.options;
-  assert.deepEqual(
-    seen.options.mcpServers.chuggy.tools.map(({ name }) => name),
-    sessionCapabilityTools.ProjectRead,
-    "an inquiry was registered a tool that is not a project read",
-  );
-  for (const tool of sessionBuiltInTools)
-    assert.ok(disallowedTools.includes(tool), `${tool} was left ungoverned`);
-  assert.deepEqual(
-    allowedTools.filter((name) => !name.startsWith(chuggyToolPrefix)),
-    [],
-    "a read-only roster was given a built-in",
-  );
-  for (const tool of ["release_draft", "revise_draft", "dispatch"])
-    assert.ok(
-      disallowedTools.includes(`${chuggyToolPrefix}${tool}`),
-      `${tool} is not disallowed`,
-    );
 });
 
 test("the runtime's session id is bound once, however many times it says so", async () => {
@@ -1032,33 +919,15 @@ test("a runtime that leaves the stream its reference names ends the session and 
   }
 });
 
-const leadFacts = {
+/** A thread that reads and drafts, with no shell and no origination. */
+const readerFacts = {
   ...facts,
-  capabilities: [...leadRoster],
-  systemPrompt: "# What this project wants\n\nShip the lead.",
-};
-
-const observation = JSON.stringify({
-  version: 1,
-  decision: "decision-1",
-  partition: { tenant: "vteng", project: "chuggy" },
-  changes: [],
-  candidates: [{ ticket: 4, ticketVersion: 2 }],
-  token: {},
-  operationalContext: {},
-  handoffNote: { carried: "note" },
-  refusals: [],
-});
-
-const observationTurn = {
-  turn: "turn-1",
-  ordinal: 1,
-  inputKind: "Observation",
-  input: observation,
+  capabilities: [...readerRoster],
+  systemPrompt: "# What this project wants\n\nShip the footer.",
 };
 
 test("the one chuggy server is served in-process, with the tools the roster admits", async () => {
-  const plane = planeOf([], leadFacts);
+  const plane = planeOf([], readerFacts);
   const { seen, query } = queryOf(() => []);
 
   await run({ request: plane.request, query });
@@ -1086,7 +955,7 @@ test("the one chuggy server is served in-process, with the tools the roster admi
 });
 
 test("a session with no ProjectRead registers no read and disallows every one by name", async () => {
-  const plane = planeOf([], { ...leadFacts, capabilities: ["LeadDecision"] });
+  const plane = planeOf([], { ...readerFacts, capabilities: ["DraftAuthor"] });
   const { seen, query } = queryOf(() => []);
 
   await run({ request: plane.request, query });
@@ -1094,23 +963,22 @@ test("a session with no ProjectRead registers no read and disallows every one by
   const registered = seen.options.mcpServers.chuggy.tools.map(
     ({ name }) => name,
   );
-  assert.deepEqual(registered, [
-    "dispatch",
-    "refuse",
-    "lift",
-    "set_attention",
-    "set_handoff_note",
-    "set_planning_intent",
+  assert.deepEqual(registered.toSorted(), [
+    "delete_draft",
+    "file_dependent",
+    "initialize_draft",
+    "release_draft",
+    "revise_draft",
   ]);
   const disallowed = seen.options.disallowedTools;
   assert.ok(disallowed.includes(`${chuggyToolPrefix}read_ticket`));
-  assert.ok(disallowed.includes(`${chuggyToolPrefix}release_draft`));
+  assert.ok(disallowed.includes(`${chuggyToolPrefix}read_docs`));
   for (const tool of sessionBuiltInTools)
     assert.ok(disallowed.includes(tool), `${tool} was left ungoverned`);
 });
 
 test("the session's objectives ride on the preset prompt, rendered for every query", async () => {
-  const plane = planeOf([], leadFacts);
+  const plane = planeOf([], readerFacts);
   const { seen, query } = queryOf(() => []);
 
   await run({ request: plane.request, query });
@@ -1119,7 +987,7 @@ test("the session's objectives ride on the preset prompt, rendered for every que
     type: "preset",
     preset: "claude_code",
     snapshot: false,
-    append: leadFacts.systemPrompt,
+    append: readerFacts.systemPrompt,
   });
   assert.deepEqual(seen.options.settingSources, ["project"]);
 });
@@ -1140,11 +1008,11 @@ function resumedSystemPrompt(entries, systemPrompt) {
 }
 
 /**
- * The live leads and threads already hold a snapshot the store clipped, and
+ * The live sessions already hold a snapshot the store clipped, and
  * none of them is closed first. A resume over one runs under the append its
  * launch passed, not under the note the store kept.
  */
-test("a lead resumed over a clipped prompt snapshot runs under the append its launch passed", async () => {
+test("a session resumed over a clipped prompt snapshot runs under the append its launch passed", async () => {
   const clipped = {
     type: "attachment",
     attachment: {
@@ -1158,7 +1026,7 @@ test("a lead resumed over a clipped prompt snapshot runs under the append its la
     sessionId: "runtime-1",
   };
   const plane = planeOf([turnOne], {
-    ...leadFacts,
+    ...readerFacts,
     agentReference: "runtime-1",
   });
   const request = async (asking, held, path, ...rest) =>
@@ -1184,11 +1052,11 @@ test("a lead resumed over a clipped prompt snapshot runs under the append its la
 
   await run({ request, query });
 
-  assert.deepEqual(prompt, [leadFacts.systemPrompt]);
+  assert.deepEqual(prompt, [readerFacts.systemPrompt]);
 });
 
 test("a session row that carries no objectives still takes its turn", async () => {
-  const plane = planeOf([], { ...leadFacts, systemPrompt: undefined });
+  const plane = planeOf([], { ...readerFacts, systemPrompt: undefined });
   const { seen, query } = queryOf(() => []);
 
   const code = await run({ request: plane.request, query });
@@ -1201,21 +1069,8 @@ test("a session row that carries no objectives still takes its turn", async () =
   });
 });
 
-test("a lead whose facts name a compaction window runs under it as a flag-level setting", async () => {
-  const plane = planeOf([], { ...leadFacts, autoCompactWindow: 200_000 });
-  const { seen, query } = queryOf(() => []);
-
-  await run({ request: plane.request, query });
-
-  assert.equal(seen.options.settings.autoCompactWindow, 200_000);
-  assert.ok(
-    !("CLAUDE_CODE_AUTO_COMPACT_WINDOW" in seen.options.env),
-    "the variable that overrides the setting was set",
-  );
-});
-
-test("a session whose facts name no compaction window is given no settings", async () => {
-  const plane = planeOf([], leadFacts);
+test("a session is given no settings", async () => {
+  const plane = planeOf([], readerFacts);
   const { seen, query } = queryOf(() => []);
 
   await run({ request: plane.request, query });
@@ -1224,7 +1079,7 @@ test("a session whose facts name no compaction window is given no settings", asy
 });
 
 test("a session whose facts name a model runs on it over the site's", async () => {
-  const plane = planeOf([], { ...leadFacts, model: "claude-sonnet-5-5" });
+  const plane = planeOf([], { ...readerFacts, model: "claude-sonnet-5-5" });
   const { seen, query } = queryOf(() => []);
 
   await run({
@@ -1237,7 +1092,7 @@ test("a session whose facts name a model runs on it over the site's", async () =
 });
 
 test("a session whose facts name no model runs on the site's", async () => {
-  const plane = planeOf([], leadFacts);
+  const plane = planeOf([], readerFacts);
   const { seen, query } = queryOf(() => []);
 
   await run({
@@ -1250,7 +1105,7 @@ test("a session whose facts name no model runs on the site's", async () => {
 });
 
 test("a session whose facts name an effort runs at it, unoutranked by the effort variable", async () => {
-  const plane = planeOf([], { ...leadFacts, effort: "medium" });
+  const plane = planeOf([], { ...readerFacts, effort: "medium" });
   const { seen, query } = queryOf(() => []);
 
   await run({
@@ -1267,7 +1122,7 @@ test("a session whose facts name an effort runs at it, unoutranked by the effort
 });
 
 test("a session whose facts name no effort is given none and keeps the effort variable", async () => {
-  const plane = planeOf([], leadFacts);
+  const plane = planeOf([], readerFacts);
   const { seen, query } = queryOf(() => []);
 
   await run({
@@ -1280,179 +1135,8 @@ test("a session whose facts name no effort is given none and keeps the effort va
   assert.equal(seen.options.env.CLAUDE_CODE_EFFORT_LEVEL, "high");
 });
 
-test("an observation answered with decision tools posts the document they composed", async () => {
-  const plane = planeOf([observationTurn], leadFacts);
-  const { query } = queryOf((_asked, _index, options) => [
-    async () => {
-      const tools = options.mcpServers.chuggy.tools;
-      const staged = (name, args) =>
-        tools.find((tool) => tool.name === name).handler(args);
-      await staged("dispatch", { ticket: 4, expectedTicketVersion: 2 });
-      await staged("set_attention", { attention: "Attention" });
-    },
-    result("success", { result: "I dispatched ticket 4." }),
-  ]);
-
-  await run({ request: plane.request, query });
-
-  const answered = plane.calls.find(
-    ({ path }) => path === "/v1/session/turn/answer",
-  ).body;
-  assert.deepEqual(JSON.parse(answered.result), {
-    version: 1,
-    dispatches: [{ ticket: 4, expectedTicketVersion: 2 }],
-    refusals: [],
-    lifts: [],
-    attention: "Attention",
-    handoffNote: { carried: "note" },
-  });
-});
-
-test("an observation that called no decision tool still answers in the model's own text", async () => {
-  const plane = planeOf([observationTurn], leadFacts);
-  const { query } = queryOf(() => [
-    result("success", { result: '{"version":1,"attention":"Monitoring"}' }),
-  ]);
-
-  await run({ request: plane.request, query });
-
-  assert.equal(
-    plane.calls.find(({ path }) => path === "/v1/session/turn/answer").body
-      .result,
-    '{"version":1,"attention":"Monitoring"}',
-  );
-});
-
-/**
- * The kinds answered to a reader rather than to the selector. The roster here
- * is a lead's, because a thread holds no decision tool at all and a turn that
- * staged nothing would prove only that `document()` is empty: what is under
- * test is that the branch is the INPUT KIND and not whether anything was
- * staged, and only a staged turn can tell those two apart.
- */
-test("a turn that is not an observation is answered in text however many decision tools it called", async () => {
-  for (const inputKind of ["UserMessage", "Wake"]) {
-    const plane = planeOf([{ ...observationTurn, inputKind }], leadFacts);
-    const { query } = queryOf((_asked, _index, options) => [
-      async () => {
-        const tools = options.mcpServers.chuggy.tools;
-        await tools
-          .find((tool) => tool.name === "set_attention")
-          .handler({ attention: "Stopped" });
-        await tools
-          .find((tool) => tool.name === "dispatch")
-          .handler({ ticket: 4, expectedTicketVersion: 2 });
-      },
-      result("success", { result: "here is the plan" }),
-    ]);
-
-    await run({ request: plane.request, query });
-
-    assert.equal(
-      plane.calls.find(({ path }) => path === "/v1/session/turn/answer").body
-        .result,
-      "here is the plan",
-      inputKind,
-    );
-  }
-});
-
-test("one turn's staging never reaches the next turn's answer", async () => {
-  const plane = planeOf(
-    [observationTurn, { ...observationTurn, turn: "turn-2" }],
-    leadFacts,
-  );
-  const { query } = queryOf((_asked, index, options) => [
-    async () => {
-      if (index > 0) return;
-      const tools = options.mcpServers.chuggy.tools;
-      await tools
-        .find((tool) => tool.name === "dispatch")
-        .handler({ ticket: 4, expectedTicketVersion: 2 });
-    },
-    result("success", { result: "done" }),
-  ]);
-
-  await run({ request: plane.request, query });
-
-  const answers = plane.calls.filter(
-    ({ path }) => path === "/v1/session/turn/answer",
-  );
-  assert.equal(answers.length, 2);
-  assert.deepEqual(JSON.parse(answers[0].body.result).dispatches, [
-    { ticket: 4, expectedTicketVersion: 2 },
-  ]);
-  assert.equal(answers[1].body.result, "done");
-});
-
-/**
- * The two arms this branch and the decision tools each added meet here, and the
- * order they meet in is the property: a turn whose account was refused is a turn
- * the session never got, so the choices its tools staged are not an answer to
- * post. The result below is a *success* carrying text, which is what makes the
- * ordering load-bearing rather than incidental.
- */
-test("a held turn posts no answer, so the decision its tools staged is never settled", async () => {
-  const plane = planeOf([observationTurn], leadFacts);
-  const { query } = queryOf((_asked, _index, options) => [
-    async () => {
-      const tools = options.mcpServers.chuggy.tools;
-      await tools
-        .find((tool) => tool.name === "dispatch")
-        .handler({ ticket: 4, expectedTicketVersion: 2 });
-    },
-    rejection,
-    result("success", { result: "I dispatched ticket 4." }),
-  ]);
-
-  const code = await run({ request: plane.request, query });
-
-  assert.equal(code, 0);
-  assert.deepEqual(
-    plane.calls.filter(({ path }) => path === "/v1/session/held").length,
-    1,
-  );
-  assert.deepEqual(
-    plane.calls.filter(({ path }) => path.startsWith("/v1/session/turn/")),
-    [],
-    "a held turn was settled",
-  );
-});
-
-test("a composed decision is scrubbed of what the pod was handed, exactly as prose is", async () => {
-  const plane = planeOf([observationTurn], leadFacts);
-  const { query } = queryOf((_asked, _index, options) => [
-    async () => {
-      const tools = options.mcpServers.chuggy.tools;
-      const staged = (name, args) =>
-        tools.find((tool) => tool.name === name).handler(args);
-      await staged("refuse", {
-        ticket: 4,
-        ticketVersion: 2,
-        reason: `the run logged ${token} and ${bearer}`,
-      });
-      await staged("set_handoff_note", { note: { seen: bearer } });
-    },
-    result("success", { result: "refused" }),
-  ]);
-
-  await run({ request: plane.request, query });
-
-  const answered = plane.calls.find(
-    ({ path }) => path === "/v1/session/turn/answer",
-  ).body.result;
-  assert.ok(!answered.includes(token), "the credential reached the mailbox");
-  assert.ok(!answered.includes(bearer), "the bearer reached the mailbox");
-  assert.ok(answered.includes("[redacted credential]"));
-  assert.equal(
-    JSON.parse(answered).refusals.length,
-    1,
-    "the scrub broke the document",
-  );
-});
-
 test("a project tool reaches the API under the session's own bearer", async () => {
-  const plane = planeOf([observationTurn], leadFacts);
+  const plane = planeOf([turnOne], readerFacts);
   const seenApi = [];
   const { query } = queryOf((_asked, index, options) => [
     async () => {
@@ -1496,7 +1180,7 @@ const threadMessageTurn = {
   input: "file me a draft for the footer",
 };
 
-test("a thread is served origination, revocation and the thread reads, and no decision tool", async () => {
+test("a thread is served origination, revocation and the thread reads", async () => {
   const plane = planeOf([], threadFacts);
   const { seen, query } = queryOf(() => []);
 
@@ -1522,20 +1206,6 @@ test("a thread is served origination, revocation and the thread reads, and no de
       `${tool} was served and not allowed`,
     );
   }
-  for (const tool of [
-    "dispatch",
-    "refuse",
-    "lift",
-    "set_attention",
-    "set_handoff_note",
-    "set_planning_intent",
-  ]) {
-    assert.ok(!registered.includes(tool), `${tool} was served to a thread`);
-    assert.ok(
-      seen.options.disallowedTools.includes(`${chuggyToolPrefix}${tool}`),
-      `${tool} was left ungoverned for a thread`,
-    );
-  }
   assert.equal(
     seen.options.forkSession,
     undefined,
@@ -1543,8 +1213,8 @@ test("a thread is served origination, revocation and the thread reads, and no de
   );
 });
 
-test("a lead is served neither origination nor revocation, and each is disallowed by name", async () => {
-  const plane = planeOf([], leadFacts);
+test("a reader is served neither origination nor revocation, and each is disallowed by name", async () => {
+  const plane = planeOf([], readerFacts);
   const { seen, query } = queryOf(() => []);
 
   await run({ request: plane.request, query });
@@ -1560,10 +1230,10 @@ test("a lead is served neither origination nor revocation, and each is disallowe
     "update_ticket",
     "dispatch_ticket",
   ]) {
-    assert.ok(!registered.includes(tool), `a lead was served ${tool}`);
+    assert.ok(!registered.includes(tool), `a reader was served ${tool}`);
     assert.ok(
       seen.options.disallowedTools.includes(`${chuggyToolPrefix}${tool}`),
-      `a lead was left ungoverned for ${tool}`,
+      `a reader was left ungoverned for ${tool}`,
     );
   }
 });
@@ -2033,7 +1703,7 @@ test("a site that names no repository map still runs the sessions that bind none
 /**
  * The runtime derives `projectKey` from the sanitised `cwd`, so moving `cwd` to
  * a checkout is the one change in this unit that could rename every stream a
- * session has ever written — and a renamed stream is a resumed lead that finds
+ * session has ever written — and a renamed stream is a resumed session that finds
  * no transcript. Both runs write through the real store adapter, so what is
  * compared is the path the plane was asked for.
  */

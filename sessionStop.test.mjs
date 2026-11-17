@@ -479,31 +479,6 @@ test("a thread's turn its member stops is interrupted, settled as the runtime en
   assert.deepEqual(session.warned, ["turn turn-1 was stopped by its member\n"]);
 });
 
-test("a session that is not a thread asks nothing of a stop", async () => {
-  for (const kind of [
-    facts,
-    { ...facts, kind: "Inquiry", capabilities: ["ProjectRead"], forkFrom: "l" },
-  ]) {
-    const plane = planeOf(
-      [turnOne],
-      kind,
-      undefined,
-      undefined,
-      stoppedOnce(["turn-1"]),
-    );
-    const runtime = interruptible(() => [
-      init,
-      result("success", { result: "ok" }),
-    ]);
-
-    const session = await threadOver(plane, runtime);
-
-    assert.equal(session.code, 0, kind.kind);
-    assert.deepEqual(session.asked, [], kind.kind);
-    assert.deepEqual(runtime.seen.interrupts, [], kind.kind);
-  }
-});
-
 /**
  * The watch is let go of at the result, not at the settlement behind the
  * drain: a stop the plane answers while the session drains would otherwise

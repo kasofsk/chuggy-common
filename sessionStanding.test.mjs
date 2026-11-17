@@ -53,22 +53,12 @@ test("a chat host's thread reports it is not standing once, before it claims a t
   );
 });
 
-test("a session that is not a chat host's thread never reports standing", async () => {
-  for (const [named, sessionFacts, chatHost] of [
-    ["a thread on no chat host", threadFacts, false],
-    ["a chat host's lead", facts, true],
-    [
-      "a chat host's inquiry",
-      { ...facts, kind: "Inquiry", forkFrom: "runtime-0" },
-      true,
-    ],
-  ]) {
-    const plane = planeOf([turnOne], sessionFacts);
+test("a thread on no chat host never reports standing", async () => {
+  const plane = planeOf([turnOne], threadFacts);
 
-    await standingRun(plane, chatHost);
+  await standingRun(plane, false);
 
-    assert.deepEqual(standingCalls(plane), [], named);
-  }
+  assert.deepEqual(standingCalls(plane), []);
 });
 
 test("a chat host's thread carries on past a standing the plane refuses to read or to hold for it", async () => {
