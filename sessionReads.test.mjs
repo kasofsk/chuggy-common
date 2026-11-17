@@ -21,7 +21,7 @@ import { projectReadsFields } from "./projectReads.mjs";
 import {
   environment,
   facts,
-  leadRoster,
+  readerRoster,
   mintedCredential,
   planeOf,
   queryOf,
@@ -54,7 +54,7 @@ const read = {
 };
 
 const threadFacts = { ...facts, kind: "Thread", capabilities: threadRoster };
-const leadFacts = { ...facts, kind: "Lead", capabilities: leadRoster };
+const readerFacts = { ...facts, capabilities: readerRoster };
 const init = { type: "system", subtype: "init", session_id: "runtime-1" };
 const credentialPath = sessionPlaneRoutes.credential.path;
 
@@ -158,14 +158,14 @@ function mintingFirst(then) {
 
 /**
  * Catches a thread whose git is configured to ask nothing, or asks for the
- * library and is answered anything but the plane's read; and a lead, whose
+ * library and is answered anything but the plane's read; and a reader, whose
  * roster runs no command, served reads it has no git to use.
  */
-test("a thread's git is answered the plane's read of another repository its project binds, and a lead's is handed nothing", async (t) => {
+test("a thread's git is answered the plane's read of another repository its project binds, and a reader's is handed nothing", async (t) => {
   const answers = {};
   for (const [kind, sessionFacts] of [
     ["thread", threadFacts],
-    ["lead", leadFacts],
+    ["reader", readerFacts],
   ]) {
     const plane = planeOf(
       [turnOne],
@@ -191,7 +191,7 @@ test("a thread's git is answered the plane's read of another repository its proj
   });
   assert.equal(answers.thread.counted, "5");
   assert.deepEqual(answers.thread.asks, [own, lib]);
-  assert.deepEqual(answers.lead, {
+  assert.deepEqual(answers.reader, {
     filled: undefined,
     counted: undefined,
     asks: [own],

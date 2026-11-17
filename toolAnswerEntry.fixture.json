@@ -12,7 +12,7 @@
         "content": [
           {
             "type": "text",
-            "text": "HTTP 200\n{\"ticket\":4,\"ticketVersion\":2,\"phase\":\"Released\",\"brief\":{\"title\":\"Wire the lead's tools\"}}"
+            "text": "HTTP 200\n{\"ticket\":4,\"ticketVersion\":2,\"phase\":\"Released\",\"brief\":{\"title\":\"Wire the thread's tools\"}}"
           }
         ]
       }
@@ -23,7 +23,7 @@
   "toolUseResult": [
     {
       "type": "text",
-      "text": "HTTP 200\n{\"ticket\":4,\"ticketVersion\":2,\"phase\":\"Released\",\"brief\":{\"title\":\"Wire the lead's tools\"}}"
+      "text": "HTTP 200\n{\"ticket\":4,\"ticketVersion\":2,\"phase\":\"Released\",\"brief\":{\"title\":\"Wire the thread's tools\"}}"
     }
   ],
   "sourceToolAssistantUUID": "0d58b3dd-4b2f-42b9-9af5-bc1c23f8e254",

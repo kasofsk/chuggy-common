@@ -21,7 +21,6 @@ import {
   chuggyToolEpicViewResponseBytesMax,
   chuggyToolImageResponseBytesMax,
   chuggyToolLandingQueuesResponseBytesMax,
-  chuggyToolLeadSettingsResponseBytesMax,
   chuggyToolPrefix,
   chuggyToolResponseBytesMax,
   chuggyToolRunErrorResponseBytesMax,
@@ -63,6 +62,7 @@ import {
   chuggyToolImageFiles,
   chuggyToolServer,
   chuggyToolSignal,
+  chuggyToolThreadSettingsResponseBytesMax,
   chuggyToolsUnbuilt,
   chuggyTranscriptBodyBytesMax,
   readAtPathChildCharsMax,
@@ -70,9 +70,8 @@ import {
   sessionBuiltInTools,
   sessionCapabilityTools,
 } from "./chuggyTools.mjs";
-import { leadDecisionStaging } from "./leadDecision.mjs";
 import { credentialScrub, runTranscriptEventBytesMax } from "./runEvidence.mjs";
-import { leadRoster, threadRoster } from "./sessionHarness.fixture.mjs";
+import { readerRoster, threadRoster } from "./sessionHarness.fixture.mjs";
 import { sessionStoreAdapter } from "./sessionStore.mjs";
 
 const task = {
@@ -100,12 +99,10 @@ function apiOf(answer) {
 
 function toolsOf(services = {}, answer) {
   const api = apiOf(answer);
-  const staging = services.staging ?? leadDecisionStaging();
   const context = chuggyToolContext(task, bearer, {
     capabilities: everyCapability,
     request: api.request,
     turn: () => "turn-1",
-    staging,
     ...services,
   });
   const held = new Map(
@@ -114,7 +111,7 @@ function toolsOf(services = {}, answer) {
       chuggyToolHandler(definition, z),
     ]),
   );
-  return { api, staging, context, call: (name, args) => held.get(name)(args) };
+  return { api, context, call: (name, args) => held.get(name)(args) };
 }
 
 function textOf(answer) {
@@ -126,15 +123,14 @@ test("a tool the roster does not grant is never registered", () => {
     chuggyToolDefinitions(
       chuggyToolContext(task, bearer, {
         capabilities,
-        staging: leadDecisionStaging(),
       }),
     ).map(({ name }) => name);
 
   assert.deepEqual(registered([]), []);
   assert.deepEqual(registered(["RepositoryRead"]), []);
   assert.deepEqual(
-    registered(["LeadDecision"]),
-    sessionCapabilityTools.LeadDecision,
+    registered(["MemberRead"]).sort(),
+    [...sessionCapabilityTools.MemberRead].sort(),
   );
   assert.deepEqual(
     registered(everyCapability).sort(),
@@ -152,7 +148,6 @@ function briefTakers() {
   return chuggyToolDefinitions(
     chuggyToolContext(task, bearer, {
       capabilities: everyCapability,
-      staging: leadDecisionStaging(),
     }),
   )
     .filter((definition) => "brief" in definition.shape(z))
@@ -248,7 +243,6 @@ test("every read that takes a limit admits its route's bound and no more", () =>
   const limited = chuggyToolDefinitions(
     chuggyToolContext(task, bearer, {
       capabilities: everyCapability,
-      staging: leadDecisionStaging(),
     }),
   ).filter((definition) => "limit" in definition.shape(z));
 
@@ -288,7 +282,6 @@ test("the server the runtime is handed carries exactly the tools the roster admi
   const server = chuggyToolServer(
     chuggyToolContext(task, bearer, {
       capabilities: ["ProjectRead"],
-      staging: leadDecisionStaging(),
     }),
     sdk,
   );
@@ -301,31 +294,6 @@ test("the server the runtime is handed carries exactly the tools the roster admi
   );
   for (const { description } of server.tools)
     assert.ok(description.length > 0, "a registered tool describes nothing");
-});
-
-/**
- * The decision channel through the server's own registration, which is where a
- * staged answer meets the protocol. The tools' own suite holds each answer's
- * text; this holds the bridge that carries it.
- */
-test("a decision tool the server registers answers a well-formed result", async () => {
-  const staging = leadDecisionStaging();
-  staging.reset(
-    JSON.stringify({ candidates: [{ ticket: 4, ticketVersion: 2 }] }),
-  );
-  const { api, call } = toolsOf({ staging });
-
-  const answer = await call("dispatch", {
-    ticket: 4,
-    expectedTicketVersion: 2,
-  });
-
-  assert.deepEqual(answer.content, [
-    { type: "text", text: "dispatch staged for ticket 4" },
-  ]);
-  assert.ok(answer.isError === undefined);
-  assert.equal(api.calls.length, 0, "a decision tool wrote something");
-  assert.equal(staging.document().dispatches.length, 1);
 });
 
 test("every read answers one page, relays the route's own body and names its cursor", async () => {
@@ -514,7 +482,7 @@ test("a thread transcript of one full batch is read whole, page by page, under t
 });
 
 /**
- * The lead's transcript at the weight its route answered on a live project: a
+ * A transcript at the weight its route answered on a live project: a
  * page under the bound as the route sends it and over it as an answer escapes
  * it. It is answered in part, and the read after resumes inside the same batch.
  */
@@ -2376,7 +2344,6 @@ test("fetch_image is registered and allowed under ProjectRead, and under nothing
     chuggyToolDefinitions(
       chuggyToolContext(task, bearer, {
         capabilities,
-        staging: leadDecisionStaging(),
       }),
     ).map(({ name }) => name);
   const others = everyCapability.filter((held) => held !== "ProjectRead");
@@ -2388,7 +2355,7 @@ test("fetch_image is registered and allowed under ProjectRead, and under nothing
   );
   assert.ok(!registered(others).includes("fetch_image"));
   assert.ok(sessionAllowedTools(others).disallowedTools.includes(qualified));
-  for (const roster of [leadRoster, threadRoster])
+  for (const roster of [readerRoster, threadRoster])
     assert.ok(registered([...roster]).includes("fetch_image"));
 });
 
@@ -2527,13 +2494,13 @@ test("read_docs sends the docs host no header of chuggy's, follows no redirect, 
  * separator. A segment is model-chosen text bounded only by `identity(z)`, so
  * an unencoded one is a tool that reaches a route its roster does not name:
  * `new URL(path, origin)` resolves `..` before the request is made, which is
- * how `…/threads/../lead/transcript` becomes the lead's route. The assertion is
+ * how `…/threads/../epics/transcript` becomes an epic's route. The assertion is
  * on the RESOLVED pathname rather than on the string this file built, because
  * the string is not what the API is asked for.
  */
 test("an identity carrying a separator stays inside the route its tool names", async () => {
-  const escaping = "../lead";
-  const escaped = "..%2Flead";
+  const escaping = "../epics";
+  const escaped = "..%2Fepics";
   const partition = "/api/v1/tenants/vteng/projects/chuggy";
   const cases = [
     [
@@ -3571,7 +3538,7 @@ test("release_draft says releasing starts no work, and who starts it", () => {
   );
   assert.match(
     description,
-    /Releasing makes the ticket Pending and starts no work: once its dependencies are Done it runs when it is dispatched, by the project's lead or by someone who may dispatch; dispatch_ticket submits one on your owner's word\./,
+    /Releasing makes the ticket Pending and starts no work: once its dependencies are Done it waits Pending until a person who may dispatch dispatches it; dispatch_ticket submits one on your owner's word\./,
   );
 });
 
@@ -3676,7 +3643,7 @@ test("two releases in one turn are two operations, and one repeated is one", asy
   assert.notEqual(
     ids[0],
     ids[1],
-    "two releases of different drafts in one turn collide on one operation, and the second is an idempotency conflict naming nothing the lead can act on",
+    "two releases of different drafts in one turn collide on one operation, and the second is an idempotency conflict naming nothing the model can act on",
   );
   assert.equal(ids[0], ids[2], "one call repeated minted a second operation");
   assert.deepEqual(keys, ids, "the key and the operation are not the same");
@@ -4002,8 +3969,8 @@ const epicContentKeptGiven = {
   tickets: epicContentGiven.tickets,
 };
 
-/** A project's lead settings as the route answers them, `overrides` replacing what the project sets. */
-function leadSettingsRead(overrides = leadSettingsOverrides, revision = 5) {
+/** A project's thread settings as the route answers them, `overrides` replacing what the project sets. */
+function threadSettingsRead(overrides = threadSettingsOverrides, revision = 5) {
   const effective = { northStar: "North.", threadStandingRules: "Rules." };
   return {
     partition: { tenant: task.tenant, project: task.project },
@@ -4014,7 +3981,7 @@ function leadSettingsRead(overrides = leadSettingsOverrides, revision = 5) {
 }
 
 /** What a project's settings override, each kind of field among them. */
-const leadSettingsOverrides = {
+const threadSettingsOverrides = {
   northStar: "Ship the worker core.",
   threadModel: "claude-opus-5-5",
   threadEffort: "high",
@@ -4023,9 +3990,6 @@ const leadSettingsOverrides = {
 /** A project's placement as the route answers it. */
 const placementRead = {
   thread: { route: "InCluster", source: "Default" },
-  lead: { route: "InCluster", source: "Project" },
-  leadOffering: "Subsidized",
-  leadOfferings: ["Own", "Subsidized"],
   choices: ["InCluster", "Pool"],
   runners: { mine: "Unregistered", project: "Live" },
 };
@@ -4089,7 +4053,7 @@ const projectToolArguments = {
   read_lead_settings: {},
   update_lead_settings: { expectedRevision: 5, set: { threadEffort: "low" } },
   read_placement: {},
-  update_placement: { lead: "Pool" },
+  update_placement: { thread: "Pool" },
   read_usage: {},
   update_usage_settings: {
     agent: "Codex",
@@ -4160,12 +4124,11 @@ test("every project tool reaches its own session's project, an account tool its 
   }
 });
 
-test("origination, revocation, updating and dispatching are registered for a thread's roster and for no lead's", () => {
+test("origination, revocation, updating and dispatching are registered for a thread's roster and for no reader's", () => {
   const registered = (capabilities) =>
     chuggyToolDefinitions(
       chuggyToolContext(task, bearer, {
         capabilities,
-        staging: leadDecisionStaging(),
       }),
     ).map(({ name }) => name);
 
@@ -4195,8 +4158,8 @@ test("origination, revocation, updating and dispatching are registered for a thr
   ]) {
     assert.ok(registered([...threadRoster]).includes(tool), tool);
     assert.ok(
-      !registered([...leadRoster]).includes(tool),
-      `a lead's roster registered ${tool}`,
+      !registered([...readerRoster]).includes(tool),
+      `a reader's roster registered ${tool}`,
     );
   }
 });
@@ -4214,7 +4177,6 @@ test("the offer tools are registered under ThreadOffer alone, and no roster with
     chuggyToolDefinitions(
       chuggyToolContext(task, bearer, {
         capabilities,
-        staging: leadDecisionStaging(),
       }),
     ).map(({ name }) => name);
   const without = everyCapability.filter(
@@ -4312,7 +4274,6 @@ test("the server hands the runtime an offer tool's input as a schema that refuse
   const server = chuggyToolServer(
     chuggyToolContext(task, bearer, {
       capabilities: ["ThreadOffer"],
-      staging: leadDecisionStaging(),
     }),
     {
       z,
@@ -4366,7 +4327,7 @@ test("every project tool a session holds asks its route, read_docs the docs host
                         : path.includes("/draft-initializations/")
                           ? JSON.stringify(draftInitialized)
                           : path.endsWith("/selector-settings")
-                            ? JSON.stringify(leadSettingsRead())
+                            ? JSON.stringify(threadSettingsRead())
                             : path.endsWith("/session-placement")
                               ? JSON.stringify(placementRead)
                               : "{}",
@@ -4382,7 +4343,6 @@ test("every project tool a session holds asks its route, read_docs the docs host
         add_epic_tickets: 2,
         remove_epic_tickets: 2,
         update_lead_settings: 2,
-        update_placement: 2,
       }[name] ?? 1;
     assert.equal(api.calls.length, asked, name);
     assert.equal(docs.length, name === "read_docs" ? 1 : 0, name);
@@ -4423,7 +4383,7 @@ function memberToolsOf(answer) {
   return { calls, docs, held, call: (name, args) => held.get(name)(args) };
 }
 
-test("a member's own session is served its member tools and read_docs, and no project or decision tool", () => {
+test("a member's own session is served its member tools and read_docs, and no project tool", () => {
   const { held } = memberToolsOf();
 
   assert.deepEqual(
@@ -4733,16 +4693,15 @@ test("a tool not built here is disallowed to the roster holding every capability
  * The runtime's own tool-discovery tool is admitted by no capability, and a
  * built-in the roster does not carry is in NEITHER list — governed by
  * `permissionMode: "bypassPermissions"` alone, which is no roster at all. So a
- * roster that merely declines to grant it still offers it, and a lead that
- * reaches for it has the whole decision it was in refused against
- * `toolAllowlist`, which is derived from the roster and cannot name it.
+ * roster that merely declines to grant it still offers it, to a session whose
+ * roster never named it.
  */
 test("the runtime's tool-discovery tool is denied by name to every roster", () => {
   const discovery = "ToolSearch";
 
   for (const [capability, tools] of Object.entries(sessionCapabilityTools))
     assert.ok(!tools.includes(discovery), `${capability} admits it`);
-  for (const held of [[], [...leadRoster], everyCapability]) {
+  for (const held of [[], [...readerRoster], everyCapability]) {
     const { allowedTools, disallowedTools } = sessionAllowedTools(held);
 
     assert.ok(
@@ -4756,7 +4715,7 @@ test("the runtime's tool-discovery tool is denied by name to every roster", () =
 test("a session with no ProjectRead disallows every chuggy read by name", () => {
   const { allowedTools, disallowedTools } = sessionAllowedTools([
     "RepositoryRead",
-    "LeadDecision",
+    "DraftAuthor",
   ]);
 
   for (const tool of sessionCapabilityTools.ProjectRead) {
@@ -5290,21 +5249,21 @@ test("the epic tools are described: the writes name their refusals and the abili
 });
 
 /** The settings route of the suite's project. */
-const leadSettingsPath =
+const threadSettingsPath =
   "/api/v1/tenants/vteng/projects/chuggy/selector-settings";
 
 /** The placement route of the suite's project. */
 const placementPath = "/api/v1/tenants/vteng/projects/chuggy/session-placement";
 
 /** The tools with the settings route reading `read` and writing whatever `written` answers, which is a 200 at revision 6 where it is left out. */
-function leadSettingsToolsOf(read, written) {
+function threadSettingsToolsOf(read, written) {
   return toolsOf({}, (_path, init) =>
     (init?.method ?? "GET") === "GET"
       ? { status: 200, body: JSON.stringify(read) }
       : (written?.(init) ?? {
           status: 200,
           body: JSON.stringify(
-            leadSettingsRead(JSON.parse(init.body).overrides, 6),
+            threadSettingsRead(JSON.parse(init.body).overrides, 6),
           ),
         }),
   );
@@ -5328,7 +5287,7 @@ function admittedMost(admits) {
  * schema admits, each text's characters ones JSON escapes into six and the
  * model's, which admits no control character, ones it escapes into two.
  */
-function leadSettingsHeaviest() {
+function threadSettingsHeaviest() {
   const { northStar, threadModel } = selectorProjectOverridesSchema.shape;
   const heavy = (chars) => "\u0001".repeat(chars);
   const text = heavy(
@@ -5339,8 +5298,8 @@ function leadSettingsHeaviest() {
     admittedMost((chars) => threadModel.safeParse(modelHeavy(chars)).success),
   );
   const texts = { northStar: text, threadStandingRules: text };
-  const settings = leadSettingsRead({
-    ...leadSettingsOverrides,
+  const settings = threadSettingsRead({
+    ...threadSettingsOverrides,
     ...texts,
     threadModel: model,
   });
@@ -5351,7 +5310,7 @@ function leadSettingsHeaviest() {
 }
 
 /** Whether a read_lead_settings answer at `path` is a piece of the value there, rather than the value whole. */
-function leadSettingsPiece(read, path) {
+function threadSettingsPiece(read, path) {
   return (
     read !== null &&
     typeof read === "object" &&
@@ -5366,7 +5325,7 @@ function leadSettingsPiece(read, path) {
  * piece read on until nothing is left, and an outline's entry whose child is
  * not written whole read at its own `path`. `budget.reads` bounds the reads.
  */
-async function leadSettingsWalked(call, path, budget) {
+async function threadSettingsWalked(call, path, budget) {
   const entries = [];
   let text = "";
   let offset;
@@ -5376,7 +5335,7 @@ async function leadSettingsWalked(call, path, budget) {
     const read = configurationRead(
       await call("read_lead_settings", { path, offset }),
     );
-    if (!leadSettingsPiece(read, path)) return read;
+    if (!threadSettingsPiece(read, path)) return read;
     assert.equal(read.offset, offset ?? 0);
     if (read.kind === "string") {
       text += read.text;
@@ -5389,7 +5348,7 @@ async function leadSettingsWalked(call, path, budget) {
         entry.key,
         "value" in entry
           ? entry.value
-          : await leadSettingsWalked(call, [...path, entry.key], budget),
+          : await threadSettingsWalked(call, [...path, entry.key], budget),
       ]);
     if (read.entriesLeft === 0)
       return read.kind === "array"
@@ -5400,28 +5359,30 @@ async function leadSettingsWalked(call, path, budget) {
 }
 
 test("read_lead_settings answers the heaviest settings in pieces that fit, which read by path and offset make the whole", async () => {
-  const heaviest = leadSettingsHeaviest();
+  const heaviest = threadSettingsHeaviest();
   const body = JSON.stringify(heaviest);
   assert.ok(Buffer.byteLength(body) > chuggyToolResponseBytesMax);
-  assert.ok(Buffer.byteLength(body) <= chuggyToolLeadSettingsResponseBytesMax);
+  assert.ok(
+    Buffer.byteLength(body) <= chuggyToolThreadSettingsResponseBytesMax,
+  );
   const { api, call } = toolsOf({}, () => ({ status: 200, body }));
 
   const outline = configurationRead(await call("read_lead_settings", {}));
-  assert.ok(leadSettingsPiece(outline, []));
+  assert.ok(threadSettingsPiece(outline, []));
   assert.deepEqual(
     outline.outline.map(({ key }) => key),
     Object.keys(heaviest),
   );
   assert.deepEqual(
-    await leadSettingsWalked(call, [], { reads: 10_000 }),
+    await threadSettingsWalked(call, [], { reads: 10_000 }),
     heaviest,
   );
-  assert.ok(api.calls.every(({ path }) => path === leadSettingsPath));
+  assert.ok(api.calls.every(({ path }) => path === threadSettingsPath));
   assert.ok(api.calls.every(({ method }) => method === "GET"));
 });
 
 test("read_lead_settings answers settings that fit as the route answered them, and a refusal unaltered", async () => {
-  const body = JSON.stringify(leadSettingsRead());
+  const body = JSON.stringify(threadSettingsRead());
   const fits = toolsOf({}, () => ({ status: 200, body }));
   assert.equal(
     textOf(await fits.call("read_lead_settings", {})),
@@ -5433,13 +5394,13 @@ test("read_lead_settings answers settings that fit as the route answered them, a
         path: ["overrides", "threadModel"],
       }),
     ),
-    leadSettingsOverrides.threadModel,
+    threadSettingsOverrides.threadModel,
   );
   const missing = await fits.call("read_lead_settings", {
-    path: ["overrides", "leadModel"],
+    path: ["overrides", "noSuchModel"],
   });
   assert.equal(missing.isError, true);
-  assert.match(textOf(missing), /^the lead settings hold no "leadModel"/u);
+  assert.match(textOf(missing), /^the thread settings hold no "noSuchModel"/u);
 
   const refusal = JSON.stringify({ error: { code: "NotFound", message: "n" } });
   const hidden = toolsOf({}, () => ({ status: 404, body: refusal }));
@@ -5449,8 +5410,8 @@ test("read_lead_settings answers settings that fit as the route answered them, a
 });
 
 test("update_lead_settings keeps a field it is not sent, at its longest, drops one it clears and replaces one it sets, under the revision it was given", async () => {
-  const heaviest = leadSettingsHeaviest();
-  const { api, call } = leadSettingsToolsOf(heaviest);
+  const heaviest = threadSettingsHeaviest();
+  const { api, call } = threadSettingsToolsOf(heaviest);
 
   const answer = await call("update_lead_settings", {
     expectedRevision: 4,
@@ -5463,8 +5424,8 @@ test("update_lead_settings keeps a field it is not sent, at its longest, drops o
   assert.deepEqual(
     api.calls.map(({ method, path }) => [method, path]),
     [
-      ["GET", leadSettingsPath],
-      ["PUT", leadSettingsPath],
+      ["GET", threadSettingsPath],
+      ["PUT", threadSettingsPath],
     ],
   );
   const kept = { ...heaviest.overrides };
@@ -5481,10 +5442,10 @@ test("update_lead_settings relays settings that moved as their code and revision
       code: "SettingsRevisionConflict",
       message: "The selector settings moved under this write.",
     },
-    settings: leadSettingsRead(leadSettingsOverrides, 7),
+    settings: threadSettingsRead(threadSettingsOverrides, 7),
     movedBy: { kind: "User", subject: "u-1" },
   };
-  const { api, call } = leadSettingsToolsOf(leadSettingsRead(), () => ({
+  const { api, call } = threadSettingsToolsOf(threadSettingsRead(), () => ({
     status: 409,
     body: JSON.stringify(conflict),
   }));
@@ -5525,7 +5486,7 @@ test("update_lead_settings relays every other answer of its write as the API gav
     [404, JSON.stringify({ error: { code: "NotFound", message: "n" } })],
     [413, JSON.stringify({ error: { code: "BodyTooLarge", message: "b" } })],
   ]) {
-    const { api, call } = leadSettingsToolsOf(leadSettingsRead(), () => ({
+    const { api, call } = threadSettingsToolsOf(threadSettingsRead(), () => ({
       status,
       body,
     }));
@@ -5585,8 +5546,7 @@ test("each settings and placement tool's refusal sends no request", async () => 
       },
     ],
     ["update_placement", {}],
-    ["update_placement", { lead: "Elsewhere" }],
-    ["update_placement", { leadOffering: "Free" }],
+    ["update_placement", { thread: "Elsewhere" }],
   ]) {
     const answer = await call(name, args);
     assert.equal(answer.isError, true, `${name} ${JSON.stringify(args)}`);
@@ -5605,69 +5565,33 @@ test("read_placement relays the placement as the route answered it", async () =>
   );
 });
 
-test("update_placement writes every route read and always names the offering, a bare Pool lead running on its own", async () => {
-  for (const [args, written] of [
-    [
-      { lead: "Pool" },
-      { thread: "InCluster", lead: "Pool", leadOffering: "Own" },
-    ],
-    [
-      { thread: "Pool" },
-      { thread: "Pool", lead: "InCluster", leadOffering: "Subsidized" },
-    ],
-    [
-      { lead: "InCluster" },
-      { thread: "InCluster", lead: "InCluster", leadOffering: "Subsidized" },
-    ],
-    [
-      { leadOffering: "Own" },
-      { thread: "InCluster", lead: "InCluster", leadOffering: "Own" },
-    ],
-  ]) {
-    const { api, call } = toolsOf({}, () => ({
-      status: 200,
-      body: JSON.stringify(placementRead),
-    }));
+test("update_placement writes the thread route it is given beside the lead the request requires, reading nothing", async () => {
+  for (const thread of ["Pool", "InCluster"]) {
+    const { api, call } = toolsOf({}, () => ({ status: 204, body: "" }));
 
-    const answer = await call("update_placement", args);
+    const answer = await call("update_placement", { thread });
 
     assert.equal(answer.isError, undefined, textOf(answer));
     assert.deepEqual(
       api.calls.map(({ method, path }) => [method, path]),
-      [
-        ["GET", placementPath],
-        ["PUT", placementPath],
-      ],
+      [["PUT", placementPath]],
     );
-    assert.deepEqual(
-      JSON.parse(api.calls[1].init.body),
-      written,
-      JSON.stringify(args),
-    );
+    const written = JSON.parse(api.calls[0].init.body);
+    assert.deepEqual(written, { thread, lead: "InCluster" });
   }
 });
 
 test("update_placement relays the API's refusal of its write unaltered", async () => {
-  for (const [status, code] of [
-    [403, "HostedRunsNotGranted"],
-    [422, "LeadOfferingNotAdmitted"],
-  ]) {
-    const body = JSON.stringify({ error: { code, message: "m" } });
-    const { api, call } = toolsOf({}, (_path, init) =>
-      (init?.method ?? "GET") === "GET"
-        ? { status: 200, body: JSON.stringify(placementRead) }
-        : { status, body },
-    );
+  const body = JSON.stringify({
+    error: { code: "HostedRunsNotGranted", message: "m" },
+  });
+  const { api, call } = toolsOf({}, () => ({ status: 403, body }));
 
-    const answer = await call("update_placement", {
-      lead: "InCluster",
-      leadOffering: "Subsidized",
-    });
+  const answer = await call("update_placement", { thread: "InCluster" });
 
-    assert.equal(textOf(answer), `HTTP ${String(status)}\n${body}`);
-    assert.equal(answer.isError, true);
-    assert.equal(api.calls.length, 2);
-  }
+  assert.equal(textOf(answer), `HTTP 403\n${body}`);
+  assert.equal(answer.isError, true);
+  assert.equal(api.calls.length, 1);
 });
 
 test("no session's roster allows a settings tool", () => {

@@ -6,8 +6,8 @@
  * inside this repo, which does not carry the agent runtime: a tool shape the
  * runtime's own JSON-schema converter cannot render makes the WHOLE listing
  * throw. The server still reports itself connected, `mcpServers` still names it,
- * and the model is simply told those tools do not exist — a lead that reads
- * nothing and decides nothing, with no error anywhere. It was a `z.record` that
+ * and the model is simply told those tools do not exist — a session that reads
+ * nothing and writes nothing, with no error anywhere. It was a `z.record` that
  * did it the first time.
  *
  * IT RESOLVES THE RUNTIME THE WAY THE POD DOES, through `sessionSdk`, so what
@@ -27,21 +27,21 @@ import {
   chuggyToolServer,
   sessionCapabilityTools,
 } from "./chuggyTools.mjs";
-import { leadDecisionStaging } from "./leadDecision.mjs";
 import { sessionSdk } from "./session.mjs";
 import { chuggyListedTools } from "./toolListing.mjs";
 
 /**
- * The rosters probed, and why two. The lead's is written out because a lead is
- * what this installation places today, and a probe that only ever saw the union
- * would not notice the filter falling open. `every` is derived from the image's
+ * The rosters probed, and why two. `member` is written out because it is the
+ * narrowest a session runs under, a member's own thread holding `MemberRead`
+ * alone, and a probe that only ever saw the union would not notice the filter
+ * falling open. `every` is derived from the image's
  * own capability map, so a tool admitted by a capability no shipped roster
  * carries yet — `create_draft` under `DraftOriginate` — still has its shape
  * rendered by the runtime's converter here, which is where the failure this
  * probe exists for would otherwise hide.
  */
 const rosters = {
-  lead: ["RepositoryRead", "ProjectRead", "DraftAuthor", "LeadDecision"],
+  member: ["MemberRead"],
   every: Object.keys(sessionCapabilityTools),
 };
 
@@ -51,7 +51,7 @@ for (const [roster, capabilities] of Object.entries(rosters)) {
   const context = chuggyToolContext(
     { tenant: "probe", project: "probe", api: { url: "http://127.0.0.1:1" } },
     "probe",
-    { capabilities, staging: leadDecisionStaging() },
+    { capabilities },
   );
   const admitted = chuggyToolDefinitions(context).map(({ name }) => name);
   const server = chuggyToolServer(context, { z, tool, createSdkMcpServer });

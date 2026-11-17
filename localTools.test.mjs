@@ -132,7 +132,7 @@ test("a person's agent is given every project tool and no decision tool, under o
   assert.notEqual(context.turn(), first);
 });
 
-test("a person's agent is given every lead settings, placement, agent-account and pull request merge tool", () => {
+test("a person's agent is given every thread settings, placement, agent-account and pull request merge tool", () => {
   const context = localToolContext({
     site: "https://chuggy.test",
     tenant: "vteng",
@@ -155,18 +155,14 @@ test("a person's agent is given every lead settings, placement, agent-account an
   }
 });
 
-test("the server's instructions say how to change the lead's prompt, move it onto the subsidized lead and merge a ticket's pull request", () => {
+test("the server's instructions say how to change the project's thread settings and merge a ticket's pull request", () => {
   const instructions = localToolInstructions({
     tenant: "vteng",
     project: "chuggy",
   });
   assert.match(
     instructions,
-    /^To change the lead's prompt: read_docs the page "Writing a project's lead prompt", then read_lead_settings and update_lead_settings\.$/mu,
-  );
-  assert.match(
-    instructions,
-    /^To move the lead onto the subsidized lead: read_docs the page "The subsidized lead", then update_placement\.$/mu,
+    /^To change the project's thread settings: read_docs the page "A project's thread settings", then read_lead_settings and update_lead_settings\.$/mu,
   );
   assert.match(
     instructions,
@@ -254,7 +250,7 @@ test("the server's instructions name the filing recipe's tools in order, then wh
   assert.match(instructions, /^2\. list_repositories: [^\n]*`fileable`/mu);
   assert.match(
     instructions,
-    /Releasing starts nothing: [^.]*by the project's lead, by dispatch_ticket[^.]*\.$/mu,
+    /^Releasing starts nothing: once its dependencies are Done the ticket waits Pending until a person who may dispatch dispatches it: by dispatch_ticket on the word of the person you act for, or by another person who may dispatch\.$/mu,
   );
   assert.match(
     instructions,

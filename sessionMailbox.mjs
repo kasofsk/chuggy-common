@@ -6,8 +6,7 @@
  * yielding a turn it blocks until the pod says that turn settled, so the runtime
  * cannot be handed a second turn while the first is still being answered — and
  * so nothing belonging to a later turn can arrive while the pod is draining the
- * current one's messages. The one thing it yields in that wait is the pod's ask
- * of the turn in flight, which claims nothing: it is that turn's own message.
+ * current one's messages.
  *
  * BOTH LOOPS ARE BOUNDED. One request is bounded by the plane's own long poll,
  * and the loop as a whole by the plane's `Stop` and, where the pod was launched
@@ -16,8 +15,8 @@
  * idle reaper to collect.
  *
  * A CLAIM IS ANNOUNCED BEFORE THE TURN IS YIELDED, which is what lets the pod
- * reset anything a turn owns — its decision staging — with no way for one turn's
- * state to be read by the next.
+ * set up anything a turn owns, such as the watch for its member's stop, before
+ * the runtime reads it.
  *
  * THE IDLE WINDOW OPENS ON THE FIRST EMPTY POLL, NOT WHEN THE POD STARTED. A
  * cold session pages a resumed store and spawns a runtime before this loop is
@@ -102,7 +101,7 @@ export function sessionMailbox(task, bearer, services = {}) {
   let released = Promise.resolve();
   let idleSince;
 
-  /** Blocks the generator until the turn settles, or until the pod asks in it. */
+  /** Blocks the generator until the turn settles. */
   function hold() {
     released = new Promise((resolve) => {
       release = resolve;
@@ -119,13 +118,6 @@ export function sessionMailbox(task, bearer, services = {}) {
       release();
     },
 
-    /** One more message into the turn in flight, yielded before it settles. */
-    ask(input) {
-      if (held === undefined)
-        throw new Error("the session mailbox holds no turn to ask in");
-      release(sessionUserMessage(input));
-    },
-
     /** What ends the iterable, and with it the query, without another claim. */
     stop() {
       stopped = true;
@@ -134,13 +126,8 @@ export function sessionMailbox(task, bearer, services = {}) {
 
     async *turns() {
       for (;;) {
-        const asked = await released;
+        await released;
         if (stopped) return;
-        if (asked !== undefined) {
-          hold();
-          yield asked;
-          continue;
-        }
         const turn = await sessionMailboxClaim(task, bearer, request);
         if (turn === "Stop") return;
         if (turn === undefined) {

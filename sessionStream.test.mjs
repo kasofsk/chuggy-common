@@ -144,23 +144,9 @@ async function sessionOver(script, options = {}) {
 
 const isStream = ({ type }) => type === "stream_event";
 
-test("a thread's query asks the runtime for partial messages, and no other session's does", async () => {
-  const kinds = {
-    Lead: facts,
-    Inquiry: {
-      ...facts,
-      kind: "Inquiry",
-      capabilities: ["ProjectRead"],
-      forkFrom: "lead-1",
-    },
-  };
-
-  const thread = await sessionOver(() => [], { turns: [] });
-  assert.equal(thread.seen.options.includePartialMessages, true);
-  for (const [kind, sessionFacts] of Object.entries(kinds)) {
-    const { seen } = await sessionOver(() => [], { sessionFacts, turns: [] });
-    assert.ok(!("includePartialMessages" in seen.options), kind);
-  }
+test("a thread's query asks the runtime for partial messages", async () => {
+  const { seen } = await sessionOver(() => [], { turns: [] });
+  assert.equal(seen.options.includePartialMessages, true);
 });
 
 /**
@@ -307,17 +293,14 @@ test("a stream event is nothing the measurement or the rate-limit observation re
   assert.deepEqual(sightings, rateLimitSightings());
 });
 
-test("a subagent's stream is not the thread's answer, and a session that is not a thread reports none", async () => {
+test("a subagent's stream is not the thread's answer", async () => {
   const under = recorded.map((message) =>
     isStream(message) ? { ...message, parent_tool_use_id: "call_01" } : message,
   );
 
   const subagent = await sessionOver(scriptOf(under));
-  const lead = await sessionOver(scriptOf(recorded), { sessionFacts: facts });
 
   assert.deepEqual(subagent.posts, []);
-  assert.deepEqual(lead.posts, []);
-  assert.equal(lead.code, 0);
 });
 
 /**

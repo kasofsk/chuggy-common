@@ -378,7 +378,7 @@ test("a git call that runs past its bound leaves the session with no tree", asyn
 });
 
 /**
- * A clone killed at its bound leaves its target behind, and the lead's `Read`
+ * A clone killed at its bound leaves its target behind, and the session's `Read`
  * and `Bash` would walk into a half-tree while the pod reports no tree at all.
  */
 test("a clone that did not finish leaves nothing of its tree behind", async () => {

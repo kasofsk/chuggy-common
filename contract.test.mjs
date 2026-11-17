@@ -40,7 +40,6 @@ import {
   chuggyToolServerName,
 } from "@chuggy/worker-contract/sessionTools";
 import {
-  leadDecisionDocumentSchema,
   resultManifestDocumentSchema,
   resultReportCharsMax,
 } from "@chuggy/worker-contract/workerDocuments";
@@ -86,7 +85,6 @@ import {
 import { envelope, fetchedAnswer, pushed } from "./envelope.fixture.mjs";
 import { heldCredentials } from "./heldCredentials.mjs";
 import { heartbeatIntervalMilliseconds, keepWorkerLease } from "./lease.mjs";
-import { leadDecisionStaging } from "./leadDecision.mjs";
 import { localToolCapabilities, localToolContext } from "./localTools.mjs";
 import {
   planeCredential,
@@ -110,7 +108,7 @@ import {
   bearer,
   facts,
   mintedCredential,
-  leadRoster,
+  readerRoster,
   queryOf,
   rejection,
   result,
@@ -979,7 +977,7 @@ const taskRefusals = [
     status: 200,
     body: sessionTaskAnswerSchema.parse({
       ...sessionTaskBare,
-      capabilities: leadRoster,
+      capabilities: readerRoster,
       credentialSlot: claudeAgent.credential,
       authority: fetchedAnswer.authority,
     }),
@@ -1217,48 +1215,6 @@ test("the manifest the pod reports is one the contract's manifest schema reads",
   );
 });
 
-/** An observation offering one ticket to dispatch and one to refuse. */
-const observation = JSON.stringify({
-  version: 1,
-  decision: "decision-1",
-  partition: { tenant: "vteng", project: "chuggy" },
-  changes: [],
-  candidates: [
-    { ticket: 4, ticketVersion: 2 },
-    { ticket: 5, ticketVersion: 1 },
-  ],
-  token: {},
-  operationalContext: {},
-  refusals: [{ ticket: 6, ticketVersion: 1, reason: "later" }],
-});
-
-test("the decision every decision tool composes is one the contract's decision schema reads", async () => {
-  const staging = leadDecisionStaging();
-  staging.reset(observation);
-  const call = (name, args) =>
-    chuggyToolHandler(
-      staging.definitions.find((definition) => definition.name === name),
-      z,
-    )(args);
-  const calls = {
-    dispatch: { ticket: 4, expectedTicketVersion: 2 },
-    refuse: { ticket: 5, ticketVersion: 1, reason: "later" },
-    lift: { ticket: 6 },
-    set_attention: { attention: "Attention" },
-    set_handoff_note: { note: { carried: "on" } },
-    set_planning_intent: { intent: { next: "ticket 7" } },
-  };
-
-  assert.deepEqual(Object.keys(calls), [
-    ...chuggyToolCapabilities.LeadDecision,
-  ]);
-  for (const [name, args] of Object.entries(calls)) {
-    const answer = await call(name, args);
-    assert.notEqual(answer.isError, true, `${name}: ${answer.content[0].text}`);
-  }
-  leadDecisionDocumentSchema.parse(staging.document());
-});
-
 /** Every field a project tool requires, so one argument set drives each tool to its route. */
 const everyToolArgument = {
   ticket: 7,
@@ -1375,10 +1331,7 @@ test("the pod's tools reach exactly the routes the contract gives them", async (
 /** The tool names one roster registers, off the pod's own server definitions. */
 function registered(capabilities) {
   return chuggyToolDefinitions(
-    chuggyToolContext(sessionTask, bearer, {
-      capabilities,
-      staging: leadDecisionStaging(),
-    }),
+    chuggyToolContext(sessionTask, bearer, { capabilities }),
   ).map(({ name }) => name);
 }
 
@@ -1394,14 +1347,9 @@ test("the pod defines every tool the contract rosters, and no other", () => {
     ...chuggyProjectTools.map(({ name }) => name),
     ...chuggyMemberTools.map(({ name }) => name),
     ...chuggyOfferTools.map(({ name }) => name),
-    ...leadDecisionStaging().definitions.map(({ name }) => name),
   ];
 
   assert.deepEqual([...defined].sort(), [...toolsBuilt].sort());
-  assert.deepEqual(
-    leadDecisionStaging().definitions.map(({ name }) => name),
-    [...chuggyToolCapabilities.LeadDecision],
-  );
   assert.deepEqual(
     chuggyOfferTools.map(({ name }) => name),
     [...chuggyToolCapabilities.ThreadOffer],

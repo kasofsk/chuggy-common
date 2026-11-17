@@ -36,7 +36,6 @@ export const workerFeaturesImplemented = [
   "SessionContext",
   "CredentialOutcome",
   "RunnerAgentsAdvertised",
-  "SystemPromptOwn",
   "CredentialBundles",
   "RunCredential",
   "CredentialPauses",

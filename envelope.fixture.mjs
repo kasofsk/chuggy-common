@@ -82,20 +82,15 @@ export const envelope = poolEnvelopeSchema.parse({
   outputBytesMax: 4_096,
 });
 
-/** What the task route answers a pool-held lead's pod: its task, with the site's API, bounds and model beside it. */
+/** What the task route answers a pool-held thread's pod: its task, with the site's API, bounds and model beside it. */
 export const poolHeldSessionAnswer = sessionTaskAnswerSchema.parse({
   tenant: "vteng",
   project: "chuggy",
   session: "session-1",
-  kind: "Lead",
+  kind: "Thread",
   attempt: "attempt-1",
   generation: 1,
-  capabilities: [
-    "RepositoryRead",
-    "ProjectRead",
-    "DraftAuthor",
-    "LeadDecision",
-  ],
+  capabilities: ["RepositoryRead", "ProjectRead", "DraftAuthor"],
   credentialSlot: "claude-code",
   authority: {
     tools: [],
