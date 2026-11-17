@@ -106,7 +106,7 @@ function sdkOf() {
   return { registered, sdk: { McpServer, z } };
 }
 
-test("a person's agent is given every project tool and no decision tool, under one project's routes", async () => {
+test("a person's agent is given every project tool, under one project's routes", async () => {
   const signIn = signInOf(["token"]);
   const context = localToolContext({
     site: "https://chuggy.test/console",
