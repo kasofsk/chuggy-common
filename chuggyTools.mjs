@@ -1663,6 +1663,11 @@ const updateLeadSettingsFields = Object.keys(
   selectorProjectOverridesSchema.shape,
 );
 
+/** The override fields as the settings tools' descriptions name them. */
+const updateLeadSettingsFieldsText = updateLeadSettingsFields
+  .map((field) => `\`${field}\``)
+  .join(", ");
+
 /** Why a settings write is refused before it reads anything, or nothing where it may go on: `set` is the contract's overrides, and every field is named once. */
 function updateLeadSettingsRefusal(set, clear) {
   if (Object.keys(set).length === 0 && clear.length === 0)
@@ -2646,7 +2651,7 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_lead_settings",
-    description: `This project's thread settings, under the name they had before: what the project sets for its threads, and what they run under. Call it before update_lead_settings, and for how a thread is prompted. read_docs's page "A project's thread settings" says what each field is. \`overrides\` is what the project sets, a field it leaves out taking the default; \`effective\` is its North Star and the standing rules its threads run under; \`revision\` is what update_lead_settings is written against. Reading and writing both need \`manageSelector\` in read_abilities, and without it the route answers 404. Settings larger than one answer are read by \`path\`, keys walking into the settings: ${chuggyPathReadDescription} With no \`path\`, the settings are answered whole where they fit and otherwise as their outline. A \`path\` the settings do not hold is refused, naming the keys where it stopped.`,
+    description: `This project's thread settings, under the name they had before: what the project sets for its threads, and what they run under. Call it before update_lead_settings, and for how a thread is prompted. read_docs's page "A project's thread settings" says what each field is. \`overrides\` is what the project sets of ${updateLeadSettingsFieldsText}, a field it leaves out taking the default; \`effective\` is its North Star and the standing rules its threads run under; \`revision\` is what update_lead_settings is written against. Reading and writing both need \`manageSelector\` in read_abilities, and without it the route answers 404. Settings larger than one answer are read by \`path\`, keys walking into the settings: ${chuggyPathReadDescription} With no \`path\`, the settings are answered whole where they fit and otherwise as their outline. A \`path\` the settings do not hold is refused, naming the keys where it stopped.`,
     shape: (z) =>
       pathArguments(
         z,
@@ -2663,7 +2668,7 @@ export const chuggyProjectTools = [
   },
   {
     name: "update_lead_settings",
-    description: `Changes this project's thread settings, under the name they had before, on your owner's word only. Call it after read_lead_settings, whose \`revision\` it is written against. It reads the settings and writes the whole override set back with \`set\` applied and \`clear\` dropped, so a field named in neither keeps what the settings hold, and a long text is never sent again. A write needs \`manageSelector\` in read_abilities, and without it the route answers 404. A write is answered as its status and the \`revision\` the settings are now at; 409 with the \`code\` SettingsRevisionConflict is settings that moved since they were read, and is never asked again, so read them and decide again. Every other answer is the API's, its status and body unaltered: 503 SettingsWriteContended, which may be sent again, 404, and a body larger than the API takes.`,
+    description: `Changes this project's thread settings, under the name they had before, on your owner's word only. Call it after read_lead_settings, whose \`revision\` it is written against, and see read_docs's page "A project's thread settings" for what each field is. The fields it sets or clears are ${updateLeadSettingsFieldsText}. It reads the settings and writes the whole override set back with \`set\` applied and \`clear\` dropped, so a field named in neither keeps what the settings hold, and a long text is never sent again. A write needs \`manageSelector\` in read_abilities, and without it the route answers 404. A write is answered as its status and the \`revision\` the settings are now at; 409 with the \`code\` SettingsRevisionConflict is settings that moved since they were read, and is never asked again, so read them and decide again. Every other answer is the API's, its status and body unaltered: 503 SettingsWriteContended, which may be sent again, 404, and a body larger than the API takes.`,
     shape: (z) => ({
       expectedRevision: count(z).describe(
         "The settings' `revision`, as read_lead_settings answers it.",

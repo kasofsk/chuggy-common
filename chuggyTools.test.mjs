@@ -5381,6 +5381,20 @@ test("read_lead_settings answers the heaviest settings in pieces that fit, which
   assert.ok(api.calls.every(({ method }) => method === "GET"));
 });
 
+test("read_lead_settings and update_lead_settings each name every override field the contract admits, and the page that says what each is", () => {
+  for (const tool of ["read_lead_settings", "update_lead_settings"]) {
+    const { description } = chuggyProjectTools.find(
+      ({ name }) => name === tool,
+    );
+    assert.match(
+      description,
+      /read_docs's page "A project's thread settings"/u,
+    );
+    for (const field of Object.keys(selectorProjectOverridesSchema.shape))
+      assert.ok(description.includes(`\`${field}\``), `${tool} omits ${field}`);
+  }
+});
+
 test("read_lead_settings answers settings that fit as the route answered them, and a refusal unaltered", async () => {
   const body = JSON.stringify(threadSettingsRead());
   const fits = toolsOf({}, () => ({ status: 200, body }));

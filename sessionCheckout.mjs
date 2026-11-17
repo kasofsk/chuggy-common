@@ -36,10 +36,11 @@
  * placement; whichever URL arrives is resolved here against the same map, under
  * the same rules, with its own credential.
  *
- * A SESSION WRITES TO THE CHECKOUT ONLY UNDER `RepositoryWrite`, AND THAT IS A
- * POD-SIDE CONTROL. A roster without it has `./chuggyTools.mjs` put `Write`,
- * `Edit` and `NotebookEdit` in `disallowedTools` — which the runtime inside the
- * pod is what reads. The filesystem grants the pod write on its own workspace,
+ * A ROSTER WITHOUT `RepositoryWrite` KEEPS ONLY THE FILE-WRITING BUILT-INS OFF
+ * THE CHECKOUT, AND THAT IS A POD-SIDE CONTROL. `./chuggyTools.mjs` puts
+ * `Write`, `Edit` and `NotebookEdit` in `disallowedTools` — which the runtime
+ * inside the pod is what reads — while a roster holding `RunCommands` writes to
+ * the checkout through its shell, whose working directory it is. The filesystem grants the pod write on its own workspace,
  * so this is a roster the controlled thing enforces and not a permission; the
  * ceiling that is not the pod's is the session's membership at the API.
  */
