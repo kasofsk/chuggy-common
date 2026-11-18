@@ -17,8 +17,10 @@ import { fileURLToPath, URL, URLSearchParams } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  signInStoreAccessName,
   signInStoreDirectory,
   signInStoreDraftName,
+  signInStoreEndedName,
   signInStoreFileName,
   signInStoreLockFree,
   signInStoreLockName,
@@ -182,8 +184,50 @@ test("an earlier copy's file that is the store's own file is left where it is", 
   assert.equal(await readFile(formerly, "utf8"), "renewal-earlier\n");
 });
 
-/** A site and issuer over HTTP whose token endpoint refuses a renewal token spent before. */
-async function issuerOf(t) {
+test("an access record is kept beside the renewal token, the person's alone, and read only for the renewal token it was written with", async (t) => {
+  const directory = await directoryOf(t);
+  const store = localTokenStore({ directory, origin });
+  assert.equal(await store.accessRead("renewal-one"), undefined);
+  const access = { accessToken: "access-one", expiresAtMs: 1_234 };
+  await store.locked(() => store.accessWrite(access, "renewal-one"));
+  assert.deepEqual(await store.accessRead("renewal-one"), access);
+  assert.equal(await store.accessRead("renewal-two"), undefined);
+  const file = join(directory, signInStoreAccessName(origin));
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  assert.ok(!(await readFile(file, "utf8")).includes("renewal-one"));
+  await store.locked(() =>
+    store.accessWrite(
+      { accessToken: "two words", expiresAtMs: 1 },
+      "renewal-one",
+    ),
+  );
+  assert.equal(await store.accessRead("renewal-one"), undefined);
+  await store.locked(() => store.accessWrite(access, "renewal-one"));
+  await store.accessClear();
+  assert.equal(await store.accessRead("renewal-one"), undefined);
+});
+
+test("an ended record is kept beside the renewal token, the person's alone, and one not written as the contract does is none", async (t) => {
+  const directory = await directoryOf(t);
+  const store = localTokenStore({ directory, origin });
+  assert.equal(await store.endedRead(), undefined);
+  const ended = {
+    endedAtMs: 1_234,
+    error: "invalid_grant",
+    errorDescription: "The refresh token was already used.",
+  };
+  await store.locked(() => store.endedWrite(ended));
+  assert.deepEqual(await store.endedRead(), ended);
+  const file = join(directory, signInStoreEndedName(origin));
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  await writeFile(file, "{}\n");
+  assert.equal(await store.endedRead(), undefined);
+  await store.endedClear();
+  await assert.rejects(readFile(file), { code: "ENOENT" });
+});
+
+/** A site and issuer over HTTP whose token endpoint refuses a renewal token spent before, and issues access tokens lasting `expiresInSecs`. */
+async function issuerOf(t, expiresInSecs) {
   const spent = new Set();
   const outcome = { current: "renewal-0", granted: 0, replayed: [] };
   const server = createServer((request, response) => {
@@ -216,7 +260,7 @@ async function issuerOf(t) {
       return answer(200, {
         access_token: `access-${String(outcome.granted)}`,
         refresh_token: outcome.current,
-        expires_in: 0,
+        expires_in: expiresInSecs,
       });
     });
   });
@@ -225,27 +269,38 @@ async function issuerOf(t) {
   return { site: `http://127.0.0.1:${String(server.address().port)}`, outcome };
 }
 
-test("processes renewing one sign-in at once never spend the same token twice", async (t) => {
-  const { site, outcome } = await issuerOf(t);
+const fixture = fileURLToPath(
+  new URL("./localTokenStore.fixture.mjs", import.meta.url),
+);
+
+/** One fixture process asking `site` for a token `count` times. */
+function fixtureRun(site, directory, count) {
+  return promisify(execFile)(process.execPath, [
+    fixture,
+    site,
+    directory,
+    String(count),
+  ]);
+}
+
+async function storedOf(t, site) {
   const directory = await directoryOf(t);
   await mkdir(directory, { recursive: true });
   await writeFile(
     join(directory, signInStoreFileName(site)),
     signInStoreText("renewal-0"),
   );
+  return directory;
+}
+
+test("processes renewing one sign-in at once never spend the same token twice", async (t) => {
+  const { site, outcome } = await issuerOf(t, 0);
+  const directory = await storedOf(t, site);
   const processes = 4;
   const renewals = 5;
-  const fixture = fileURLToPath(
-    new URL("./localTokenStore.fixture.mjs", import.meta.url),
-  );
   await Promise.all(
     Array.from({ length: processes }, () =>
-      promisify(execFile)(process.execPath, [
-        fixture,
-        site,
-        directory,
-        String(renewals),
-      ]),
+      fixtureRun(site, directory, renewals),
     ),
   );
   assert.deepEqual(outcome.replayed, []);
@@ -254,4 +309,25 @@ test("processes renewing one sign-in at once never spend the same token twice", 
     await readFile(join(directory, signInStoreFileName(site)), "utf8"),
     signInStoreText(outcome.current),
   );
+});
+
+test("fresh processes one after another, or started together, spend one renewal in all while its access token lasts", async (t) => {
+  for (const together of [false, true]) {
+    const { site, outcome } = await issuerOf(t, 3_600);
+    const directory = await storedOf(t, site);
+    const processes = 4;
+    if (together)
+      await Promise.all(
+        Array.from({ length: processes }, () => fixtureRun(site, directory, 1)),
+      );
+    else
+      for (let started = 0; started < processes; started += 1)
+        await fixtureRun(site, directory, 1);
+    assert.deepEqual(outcome.replayed, []);
+    assert.equal(outcome.granted, 1);
+    assert.equal(
+      await localTokenStore({ directory, origin: site }).read(),
+      outcome.current,
+    );
+  }
 });

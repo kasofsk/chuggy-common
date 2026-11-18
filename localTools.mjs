@@ -16,8 +16,9 @@
  * is replaced with that.
  *
  * A 401 IS ASKED ONCE MORE. It says the token was what was wrong, and nothing
- * it answered was applied, so the held token is dropped and the call is made
- * again under a renewed one; a second 401 is relayed.
+ * it answered was applied, so the token is refused for good and the call is
+ * made again under another, which may be one another process renewed; a
+ * second 401 is relayed.
  *
  * THE INSTALL IS KEPT ON THE SITE'S PIN, once per start: once serving, the
  * server reads the release its site pins for its own package, with no
@@ -167,30 +168,46 @@ export function localToolServer(context, sdk) {
   return server;
 }
 
+/** The signals an MCP client ends a server with, each ending the serve as the end of its input does. */
+export const localToolEndSignals = ["SIGTERM", "SIGINT", "SIGHUP"];
+
 /**
  * Serves the tools on stdio until the transport closes, which the SDK's own
  * does on a read that fails and not on the end of its input, so the end of
- * `stdin` closes it too. `serving` starts once the server is connected, and
+ * `stdin`, or `ending` aborting, closes it too, and `told` is called the
+ * first time either does. `serving` starts once the server is connected, and
  * the serve ends once both have.
  *
  * @param {() => Promise<void>} [serving]
+ * @param {{ending?: AbortSignal, told?: () => void}} [end]
  */
 export async function localToolServe(
   context,
   sdk,
   stdin = process.stdin,
   serving = async () => {},
+  { ending, told = () => {} } = {},
 ) {
   const server = localToolServer(context, sdk);
   const closed = new Promise((resolve) => {
     server.server.onclose = resolve;
   });
   await server.connect(new sdk.StdioServerTransport());
-  const ended = () => void server.close();
+  let telling = told;
+  const ended = () => {
+    telling();
+    telling = () => {};
+    void server.close();
+  };
   stdin.once("end", ended);
   stdin.once("close", ended);
-  const [, served] = await Promise.allSettled([closed, serving()]);
-  if (served.status === "rejected") throw served.reason;
+  ending?.addEventListener("abort", ended, { once: true });
+  try {
+    const [, served] = await Promise.allSettled([closed, serving()]);
+    if (served.status === "rejected") throw served.reason;
+  } finally {
+    ending?.removeEventListener("abort", ended);
+  }
 }
 
 /** The bound the read of a site's pins is sent under. */
@@ -313,14 +330,20 @@ export function localToolSignInFile(directory, site) {
 /**
  * One project's tools served on stdio under the person's sign-in in the
  * contract's shared store, placed by `surroundings` or else by this process's
- * home and `XDG_CONFIG_HOME`, until the agent closes stdio and any update it
- * started has ended. A sign-in an earlier copy kept in `signIns` is moved into
+ * home and `XDG_CONFIG_HOME`, until the agent closes stdio or `signals` gets
+ * one of `localToolEndSignals`, and any update it started and any renewal it
+ * sent have ended. A sign-in an earlier copy kept in `signIns` is moved into
  * the store. The ask is `localToolAskRefusal`'s to check first; a `fetch` not
  * given is the global one, and `updates` not given installs nothing.
  *
  * @param {{site: string, workspace: string, project: string, version: string, signIns: string, surroundings?: import("@chuggy/worker-contract/signInStore").SignInStoreSurroundings, fetch?: typeof globalThis.fetch, updates?: LocalToolUpdates}} asked
  */
-export async function localToolServed(asked, sdk, stdin = process.stdin) {
+export async function localToolServed(
+  asked,
+  sdk,
+  stdin = process.stdin,
+  signals = process,
+) {
   const { site, workspace, project, version, signIns, fetch, updates } = asked;
   const surroundings = asked.surroundings ?? {
     home: homedir(),
@@ -335,6 +358,11 @@ export async function localToolServed(asked, sdk, stdin = process.stdin) {
     }),
     { fetch },
   );
+  // Held until the close settles: with no listener, a signal's default
+  // handling would end the process while a sent renewal is still unanswered.
+  const ending = new globalThis.AbortController();
+  const end = () => ending.abort();
+  for (const signal of localToolEndSignals) signals.on(signal, end);
   try {
     await localToolServe(
       localToolContext({ site, tenant: workspace, project, version, signIn }),
@@ -345,8 +373,13 @@ export async function localToolServed(asked, sdk, stdin = process.stdin) {
           fetch: fetch ?? globalThis.fetch,
           log: (line) => void process.stderr.write(`${line}\n`),
         }),
+      { ending: ending.signal, told: () => void signIn.close() },
     );
   } finally {
-    signIn.close();
+    try {
+      await signIn.close();
+    } finally {
+      for (const signal of localToolEndSignals) signals.off(signal, end);
+    }
   }
 }

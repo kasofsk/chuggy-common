@@ -16,4 +16,4 @@ const signIn = localSignIn(
 );
 for (let renewed = 0; renewed < Number(count); renewed += 1)
   await signIn.token();
-signIn.close();
+await signIn.close();

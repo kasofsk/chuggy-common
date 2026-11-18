@@ -24,9 +24,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, URL, URLSearchParams } from "node:url";
 
+import { localTokenStore } from "./localTokenStore.mjs";
 import {
   localToolAskRefusal,
   localToolContext,
+  localToolEndSignals,
   localToolInstructions,
   localToolRepeatDescription,
   localToolRequest,
@@ -62,7 +64,7 @@ function apiOf(statuses) {
   };
 }
 
-test("a call goes under the person's token, and a 401 is asked once more under a renewed one", async () => {
+test("a call goes under the person's token, and a 401 is asked once more under another", async () => {
   const signIn = signInOf(["first", "second", "third"]);
   const api = apiOf([401, 200]);
   const request = localToolRequest(signIn, api.request);
@@ -431,7 +433,12 @@ async function servedOf(t, asked, answered) {
     return answered(requested, init);
   });
   const stdin = new EventEmitter();
+  const signals = new EventEmitter();
   const handlers = new Map();
+  let closed;
+  const closing = new Promise((resolve) => {
+    closed = resolve;
+  });
   class McpServer {
     constructor() {
       this.server = {};
@@ -441,6 +448,7 @@ async function servedOf(t, asked, answered) {
     }
     async connect() {}
     async close() {
+      closed();
       this.server.onclose?.();
     }
   }
@@ -454,6 +462,7 @@ async function servedOf(t, asked, answered) {
     },
     { McpServer, StdioServerTransport: class {}, z },
     stdin,
+    signals,
   );
   await new Promise((resolve) => setImmediate(resolve));
   return {
@@ -462,6 +471,11 @@ async function servedOf(t, asked, answered) {
       stdin.emit("end");
       await served;
     },
+    served,
+    signals,
+    closing,
+    /** Ends the serve by the end of input or the signal `by`. */
+    endedBy: (by) => (by === "end" ? stdin.emit("end") : signals.emit(by, by)),
   };
 }
 
@@ -523,6 +537,99 @@ test("served, a sign-in kept in the contract's store is renewed with no sign-in 
     await assert.rejects(readFile(earlier), { code: "ENOENT" });
     await served.ended();
   }
+});
+
+/**
+ * The tools served over a store holding `renewal-0`, with a call's renewal of
+ * it sent and unanswered; `answer` answers it with `renewal-1`, and `stored`
+ * is what the store holds once the serve has ended.
+ */
+async function renewingOf(t) {
+  const home = await mkdtemp(join(tmpdir(), "local-tools-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const surroundings = { home, configHome: undefined };
+  const directory = signInStoreDirectory(surroundings);
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, signInStoreFileName("https://chuggy.test")),
+    signInStoreText("renewal-0"),
+  );
+  let sent;
+  const sending = new Promise((resolve) => {
+    sent = resolve;
+  });
+  let answered;
+  const served = await servedOf(
+    t,
+    { signIns: join(home, "earlier"), surroundings },
+    async (requested) => {
+      if (requested !== "https://auth.test/oauth2/token")
+        return globalThis.Response.json({ ticket: 7 });
+      sent();
+      return new Promise((resolve) => {
+        answered = resolve;
+      });
+    },
+  );
+  const store = localTokenStore({ directory, origin: "https://chuggy.test" });
+  const call = served.called("read_ticket", { ticket: 7 });
+  await sending;
+  let ended = false;
+  const stored = served.served.then(async () => {
+    ended = true;
+    return {
+      renewal: await store.read(),
+      access: await store.accessRead("renewal-1"),
+    };
+  });
+  return {
+    served,
+    call,
+    stored,
+    ended: () => ended,
+    answer: () =>
+      answered(
+        globalThis.Response.json({
+          access_token: "access-1",
+          refresh_token: "renewal-1",
+          expires_in: 3_600,
+        }),
+      ),
+  };
+}
+
+test("served, a renewal sent before the end of input or an ending signal is stored, token and access record, before the serve ends", async (t) => {
+  for (const by of ["end", ...localToolEndSignals]) {
+    const renewing = await renewingOf(t);
+    renewing.served.endedBy(by);
+    await renewing.served.closing;
+    renewing.answer();
+    const { renewal, access } = await renewing.stored;
+    assert.equal(renewal, "renewal-1", by);
+    assert.equal(access?.accessToken, "access-1", by);
+    await renewing.call;
+    for (const signal of localToolEndSignals)
+      assert.equal(renewing.served.signals.listenerCount(signal), 0);
+  }
+});
+
+test("served, an ending signal after the end of input, while a sent renewal is unanswered, is still held and the renewal stored", async (t) => {
+  const renewing = await renewingOf(t);
+  const { signals } = renewing.served;
+  renewing.served.endedBy("end");
+  await renewing.served.closing;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(renewing.ended(), false);
+  for (const signal of localToolEndSignals)
+    assert.ok(signals.listenerCount(signal) > 0, signal);
+  signals.emit("SIGTERM", "SIGTERM");
+  renewing.answer();
+  const { renewal, access } = await renewing.stored;
+  assert.equal(renewal, "renewal-1");
+  assert.equal(access?.accessToken, "access-1");
+  await renewing.call;
+  for (const signal of localToolEndSignals)
+    assert.equal(signals.listenerCount(signal), 0);
 });
 
 test("an ask names a site a credential may be sent to, and a workspace and project", () => {
