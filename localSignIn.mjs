@@ -20,14 +20,24 @@
  * is read, so nothing else that reaches the port can end it.
  *
  * A TOKEN IS NEVER IN AN ANSWER. Not in an error, not in a page, not in a
- * line written anywhere. A refusal from the issuer is said by its status.
+ * line written anywhere. A refusal from the issuer is said by the `error` and
+ * `error_description` it answered, as the contract's ended record fits them,
+ * and either is dropped where it holds the token presented or a long part of
+ * it.
  *
  * Renewals run under the store's lock, which every process on the machine
- * that renews the same sign-in takes, chuggy's setup program too. A renewal
- * the issuer refused, as the console reads a refusal, clears the store; any
- * other failure keeps it for the next call. A renewal whose answer is lost
- * after the issuer replaced the token leaves a spent one stored, and the next
- * renewal ends the sign-in: the console has the same exposure.
+ * that renews the same sign-in takes, chuggy's setup program too. In that hold
+ * a process first takes the access token the store keeps for the renewal
+ * token it holds, while that is fresh and the API has not refused it, so a
+ * machine renews once per access token's life. A renewal the issuer refused,
+ * as the console reads a refusal, ends the sign-in: the process says when and
+ * why on stderr, and the store keeps that in place of both tokens until a
+ * sign-in. Any other failure keeps the store for the next call. A renewal
+ * whose answer is lost after the issuer replaced the token still leaves a
+ * spent one stored, and the next renewal ends the sign-in, so a renewal sent
+ * before the server is told to end finishes before it ends, and one not yet
+ * sent is not started (https://www.ory.com/docs/hydra/debug, "Refresh Token
+ * flow fails").
  */
 
 import { Buffer } from "node:buffer";
@@ -35,6 +45,11 @@ import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { clearTimeout, setTimeout } from "node:timers";
 import { URL, URLSearchParams } from "node:url";
+
+import {
+  signInStoreEndedRead,
+  signInStoreEndedText,
+} from "@chuggy/worker-contract/signInStore";
 
 import { chuggyBoundedBody } from "./chuggyApi.mjs";
 
@@ -55,6 +70,20 @@ export const localSignInRefreshMarginMs = 60_000;
 /** The most one answer from the site's configuration or the issuer is read to. */
 export const localSignInAnswerBytesMax = 65_536;
 
+/** How long a server told to end waits for the renewal it sent: the request is cut off at `localSignInFetchTimeoutMs`, and its writes have as long again. */
+export const localSignInEndingMsMax = 2 * localSignInFetchTimeoutMs;
+
+/** The most tokens the API refused a process remembers, the oldest forgotten first: each is one a call was answered with and then refused. */
+export const localSignInRefusedTokensMax = 32;
+
+/**
+ * The shortest `.`-separated part of a presented token whose presence in the
+ * issuer's words drops them. A part this long is random text no issuer words
+ * by chance; a shorter one can be an ordinary word, which would drop a reason
+ * holding no token.
+ */
+export const localSignInTokenPartCharsMin = 16;
+
 const localSignInConfigurationPath = "/config.json";
 const localSignInDiscoveryPath = "/.well-known/openid-configuration";
 const localSignInVerifierBytes = 32;
@@ -62,11 +91,22 @@ const localSignInStateBytes = 16;
 /** The statuses a token request is refused with, as the console's session holder reads them. */
 const localSignInRefusalStatuses = new Set([400, 401]);
 
-/** What a call is answered with where the person must sign in first. */
+/** When the issuer ended a sign-in, and why where it said. */
+function localSignInEndedSaid(ended) {
+  const at = new Date(ended.endedAtMs).toISOString();
+  const words = [ended.error, ended.errorDescription]
+    .filter((word) => word !== undefined && word !== "")
+    .join(": ");
+  return words === ""
+    ? `at ${at} and gave no reason`
+    : `at ${at} and said why: "${words}"`;
+}
+
+/** What a call is answered with where the person must sign in first, and when and why the issuer ended the sign-in where `ended` says. */
 export class LocalSignInNeeded extends Error {
-  constructor(site, url) {
+  constructor(site, url, ended = undefined) {
     super(
-      `not signed in to ${site}: this call needs the person signed in, so give them this address, in full, in your next message, whatever else you are doing: ${url} Call the tool again once they say they have signed in. The page closes once it is answered or after a while unanswered, and a later call opens another.`,
+      `not signed in to ${site}: this call needs the person signed in, so give them this address, in full, in your next message, whatever else you are doing: ${url} Call the tool again once they say they have signed in. The page closes once it is answered or after a while unanswered, and a later call opens another.${ended === undefined ? "" : ` The issuer ended this sign-in ${localSignInEndedSaid(ended)}.`}`,
     );
     this.name = "LocalSignInNeeded";
     this.url = url;
@@ -77,13 +117,21 @@ function localSignInBase64url(bytes) {
   return Buffer.from(bytes).toString("base64url");
 }
 
-async function localSignInFetch(ports, url, init = {}) {
-  const response = await ports.fetch(url, {
+function localSignInAsked(ports, url, init = {}) {
+  return ports.fetch(url, {
     ...init,
     redirect: "manual",
     signal: globalThis.AbortSignal.timeout(localSignInFetchTimeoutMs),
     headers: { accept: "application/json", ...init.headers },
   });
+}
+
+async function localSignInFetch(ports, url, init = {}) {
+  return localSignInRead(url, await localSignInAsked(ports, url, init));
+}
+
+/** The status `url` answered, and its body where that is a 200. */
+async function localSignInRead(url, response) {
   const { text, cut } = await chuggyBoundedBody(
     response,
     localSignInAnswerBytesMax,
@@ -152,9 +200,31 @@ async function localSignInIssuer(ports, site) {
   };
 }
 
-/** One token request: the tokens issued, or `undefined` where the issuer refused the grant. */
+/**
+ * The `error` and `error_description` of a refusal's body, each where it is a
+ * string. Nothing here throws: a body that is missing, cut short, past
+ * `localSignInAnswerBytesMax` or not JSON gives no reason.
+ */
+async function localSignInRefusalRead(response) {
+  try {
+    const { text, cut } = await chuggyBoundedBody(
+      response,
+      localSignInAnswerBytesMax,
+    );
+    const body = cut ? undefined : JSON.parse(text);
+    const word = (value) => (typeof value === "string" ? value : undefined);
+    return {
+      error: word(body?.error),
+      errorDescription: word(body?.error_description),
+    };
+  } catch {
+    return {};
+  }
+}
+
+/** One token request: `issued`, the tokens issued, or `refused`, what the issuer said refusing the grant. */
 async function localSignInGrant(ports, issuer, fields) {
-  const answer = await localSignInFetch(ports, issuer.token, {
+  const response = await localSignInAsked(ports, issuer.token, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -162,7 +232,9 @@ async function localSignInGrant(ports, issuer, fields) {
       client_id: localSignInClientId,
     }).toString(),
   });
-  if (localSignInRefusalStatuses.has(answer.status)) return undefined;
+  if (localSignInRefusalStatuses.has(response.status))
+    return { refused: await localSignInRefusalRead(response) };
+  const answer = await localSignInRead(issuer.token, response);
   if (answer.status !== 200)
     throw new Error(
       `the sign-in server answered ${String(answer.status)} for a token`,
@@ -170,15 +242,89 @@ async function localSignInGrant(ports, issuer, fields) {
   const renewal = answer.body?.refresh_token;
   const expiresInSecs = answer.body?.expires_in;
   return {
-    access: localSignInText(answer.body?.access_token, "the access token"),
-    renewal:
-      typeof renewal === "string" && renewal.length > 0 ? renewal : undefined,
-    expiresAtMs:
-      ports.nowMs() +
-      (Number.isInteger(expiresInSecs) && expiresInSecs > 0
-        ? expiresInSecs * 1_000
-        : 0),
+    issued: {
+      access: localSignInText(answer.body?.access_token, "the access token"),
+      renewal:
+        typeof renewal === "string" && renewal.length > 0 ? renewal : undefined,
+      expiresAtMs:
+        ports.nowMs() +
+        (Number.isInteger(expiresInSecs) && expiresInSecs > 0
+          ? expiresInSecs * 1_000
+          : 0),
+    },
   };
+}
+
+/** Whether `text` holds `token`, or one of its `.`-separated parts of at least `localSignInTokenPartCharsMin`. */
+function localSignInHoldsToken(text, token) {
+  return (
+    text.includes(token) ||
+    token
+      .split(".")
+      .some(
+        (part) =>
+          part.length >= localSignInTokenPartCharsMin && text.includes(part),
+      )
+  );
+}
+
+/**
+ * The ended record of a refusal of `presented` at `endedAtMs`, its words
+ * fitted as the contract's record keeps them, and each dropped where it held
+ * the token before or after fitting.
+ */
+function localSignInEndedFitted(endedAtMs, refused, presented) {
+  const fitted = signInStoreEndedRead(
+    signInStoreEndedText({
+      endedAtMs,
+      error: refused.error ?? "",
+      errorDescription: refused.errorDescription,
+    }),
+  );
+  const kept = (raw, word) =>
+    word === undefined ||
+    localSignInHoldsToken(raw ?? "", presented) ||
+    localSignInHoldsToken(word, presented)
+      ? undefined
+      : word;
+  const errorDescription = kept(
+    refused.errorDescription,
+    fitted.errorDescription,
+  );
+  return {
+    endedAtMs,
+    error: kept(refused.error, fitted.error) ?? "",
+    ...(errorDescription === undefined ? {} : { errorDescription }),
+  };
+}
+
+/** The sign-in ended where the issuer refused `presented`: said on stderr, then kept in the store in place of both tokens. */
+async function localSignInEnded(signIn, store, presented, refused) {
+  const ended = localSignInEndedFitted(
+    signIn.ports.nowMs(),
+    refused,
+    presented,
+  );
+  signIn.ports.log(
+    `the issuer ended the sign-in to ${signIn.site} ${localSignInEndedSaid(ended)}`,
+  );
+  await store.endedWrite(ended);
+  await store.clear();
+  await store.accessClear();
+  return ended;
+}
+
+/** What the issuer issued kept in the store: the renewal token, then the access token bound to it, then no ended record. */
+async function localSignInKept(store, issued, presented) {
+  const renewal = issued.renewal ?? presented;
+  if (issued.renewal !== undefined) await store.write(issued.renewal);
+  if (renewal !== undefined)
+    await store.accessWrite(
+      { accessToken: issued.access, expiresAtMs: issued.expiresAtMs },
+      renewal,
+    );
+  await store.endedClear();
+  return { access: issued.access, expiresAtMs: issued.expiresAtMs };
 }
 
 function localSignInPage(response, status, text) {
@@ -278,16 +424,18 @@ async function localSignInPageOpened(signIn, issuer) {
 }
 
 /**
- * The sign-in to `site`, its renewal token kept in `store`
- * (`./localTokenStore.mjs`). `token` answers an access token or raises
- * `LocalSignInNeeded`; `invalidate` drops one the API refused; `close` ends a
- * page still open.
+ * The sign-in to `site`, kept in `store` (`./localTokenStore.mjs`). `token`
+ * answers an access token or raises `LocalSignInNeeded`; `invalidate` refuses
+ * one the API refused, for good; `close` ends a page still open, starts no
+ * renewal after, and resolves once one already sent has finished, or
+ * `localSignInEndingMsMax` has passed. `log` says a line on stderr.
  */
 export function localSignIn(site, store, overrides = {}) {
   const ports = {
     fetch: globalThis.fetch,
     nowMs: Date.now,
     randomBytes,
+    log: (line) => void process.stderr.write(`${line}\n`),
     ...Object.fromEntries(
       Object.entries(overrides).filter(([, port]) => port !== undefined),
     ),
@@ -299,20 +447,63 @@ export function localSignIn(site, store, overrides = {}) {
 /** One renewal under the store's lock, or the sign-in page where there is nothing to renew. */
 async function localSignInRenewed(signIn, store) {
   const issuer = await signIn.issuer();
-  const issued = await store.locked(async () => {
-    const renewal = await store.read();
-    if (renewal === undefined) return undefined;
-    const granted = await localSignInGrant(signIn.ports, issuer, {
-      grant_type: "refresh_token",
-      refresh_token: renewal,
-    });
-    if (granted === undefined) await store.clear();
-    else if (granted.renewal !== undefined) await store.write(granted.renewal);
-    return granted;
-  });
-  if (issued !== undefined) return issued;
+  const held = await store.locked(() => localSignInHeld(signIn, store, issuer));
+  if (held.issued !== undefined) return held.issued;
   signIn.page ??= await localSignInPageOpened(signIn, issuer);
-  throw new LocalSignInNeeded(signIn.site, signIn.page.url);
+  throw new LocalSignInNeeded(signIn.site, signIn.page.url, held.ended);
+}
+
+/**
+ * In the store's one hold: the access token it keeps for its renewal token
+ * where that is usable, else a renewal, else the ended record where there is
+ * nothing to renew. A server told to end sends no renewal.
+ */
+async function localSignInHeld(signIn, store, issuer) {
+  const renewal = await store.read();
+  if (renewal === undefined) return { ended: await store.endedRead() };
+  const kept = await store.accessRead(renewal);
+  if (kept !== undefined && signIn.usable(kept.accessToken, kept.expiresAtMs))
+    return {
+      issued: { access: kept.accessToken, expiresAtMs: kept.expiresAtMs },
+    };
+  if (signIn.ending)
+    throw new Error(
+      `this server is ending, so it starts no renewal of the sign-in to ${signIn.site}`,
+    );
+  signIn.sending = localSignInSent(signIn, store, issuer, renewal);
+  try {
+    return await signIn.sending;
+  } finally {
+    signIn.sending = undefined;
+  }
+}
+
+/** One renewal of `renewal`, sent and its outcome kept. */
+async function localSignInSent(signIn, store, issuer, renewal) {
+  const granted = await localSignInGrant(signIn.ports, issuer, {
+    grant_type: "refresh_token",
+    refresh_token: renewal,
+  });
+  if (granted.refused !== undefined)
+    return {
+      ended: await localSignInEnded(signIn, store, renewal, granted.refused),
+    };
+  return { issued: await localSignInKept(store, granted.issued, renewal) };
+}
+
+/** Waits for `sending` to settle, at most `localSignInEndingMsMax`. */
+async function localSignInSettled(sending) {
+  let timer;
+  await Promise.race([
+    sending.then(
+      () => undefined,
+      () => undefined,
+    ),
+    new Promise((resolve) => {
+      timer = setTimeout(resolve, localSignInEndingMsMax);
+    }),
+  ]);
+  clearTimeout(timer);
 }
 
 function localSignInHolder(site, store, ports) {
@@ -322,7 +513,16 @@ function localSignInHolder(site, store, ports) {
     known: undefined,
     held: undefined,
     renewing: undefined,
+    sending: undefined,
+    ending: false,
+    refused: new Set(),
     page: undefined,
+    usable(access, expiresAtMs) {
+      return (
+        expiresAtMs - localSignInRefreshMarginMs > ports.nowMs() &&
+        !signIn.refused.has(access)
+      );
+    },
     async issuer() {
       signIn.known ??= await localSignInIssuer(ports, site);
       return signIn.known;
@@ -336,26 +536,28 @@ function localSignInHolder(site, store, ports) {
       if (signIn.page === ended) signIn.page = undefined;
     },
     async pageAnswered(answered, code) {
-      const issued = await localSignInGrant(ports, answered.issuer, {
+      const granted = await localSignInGrant(ports, answered.issuer, {
         grant_type: "authorization_code",
         code,
         redirect_uri: answered.redirect,
         code_verifier: answered.verifier,
       });
-      if (issued === undefined)
+      if (granted.refused !== undefined)
         throw new Error("the sign-in server refused the code");
-      if (issued.renewal !== undefined)
-        await store.locked(() => store.write(issued.renewal));
-      signIn.held = issued;
+      signIn.held = await store.locked(() =>
+        localSignInKept(store, granted.issued, undefined),
+      );
     },
   };
+  return localSignInAnswering(signIn, store);
+}
+
+/** What `localSignIn` answers for `signIn`. */
+function localSignInAnswering(signIn, store) {
   return {
     async token() {
       const held = signIn.held;
-      if (
-        held !== undefined &&
-        held.expiresAtMs - localSignInRefreshMarginMs > ports.nowMs()
-      )
+      if (held !== undefined && signIn.usable(held.access, held.expiresAtMs))
         return held.access;
       signIn.renewing ??= localSignInRenewed(signIn, store).finally(() => {
         signIn.renewing = undefined;
@@ -364,10 +566,17 @@ function localSignInHolder(site, store, ports) {
       return signIn.held.access;
     },
     invalidate(refused) {
+      signIn.refused.delete(refused);
+      signIn.refused.add(refused);
+      if (signIn.refused.size > localSignInRefusedTokensMax)
+        signIn.refused.delete(signIn.refused.values().next().value);
       if (signIn.held?.access === refused) signIn.held = undefined;
     },
-    close() {
+    async close() {
+      signIn.ending = true;
       if (signIn.page !== undefined) signIn.pageEnded(signIn.page);
+      if (signIn.sending !== undefined)
+        await localSignInSettled(signIn.sending);
     },
   };
 }

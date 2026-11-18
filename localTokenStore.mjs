@@ -1,8 +1,10 @@
 /**
- * A person's renewal token for one site, kept in the worker contract's shared
- * sign-in store (`@chuggy/worker-contract/signInStore`), and the store's lock
- * every renewal is made under. chuggy's setup program keeps the same sign-in
- * there, as the same client, so either signs the other in.
+ * A person's sign-in to one site, kept in the worker contract's shared sign-in
+ * store (`@chuggy/worker-contract/signInStore`): the renewal token, the access
+ * record binding the newest access token to it, and the ended record saying
+ * when and why the issuer ended the sign-in; and the store's lock every
+ * renewal is made under. chuggy's setup program keeps the same sign-in there,
+ * as the same client, so either signs the other in.
  *
  * THE RENEWAL TOKEN IS SPENT BY THE REQUEST THAT USES IT, and the issuer ends
  * the whole sign-in when shown a spent one. Every chat on the machine runs a
@@ -31,12 +33,20 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 
 import {
+  signInStoreAccessDigest,
+  signInStoreAccessName,
+  signInStoreAccessRead,
+  signInStoreAccessText,
   signInStoreDraftName,
   signInStoreDraftOf,
+  signInStoreEndedName,
+  signInStoreEndedRead,
+  signInStoreEndedText,
   signInStoreFileName,
   signInStoreLockFree,
   signInStoreLockHolder,
@@ -141,11 +151,71 @@ async function localTokenStoreSwept(directory) {
       await rm(join(directory, name), { force: true });
 }
 
+/** `text` written whole as `name` in the store: under the process's draft, renamed over it. */
+async function localTokenStoreWritten(directory, name, text, pid) {
+  const draft = join(directory, signInStoreDraftName(name, pid));
+  await rm(draft, { force: true });
+  await writeFile(draft, text, { flag: "wx", mode: localTokenStoreFileMode });
+  await rename(draft, join(directory, name));
+}
+
+/** The digest an access record binds `renewal` by. */
+function localTokenStoreDigest(renewal) {
+  return createHash(signInStoreAccessDigest)
+    .update(renewal, "utf8")
+    .digest("hex");
+}
+
+/** The access and ended records' methods of `localTokenStore`, each record written through `written`. */
+function localTokenStoreRecords(directory, origin, written) {
+  const accessPath = join(directory, signInStoreAccessName(origin));
+  const endedPath = join(directory, signInStoreEndedName(origin));
+  return {
+    async accessRead(renewal) {
+      const text = await localTokenStoreText(accessPath);
+      return text === undefined
+        ? undefined
+        : signInStoreAccessRead(text, localTokenStoreDigest(renewal));
+    },
+    /** An access token the record cannot hold is not kept, and the record naming an older one is removed. */
+    async accessWrite({ accessToken, expiresAtMs }, renewal) {
+      let text;
+      try {
+        text = signInStoreAccessText({
+          accessToken,
+          expiresAtMs: Math.floor(expiresAtMs),
+          renewalDigest: localTokenStoreDigest(renewal),
+        });
+      } catch {
+        await rm(accessPath, { force: true });
+        return;
+      }
+      await written(signInStoreAccessName(origin), text);
+    },
+    async accessClear() {
+      await rm(accessPath, { force: true });
+    },
+    async endedRead() {
+      const text = await localTokenStoreText(endedPath);
+      return text === undefined ? undefined : signInStoreEndedRead(text);
+    },
+    endedWrite: (ended) =>
+      written(signInStoreEndedName(origin), signInStoreEndedText(ended)),
+    async endedClear() {
+      await rm(endedPath, { force: true });
+    },
+  };
+}
+
 /**
- * The renewal token for `origin` in the store at `directory`. `read` answers
- * it or nothing, `write` replaces it, `clear` forgets it, and `locked` runs one
- * renewal under the store's lock. `formerly` is the file an earlier copy kept
- * the token in, moved in by the first hold.
+ * The sign-in to `origin` in the store at `directory`. `read` answers the
+ * renewal token or nothing, `write` replaces it, `clear` forgets it.
+ * `accessRead` answers the access record's token and expiry where it names
+ * the renewal token given, `accessWrite` binds one to a renewal token, and
+ * `accessClear` forgets it; `endedRead`, `endedWrite` and `endedClear` do the
+ * same for the ended record. `locked` runs one renewal under the store's lock.
+ * `formerly` is the file an earlier copy kept the token in, moved in by the
+ * first hold.
  *
  * @param {{directory: string, origin: string, formerly?: string}} place
  */
@@ -163,23 +233,18 @@ export function localTokenStore(
   const name = signInStoreFileName(origin);
   const path = join(directory, name);
   const lock = join(directory, signInStoreLockName);
+  const written = (named, text) =>
+    localTokenStoreWritten(directory, named, text, ports.pid);
   const store = {
     async read() {
       const text = await localTokenStoreText(path);
       return text === undefined ? undefined : signInStoreTokenRead(text);
     },
-    async write(token) {
-      const draft = join(directory, signInStoreDraftName(name, ports.pid));
-      await rm(draft, { force: true });
-      await writeFile(draft, signInStoreText(token), {
-        flag: "wx",
-        mode: localTokenStoreFileMode,
-      });
-      await rename(draft, path);
-    },
+    write: (token) => written(name, signInStoreText(token)),
     async clear() {
       await rm(path, { force: true });
     },
+    ...localTokenStoreRecords(directory, origin, written),
     async locked(renewal) {
       await mkdir(directory, {
         recursive: true,

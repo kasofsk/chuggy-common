@@ -1,22 +1,32 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { setTimeout } from "node:timers";
+import { setImmediate, setTimeout } from "node:timers";
 import { URL, URLSearchParams } from "node:url";
 
 import {
   LocalSignInNeeded,
   localSignIn,
+  localSignInAnswerBytesMax,
   localSignInClientId,
   localSignInRefreshMarginMs,
+  localSignInRefusedTokensMax,
+  localSignInTokenPartCharsMin,
 } from "./localSignIn.mjs";
 
 const site = "https://chuggy.test";
 const issuer = "https://auth.test";
 const audience = "https://chuggy.test/api";
 
+/** A store as `localTokenStore` keeps one; `gate`, where set, is waited on before each hold runs. */
 function storeOf(renewal) {
-  const store = { renewal, locks: 0 };
+  const store = {
+    renewal,
+    access: undefined,
+    ended: undefined,
+    locks: 0,
+    gate: undefined,
+  };
   return Object.assign(store, {
     read: async () => store.renewal,
     write: async (token) => {
@@ -25,8 +35,29 @@ function storeOf(renewal) {
     clear: async () => {
       store.renewal = undefined;
     },
+    accessRead: async (named) =>
+      store.access !== undefined && store.access.renewal === named
+        ? {
+            accessToken: store.access.accessToken,
+            expiresAtMs: store.access.expiresAtMs,
+          }
+        : undefined,
+    accessWrite: async ({ accessToken, expiresAtMs }, named) => {
+      store.access = { accessToken, expiresAtMs, renewal: named };
+    },
+    accessClear: async () => {
+      store.access = undefined;
+    },
+    endedRead: async () => store.ended,
+    endedWrite: async (ended) => {
+      store.ended = ended;
+    },
+    endedClear: async () => {
+      store.ended = undefined;
+    },
     locked: async (renewalRun) => {
       store.locks += 1;
+      await store.gate?.();
       return renewalRun();
     },
   });
@@ -52,8 +83,12 @@ function serversOf(grant) {
     if (asked === `${issuer}/oauth2/token` && init?.method === "POST") {
       const fields = Object.fromEntries(new URLSearchParams(init.body));
       grants.push(fields);
-      const { status = 200, body } = await grant(fields, grants.length);
-      return globalThis.Response.json(body ?? {}, { status });
+      const {
+        status = 200,
+        body,
+        response,
+      } = await grant(fields, grants.length);
+      return response ?? globalThis.Response.json(body ?? {}, { status });
     }
     return new globalThis.Response("", { status: 404 });
   };
@@ -248,7 +283,7 @@ test("a renewal the issuer refuses is forgotten, and the call is asked to sign i
     body: { error: "invalid_grant" },
   }));
   const store = storeOf("renewal-spent");
-  const signIn = localSignIn(site, store, { fetch });
+  const signIn = localSignIn(site, store, { fetch, log: () => {} });
   t.after(() => signIn.close());
   await signInNeeded(signIn);
   assert.equal(store.renewal, undefined);
@@ -264,5 +299,322 @@ test("an issuer that fails or limits renewals keeps the stored renewal and says 
       new RegExp(`answered ${String(status)} for a token`, "u"),
     );
     assert.equal(store.renewal, "renewal-0");
+    assert.equal(store.ended, undefined);
   }
+});
+
+test("a renewal cut off by its bound or a network fault keeps the stored renewal and ends nothing", async () => {
+  for (const fault of [
+    new globalThis.DOMException("timed out", "TimeoutError"),
+    new TypeError("fetch failed"),
+  ]) {
+    const { fetch } = serversOf(() => {
+      throw fault;
+    });
+    const store = storeOf("renewal-0");
+    const lines = [];
+    const signIn = localSignIn(site, store, {
+      fetch,
+      log: (line) => lines.push(line),
+    });
+    await assert.rejects(signIn.token(), fault);
+    assert.equal(store.renewal, "renewal-0");
+    assert.equal(store.ended, undefined);
+    assert.deepEqual(lines, []);
+  }
+});
+
+const localSignInNeededText =
+  /^not signed in to https:\/\/chuggy\.test: this call needs the person signed in, so give them this address, in full, in your next message, whatever else you are doing: https:\/\/auth\.test\/oauth2\/auth\?\S+ Call the tool again once they say they have signed in\. The page closes once it is answered or after a while unanswered, and a later call opens another\./u;
+
+/** Hydra v26.2.0's answer to a renewal token used before, its hint folded into the description. */
+const hydraReplayed = {
+  status: 400,
+  body: {
+    error: "invalid_grant",
+    error_description:
+      "The provided authorization grant (e.g., authorization code, resource owner credentials) or refresh token is invalid, expired, revoked, does not match the redirection URI used in the authorization request, or was issued to another client. The refresh token was already used.",
+  },
+};
+
+const spentToken = `ory_rt_${"A".repeat(43)}.${"B".repeat(43)}`;
+
+test("a refused renewal says when and why once on stderr, keeps that in place of both tokens, and every later call is told it", async (t) => {
+  const nowMs = Date.UTC(2026, 10, 18, 9, 30);
+  const at = new Date(nowMs).toISOString();
+  const { fetch, grants } = serversOf(() => hydraReplayed);
+  const store = storeOf(spentToken);
+  store.access = {
+    accessToken: "access-0",
+    expiresAtMs: 0,
+    renewal: spentToken,
+  };
+  const lines = [];
+  const ports = { fetch, nowMs: () => nowMs, log: (line) => lines.push(line) };
+  const signIn = localSignIn(site, store, ports);
+  t.after(() => signIn.close());
+
+  const why = `The issuer ended this sign-in at ${at} and said why: "invalid_grant: ${hydraReplayed.body.error_description}".`;
+  const needed = await signInNeeded(signIn);
+  assert.match(needed.message, localSignInNeededText);
+  assert.ok(needed.message.endsWith(` ${why}`), needed.message);
+  assert.deepEqual(lines, [
+    `the issuer ended the sign-in to ${site} at ${at} and said why: "invalid_grant: ${hydraReplayed.body.error_description}"`,
+  ]);
+  assert.deepEqual(store.ended, {
+    endedAtMs: nowMs,
+    error: "invalid_grant",
+    errorDescription: hydraReplayed.body.error_description,
+  });
+  assert.equal(store.renewal, undefined);
+  assert.equal(store.access, undefined);
+
+  const later = localSignIn(site, store, ports);
+  t.after(() => later.close());
+  const told = await signInNeeded(later);
+  assert.match(told.message, localSignInNeededText);
+  assert.ok(told.message.endsWith(` ${why}`), told.message);
+  assert.equal(lines.length, 1);
+  assert.equal(grants.length, 1);
+  for (const said of [
+    ...lines,
+    JSON.stringify(store.ended),
+    needed.message,
+    told.message,
+  ])
+    assert.ok(!said.includes(spentToken.split(".")[1]), said);
+});
+
+test("a 400 or 401 with no body, a body that is not JSON, or one past the bound is a refusal with no reason", async (t) => {
+  const answers = [
+    new globalThis.Response(null, { status: 400 }),
+    new globalThis.Response("<html>Bad Request</html>", { status: 401 }),
+    globalThis.Response.json(
+      { error: "x".repeat(localSignInAnswerBytesMax) },
+      { status: 400 },
+    ),
+  ];
+  for (const response of answers) {
+    const { fetch } = serversOf(() => ({ response }));
+    const store = storeOf("renewal-0");
+    const lines = [];
+    const signIn = localSignIn(site, store, {
+      fetch,
+      nowMs: () => 0,
+      log: (line) => lines.push(line),
+    });
+    t.after(() => signIn.close());
+    const needed = await signInNeeded(signIn);
+    assert.ok(
+      needed.message.endsWith(
+        " The issuer ended this sign-in at 1970-01-01T00:00:00.000Z and gave no reason.",
+      ),
+      needed.message,
+    );
+    assert.deepEqual(store.ended, { endedAtMs: 0, error: "" });
+    assert.equal(store.renewal, undefined);
+    assert.equal(lines.length, 1);
+  }
+});
+
+test("the issuer's words holding the token or a long part of it are dropped, and a short part is not", async (t) => {
+  const long = "C".repeat(localSignInTokenPartCharsMin);
+  const short = "spent";
+  assert.ok(short.length < localSignInTokenPartCharsMin);
+  const presented = `${long}.${short}`;
+  const cases = [
+    {
+      refused: { error: `bad_${long}`, error_description: "no." },
+      ended: { error: "", errorDescription: "no." },
+    },
+    {
+      refused: {
+        error: "invalid_grant",
+        error_description: `token "${presented}" spent`,
+      },
+      ended: { error: "invalid_grant" },
+    },
+    {
+      refused: { error: "invalid_grant", error_description: `has ${long}` },
+      ended: { error: "invalid_grant" },
+    },
+    {
+      refused: {
+        error: "invalid_grant",
+        error_description: "The token was spent.",
+      },
+      ended: {
+        error: "invalid_grant",
+        errorDescription: "The token was spent.",
+      },
+    },
+  ];
+  for (const { refused, ended } of cases) {
+    const { fetch } = serversOf(() => ({ status: 400, body: refused }));
+    const store = storeOf(presented);
+    const lines = [];
+    const signIn = localSignIn(site, store, {
+      fetch,
+      nowMs: () => 0,
+      log: (line) => lines.push(line),
+    });
+    t.after(() => signIn.close());
+    const needed = await signInNeeded(signIn);
+    assert.deepEqual(store.ended, { endedAtMs: 0, ...ended });
+    for (const said of [lines[0], needed.message])
+      assert.ok(!said.includes(long), said);
+  }
+});
+
+test("a renewal that finds a newer access token stored under the lock spends nothing", async () => {
+  let nowMs = 1_000_000;
+  const { fetch, grants } = serversOf((_fields, n) => issued(n, 120));
+  const store = storeOf("renewal-0");
+  const signIn = localSignIn(site, store, { fetch, nowMs: () => nowMs });
+  assert.equal(await signIn.token(), "access-1");
+  store.renewal = "renewal-other";
+  store.access = {
+    accessToken: "access-other",
+    expiresAtMs: nowMs + 3_600_000,
+    renewal: "renewal-other",
+  };
+  nowMs += 120_000 - localSignInRefreshMarginMs;
+  assert.equal(await signIn.token(), "access-other");
+  assert.equal(grants.length, 1);
+});
+
+test("a renewed token is answered once the store holds its renewal token and the access record naming it", async () => {
+  const { fetch } = serversOf((_fields, n) => issued(n));
+  const store = storeOf("renewal-0");
+  store.ended = { endedAtMs: 0, error: "invalid_grant" };
+  const signIn = localSignIn(site, store, { fetch, nowMs: () => 0 });
+  assert.equal(await signIn.token(), "access-1");
+  assert.equal(store.renewal, "renewal-1");
+  assert.deepEqual(store.access, {
+    accessToken: "access-1",
+    expiresAtMs: 3_600_000,
+    renewal: "renewal-1",
+  });
+  assert.equal(store.ended, undefined);
+});
+
+test("an access record naming another renewal token, or none, is not used", async () => {
+  for (const named of ["renewal-other", undefined]) {
+    const { fetch, grants } = serversOf((_fields, n) => issued(n));
+    const store = storeOf("renewal-0");
+    store.access = {
+      accessToken: "access-stale",
+      expiresAtMs: Date.now() + 3_600_000,
+      renewal: named,
+    };
+    const signIn = localSignIn(site, store, { fetch });
+    assert.equal(await signIn.token(), "access-1");
+    assert.equal(grants.length, 1);
+  }
+});
+
+test("a token the API refused is answered again neither from memory nor from the store, and the memory of refusals is bounded", async () => {
+  const { fetch, grants } = serversOf((_fields, n) => issued(n));
+  const store = storeOf("renewal-0");
+  store.access = {
+    accessToken: "access-stored",
+    expiresAtMs: Date.now() + 3_600_000,
+    renewal: "renewal-0",
+  };
+  const signIn = localSignIn(site, store, { fetch });
+  assert.equal(await signIn.token(), "access-stored");
+  assert.equal(grants.length, 0);
+  signIn.invalidate("access-stored");
+  assert.equal(await signIn.token(), "access-1");
+  assert.equal(grants.length, 1);
+  signIn.invalidate("access-1");
+  assert.equal(await signIn.token(), "access-2");
+
+  signIn.invalidate("access-2");
+  for (let other = 0; other < localSignInRefusedTokensMax; other += 1)
+    signIn.invalidate(`access-other-${String(other)}`);
+  assert.equal(await signIn.token(), "access-2");
+  assert.equal(grants.length, 2);
+});
+
+test("a sign-in through the page removes the ended record and stores the access record", async (t) => {
+  const { fetch } = serversOf((_fields, n) => issued(n));
+  const store = storeOf(undefined);
+  store.ended = { endedAtMs: 0, error: "invalid_grant" };
+  const signIn = localSignIn(site, store, { fetch, nowMs: () => 0 });
+  t.after(() => signIn.close());
+  const needed = await signInNeeded(signIn);
+  assert.match(
+    needed.message,
+    / The issuer ended this sign-in at 1970-01-01T00:00:00\.000Z and said why: "invalid_grant"\.$/u,
+  );
+  const query = new URL(needed.url).searchParams;
+  const answered = await globalThis.fetch(
+    `${query.get("redirect_uri")}?code=the-code&state=${query.get("state")}`,
+  );
+  assert.equal(answered.status, 200);
+  assert.equal(store.ended, undefined);
+  assert.equal(store.renewal, "renewal-1");
+  assert.deepEqual(store.access, {
+    accessToken: "access-1",
+    expiresAtMs: 3_600_000,
+    renewal: "renewal-1",
+  });
+});
+
+test("closing waits for a renewal already sent to be kept, and starts none still waiting for the lock", async () => {
+  let asked;
+  const asking = new Promise((resolve) => {
+    asked = resolve;
+  });
+  let answer;
+  const { fetch } = serversOf(() => {
+    asked();
+    return new Promise((resolve) => {
+      answer = resolve;
+    });
+  });
+  const store = storeOf("renewal-0");
+  const sent = localSignIn(site, store, { fetch, nowMs: () => 0 });
+  const token = sent.token();
+  await asking;
+  let closed = false;
+  const closing = sent.close().then(() => {
+    closed = true;
+    return { renewal: store.renewal, access: store.access };
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(closed, false);
+  answer(issued(1));
+  assert.deepEqual(await closing, {
+    renewal: "renewal-1",
+    access: {
+      accessToken: "access-1",
+      expiresAtMs: 3_600_000,
+      renewal: "renewal-1",
+    },
+  });
+  assert.equal(await token, "access-1");
+
+  const waiting = serversOf((_fields, n) => issued(n));
+  let entered;
+  const entering = new Promise((resolve) => {
+    entered = resolve;
+  });
+  let opened;
+  store.gate = () => {
+    entered();
+    return new Promise((resolve) => {
+      opened = resolve;
+    });
+  };
+  store.access = undefined;
+  const unsent = localSignIn(site, store, { fetch: waiting.fetch });
+  const refused = unsent.token();
+  await entering;
+  await unsent.close();
+  opened();
+  await assert.rejects(refused, /ending, so it starts no renewal/);
+  assert.equal(waiting.grants.length, 0);
+  assert.equal(store.renewal, "renewal-1");
 });
