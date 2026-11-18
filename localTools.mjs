@@ -174,19 +174,19 @@ export const localToolEndSignals = ["SIGTERM", "SIGINT", "SIGHUP"];
 /**
  * Serves the tools on stdio until the transport closes, which the SDK's own
  * does on a read that fails and not on the end of its input, so the end of
- * `stdin`, or one of `localToolEndSignals` on `signals`, closes it too, and
- * `told` is called the first time either does. `serving` starts once the
- * server is connected, and the serve ends once both have.
+ * `stdin`, or `ending` aborting, closes it too, and `told` is called the
+ * first time either does. `serving` starts once the server is connected, and
+ * the serve ends once both have.
  *
  * @param {() => Promise<void>} [serving]
- * @param {{signals?: import("node:events").EventEmitter, told?: () => void}} [ending]
+ * @param {{ending?: AbortSignal, told?: () => void}} [end]
  */
 export async function localToolServe(
   context,
   sdk,
   stdin = process.stdin,
   serving = async () => {},
-  { signals, told = () => {} } = {},
+  { ending, told = () => {} } = {},
 ) {
   const server = localToolServer(context, sdk);
   const closed = new Promise((resolve) => {
@@ -201,12 +201,12 @@ export async function localToolServe(
   };
   stdin.once("end", ended);
   stdin.once("close", ended);
-  for (const signal of localToolEndSignals) signals?.on(signal, ended);
+  ending?.addEventListener("abort", ended, { once: true });
   try {
     const [, served] = await Promise.allSettled([closed, serving()]);
     if (served.status === "rejected") throw served.reason;
   } finally {
-    for (const signal of localToolEndSignals) signals?.off(signal, ended);
+    ending?.removeEventListener("abort", ended);
   }
 }
 
@@ -358,6 +358,11 @@ export async function localToolServed(
     }),
     { fetch },
   );
+  // Held until the close settles: with no listener, a signal's default
+  // handling would end the process while a sent renewal is still unanswered.
+  const ending = new globalThis.AbortController();
+  const end = () => ending.abort();
+  for (const signal of localToolEndSignals) signals.on(signal, end);
   try {
     await localToolServe(
       localToolContext({ site, tenant: workspace, project, version, signIn }),
@@ -368,9 +373,13 @@ export async function localToolServed(
           fetch: fetch ?? globalThis.fetch,
           log: (line) => void process.stderr.write(`${line}\n`),
         }),
-      { signals, told: () => void signIn.close() },
+      { ending: ending.signal, told: () => void signIn.close() },
     );
   } finally {
-    await signIn.close();
+    try {
+      await signIn.close();
+    } finally {
+      for (const signal of localToolEndSignals) signals.off(signal, end);
+    }
   }
 }
