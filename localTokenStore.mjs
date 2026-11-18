@@ -1,10 +1,11 @@
 /**
  * A person's sign-in to one site, kept in the worker contract's shared sign-in
  * store (`@chuggy/worker-contract/signInStore`): the renewal token, the access
- * record binding the newest access token to it, and the ended record saying
- * when and why the issuer ended the sign-in; and the store's lock every
- * renewal is made under. chuggy's setup program keeps the same sign-in there,
- * as the same client, so either signs the other in.
+ * record binding the newest access token to it, the ended record saying when
+ * and why the issuer ended the sign-in, and the pending record of a device
+ * sign-in the person has yet to approve; and the store's lock every renewal
+ * is made under. chuggy's setup program keeps the same sign-in there, as the
+ * same client, so either signs the other in.
  *
  * THE RENEWAL TOKEN IS SPENT BY THE REQUEST THAT USES IT, and the issuer ends
  * the whole sign-in when shown a spent one. Every chat on the machine runs a
@@ -53,6 +54,9 @@ import {
   signInStoreLockName,
   signInStoreLockStale,
   signInStoreLockWord,
+  signInStorePendingName,
+  signInStorePendingRead,
+  signInStorePendingText,
   signInStoreText,
   signInStoreTokenRead,
 } from "@chuggy/worker-contract/signInStore";
@@ -166,10 +170,11 @@ function localTokenStoreDigest(renewal) {
     .digest("hex");
 }
 
-/** The access and ended records' methods of `localTokenStore`, each record written through `written`. */
-function localTokenStoreRecords(directory, origin, written) {
+/** The access, ended and pending records' methods of `localTokenStore`, each record written through `written`, beside the renewal file at `renewalPath`. */
+function localTokenStoreRecords(directory, origin, renewalPath, written) {
   const accessPath = join(directory, signInStoreAccessName(origin));
   const endedPath = join(directory, signInStoreEndedName(origin));
+  const pendingPath = join(directory, signInStorePendingName(origin));
   return {
     async accessRead(renewal) {
       const text = await localTokenStoreText(accessPath);
@@ -204,6 +209,18 @@ function localTokenStoreRecords(directory, origin, written) {
     async endedClear() {
       await rm(endedPath, { force: true });
     },
+    async pendingRead(nowMs) {
+      const text = await localTokenStoreText(pendingPath);
+      if (text === undefined) return undefined;
+      const renewalHeld =
+        (await localTokenStoreText(renewalPath)) !== undefined;
+      return signInStorePendingRead(text, { renewalHeld, nowMs });
+    },
+    pendingWrite: (pending) =>
+      written(signInStorePendingName(origin), signInStorePendingText(pending)),
+    async pendingClear() {
+      await rm(pendingPath, { force: true });
+    },
   };
 }
 
@@ -213,9 +230,10 @@ function localTokenStoreRecords(directory, origin, written) {
  * `accessRead` answers the access record's token and expiry where it names
  * the renewal token given, `accessWrite` binds one to a renewal token, and
  * `accessClear` forgets it; `endedRead`, `endedWrite` and `endedClear` do the
- * same for the ended record. `locked` runs one renewal under the store's lock.
- * `formerly` is the file an earlier copy kept the token in, moved in by the
- * first hold.
+ * same for the ended record, and `pendingRead`, given the time, `pendingWrite`
+ * and `pendingClear` for the pending record. `locked` runs one renewal under
+ * the store's lock. `formerly` is the file an earlier copy kept the token in,
+ * moved in by the first hold.
  *
  * @param {{directory: string, origin: string, formerly?: string}} place
  */
@@ -244,7 +262,7 @@ export function localTokenStore(
     async clear() {
       await rm(path, { force: true });
     },
-    ...localTokenStoreRecords(directory, origin, written),
+    ...localTokenStoreRecords(directory, origin, path, written),
     async locked(renewal) {
       await mkdir(directory, {
         recursive: true,

@@ -26,6 +26,7 @@ import {
   signInStoreLockName,
   signInStoreLockSecsMax,
   signInStoreLockWord,
+  signInStorePendingName,
   signInStoreText,
 } from "@chuggy/worker-contract/signInStore";
 
@@ -226,10 +227,44 @@ test("an ended record is kept beside the renewal token, the person's alone, and 
   await assert.rejects(readFile(file), { code: "ENOENT" });
 });
 
-/** A site and issuer over HTTP whose token endpoint refuses a renewal token spent before, and issues access tokens lasting `expiresInSecs`. */
+test("a pending record is kept beside the renewal token, the person's alone, and reads as absent past its expiry or beside a renewal file", async (t) => {
+  const directory = await directoryOf(t);
+  const store = localTokenStore({ directory, origin });
+  assert.equal(await store.pendingRead(0), undefined);
+  const pending = {
+    deviceCode: "device-one",
+    userCode: "USER-1",
+    verificationUri: "https://auth.test/device",
+    expiresAtMs: 1_000,
+    intervalSecs: 5,
+  };
+  await store.locked(() => store.pendingWrite(pending));
+  assert.deepEqual(await store.pendingRead(999), pending);
+  assert.equal(await store.pendingRead(1_000), undefined);
+  const file = join(directory, signInStorePendingName(origin));
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  await store.locked(() => store.write("renewal-one"));
+  assert.equal(await store.pendingRead(0), undefined);
+  await store.clear();
+  assert.deepEqual(await store.pendingRead(0), pending);
+  await store.pendingClear();
+  await assert.rejects(readFile(file), { code: "ENOENT" });
+});
+
+/**
+ * A site and issuer over HTTP whose token endpoint refuses a renewal token
+ * spent before, issues access tokens lasting `expiresInSecs`, and answers
+ * every device code polled `authorization_pending`.
+ */
 async function issuerOf(t, expiresInSecs) {
   const spent = new Set();
-  const outcome = { current: "renewal-0", granted: 0, replayed: [] };
+  const outcome = {
+    current: "renewal-0",
+    granted: 0,
+    replayed: [],
+    authorized: 0,
+    polled: [],
+  };
   const server = createServer((request, response) => {
     let body = "";
     request.on("data", (chunk) => {
@@ -248,8 +283,24 @@ async function issuerOf(t, expiresInSecs) {
           issuer: base,
           authorization_endpoint: `${base}/auth`,
           token_endpoint: `${base}/token`,
+          device_authorization_endpoint: `${base}/device`,
         });
-      const token = new URLSearchParams(body).get("refresh_token");
+      const fields = new URLSearchParams(body);
+      if (request.url === "/device") {
+        outcome.authorized += 1;
+        return answer(200, {
+          device_code: `device-${String(outcome.authorized)}`,
+          user_code: `USER-${String(outcome.authorized)}`,
+          verification_uri: `${base}/verify`,
+          expires_in: 600,
+          interval: 5,
+        });
+      }
+      if (fields.has("device_code")) {
+        outcome.polled.push(fields.get("device_code"));
+        return answer(400, { error: "authorization_pending" });
+      }
+      const token = fields.get("refresh_token");
       if (spent.has(token) || token !== outcome.current) {
         outcome.replayed.push(token);
         return answer(400, { error: "invalid_grant" });
@@ -273,13 +324,14 @@ const fixture = fileURLToPath(
   new URL("./localTokenStore.fixture.mjs", import.meta.url),
 );
 
-/** One fixture process asking `site` for a token `count` times. */
-function fixtureRun(site, directory, count) {
+/** One fixture process asking `site` for a token `count` times, its clock at `nowMs` where given. */
+function fixtureRun(site, directory, count, nowMs = undefined) {
   return promisify(execFile)(process.execPath, [
     fixture,
     site,
     directory,
     String(count),
+    ...(nowMs === undefined ? [] : [String(nowMs)]),
   ]);
 }
 
@@ -330,4 +382,28 @@ test("fresh processes one after another, or started together, spend one renewal 
       outcome.current,
     );
   }
+});
+
+test("processes not signed in make one device authorization between them and show its code, and one started after they exited polls it", async (t) => {
+  const { site, outcome } = await issuerOf(t, 3_600);
+  const directory = await directoryOf(t);
+  const startedMs = 1_000_000;
+  const processes = 4;
+  const shown = await Promise.all(
+    Array.from({ length: processes }, () =>
+      fixtureRun(site, directory, 1, startedMs),
+    ),
+  );
+  assert.equal(outcome.authorized, 1);
+  assert.deepEqual(
+    new Set(shown.map(({ stdout }) => JSON.parse(stdout).userCode)),
+    new Set(["USER-1"]),
+  );
+  assert.deepEqual(outcome.polled, ["device-1"]);
+
+  const { stdout } = await fixtureRun(site, directory, 1, startedMs + 5_000);
+  assert.equal(JSON.parse(stdout).userCode, "USER-1");
+  assert.equal(JSON.parse(stdout).deviceUrl, `${site}/verify`);
+  assert.deepEqual(outcome.polled, ["device-1", "device-1"]);
+  assert.equal(outcome.authorized, 1);
 });
