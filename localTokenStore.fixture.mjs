@@ -1,19 +1,29 @@
 /**
- * One process renewing a sign-in `count` times against `site`, under the
- * shared store at `directory`: `node localTokenStore.fixture.mjs <site>
- * <directory> <count>`.
+ * One process asking a sign-in for a token `count` times against `site`,
+ * under the shared store at `directory`, its clock at `nowMs` where given:
+ * `node localTokenStore.fixture.mjs <site> <directory> <count> [nowMs]`. Each
+ * call answered with a device sign-in writes its link and code as a line of
+ * JSON.
  */
-import { argv } from "node:process";
+import { argv, stdout } from "node:process";
 import { URL } from "node:url";
 
-import { localSignIn } from "./localSignIn.mjs";
+import { LocalSignInNeeded, localSignIn } from "./localSignIn.mjs";
 import { localTokenStore } from "./localTokenStore.mjs";
 
-const [site, directory, count] = argv.slice(2);
+const [site, directory, count, nowMs] = argv.slice(2);
 const signIn = localSignIn(
   site,
   localTokenStore({ directory, origin: new URL(site).origin }),
+  { nowMs: nowMs === undefined ? undefined : () => Number(nowMs) },
 );
-for (let renewed = 0; renewed < Number(count); renewed += 1)
-  await signIn.token();
+for (let called = 0; called < Number(count); called += 1)
+  try {
+    await signIn.token();
+  } catch (failure) {
+    if (!(failure instanceof LocalSignInNeeded)) throw failure;
+    stdout.write(
+      `${JSON.stringify({ deviceUrl: failure.deviceUrl, userCode: failure.userCode })}\n`,
+    );
+  }
 await signIn.close();
