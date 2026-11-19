@@ -19,18 +19,6 @@
  * is one carrying the state this sign-in sent, checked before anything else
  * is read, so nothing else that reaches the port can end it.
  *
- * BESIDE THE PAGE, A SIGN-IN FROM ANY DEVICE (RFC 8628), where the issuer's
- * discovery names a device authorization endpoint: the answer carries its
- * link and user code too, so a person with no browser on this machine approves
- * elsewhere. The site has one authorization, in the store's pending record,
- * which every process shows and polls; it is requested, and polled once its
- * interval has passed, in the hold a renewal is made in, and a call waits on
- * no timer for it. Whichever of the page and the device is approved first
- * signs the machine in. The device code is a sign-in for whoever holds it, so
- * it is kept as a renewal token is. A refusal of the device authorization,
- * or no endpoint, leaves the page alone for the process's life; a fault
- * leaves it alone for that call.
- *
  * A TOKEN IS NEVER IN AN ANSWER. Not in an error, not in a page, not in a
  * line written anywhere. A refusal from the issuer is said by the `error` and
  * `error_description` it answered, as the contract's ended record fits them,
@@ -46,11 +34,10 @@
  * why on stderr, and the store keeps that in place of both tokens until a
  * sign-in. Any other failure keeps the store for the next call. A renewal
  * whose answer is lost after the issuer replaced the token still leaves a
- * spent one stored, and the next renewal ends the sign-in. Hydra deletes a
- * device code on its approval, so a lost answer to a poll costs a second
- * approval. So a renewal or a poll sent before the server is told to end
- * finishes before it ends, and one not yet sent is not started
- * (https://www.ory.com/docs/hydra/debug, "Refresh Token flow fails").
+ * spent one stored, and the next renewal ends the sign-in, so a renewal sent
+ * before the server is told to end finishes before it ends, and one not yet
+ * sent is not started (https://www.ory.com/docs/hydra/debug, "Refresh Token
+ * flow fails").
  */
 
 import { Buffer } from "node:buffer";
@@ -62,7 +49,6 @@ import { URL, URLSearchParams } from "node:url";
 import {
   signInStoreEndedRead,
   signInStoreEndedText,
-  signInStorePendingIntervalSecsMax,
 } from "@chuggy/worker-contract/signInStore";
 
 import { chuggyBoundedBody } from "./chuggyApi.mjs";
@@ -102,14 +88,8 @@ const localSignInConfigurationPath = "/config.json";
 const localSignInDiscoveryPath = "/.well-known/openid-configuration";
 const localSignInVerifierBytes = 32;
 const localSignInStateBytes = 16;
-/** The statuses a token request or a device authorization is refused with, as the console's session holder reads them. */
+/** The statuses a token request is refused with, as the console's session holder reads them. */
 const localSignInRefusalStatuses = new Set([400, 401]);
-const localSignInDeviceGrantType =
-  "urn:ietf:params:oauth:grant-type:device_code";
-/** The polling interval a device authorization naming none is given (RFC 8628 §3.2). */
-const localSignInDeviceIntervalSecs = 5;
-/** What each `slow_down` adds to a device authorization's polling interval (RFC 8628 §3.5). */
-const localSignInSlowDownSecs = 5;
 
 /** When the issuer ended a sign-in, and why where it said. */
 function localSignInEndedSaid(ended) {
@@ -122,26 +102,14 @@ function localSignInEndedSaid(ended) {
     : `at ${at} and said why: "${words}"`;
 }
 
-/** The link a device sign-in is approved at: the complete verification URI where the issuer gave one. */
-function localSignInDeviceUrl(pending) {
-  return pending.verificationUriComplete ?? pending.verificationUri;
-}
-
-/**
- * What a call is answered with where the person must sign in first, when and
- * why the issuer ended the sign-in where `ended` says, and the link and user
- * code of the device sign-in `pending`, where there is one.
- */
+/** What a call is answered with where the person must sign in first, and when and why the issuer ended the sign-in where `ended` says. */
 export class LocalSignInNeeded extends Error {
-  constructor(site, url, ended = undefined, pending = undefined) {
+  constructor(site, url, ended = undefined) {
     super(
-      `not signed in to ${site}: this call needs the person signed in, so give them this address, in full, in your next message, whatever else you are doing: ${url} Call the tool again once they say they have signed in. The page closes once it is answered or after a while unanswered, and a later call opens another.${ended === undefined ? "" : ` The issuer ended this sign-in ${localSignInEndedSaid(ended)}.`}${pending === undefined ? "" : ` The address opens only on this machine, so give them as well, in full, this link, which opens on any device, and its code, for them to sign in at whichever they can: ${localSignInDeviceUrl(pending)} with the code ${pending.userCode}`}`,
+      `not signed in to ${site}: this call needs the person signed in, so give them this address, in full, in your next message, whatever else you are doing: ${url} Call the tool again once they say they have signed in. The page closes once it is answered or after a while unanswered, and a later call opens another.${ended === undefined ? "" : ` The issuer ended this sign-in ${localSignInEndedSaid(ended)}.`}`,
     );
     this.name = "LocalSignInNeeded";
     this.url = url;
-    this.deviceUrl =
-      pending === undefined ? undefined : localSignInDeviceUrl(pending);
-    this.userCode = pending?.userCode;
   }
 }
 
@@ -229,12 +197,7 @@ async function localSignInIssuer(ports, site) {
       discovery.body?.token_endpoint,
       "the issuer's token endpoint",
     ),
-    device: localSignInOptional(discovery.body?.device_authorization_endpoint),
   };
-}
-
-function localSignInOptional(value) {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 /**
@@ -276,11 +239,13 @@ async function localSignInGrant(ports, issuer, fields) {
     throw new Error(
       `the sign-in server answered ${String(answer.status)} for a token`,
     );
+  const renewal = answer.body?.refresh_token;
   const expiresInSecs = answer.body?.expires_in;
   return {
     issued: {
       access: localSignInText(answer.body?.access_token, "the access token"),
-      renewal: localSignInOptional(answer.body?.refresh_token),
+      renewal:
+        typeof renewal === "string" && renewal.length > 0 ? renewal : undefined,
       expiresAtMs:
         ports.nowMs() +
         (Number.isInteger(expiresInSecs) && expiresInSecs > 0
@@ -349,7 +314,7 @@ async function localSignInEnded(signIn, store, presented, refused) {
   return ended;
 }
 
-/** What the issuer issued kept in the store: the renewal token, then the access token bound to it, then no pending or ended record. */
+/** What the issuer issued kept in the store: the renewal token, then the access token bound to it, then no ended record. */
 async function localSignInKept(store, issued, presented) {
   const renewal = issued.renewal ?? presented;
   if (issued.renewal !== undefined) await store.write(issued.renewal);
@@ -358,7 +323,6 @@ async function localSignInKept(store, issued, presented) {
       { accessToken: issued.access, expiresAtMs: issued.expiresAtMs },
       renewal,
     );
-  await store.pendingClear();
   await store.endedClear();
   return { access: issued.access, expiresAtMs: issued.expiresAtMs };
 }
@@ -486,28 +450,17 @@ async function localSignInRenewed(signIn, store) {
   const held = await store.locked(() => localSignInHeld(signIn, store, issuer));
   if (held.issued !== undefined) return held.issued;
   signIn.page ??= await localSignInPageOpened(signIn, issuer);
-  throw new LocalSignInNeeded(
-    signIn.site,
-    signIn.page.url,
-    held.ended,
-    held.pending,
-  );
+  throw new LocalSignInNeeded(signIn.site, signIn.page.url, held.ended);
 }
 
 /**
  * In the store's one hold: the access token it keeps for its renewal token
- * where that is usable, else a renewal, else, where there is nothing to
- * renew, the device sign-in's outcome and the ended record. A server told to
- * end sends no renewal.
+ * where that is usable, else a renewal, else the ended record where there is
+ * nothing to renew. A server told to end sends no renewal.
  */
 async function localSignInHeld(signIn, store, issuer) {
   const renewal = await store.read();
-  if (renewal === undefined) {
-    const device = await localSignInDeviceHeld(signIn, store, issuer);
-    return device.issued !== undefined
-      ? device
-      : { ...device, ended: await store.endedRead() };
-  }
+  if (renewal === undefined) return { ended: await store.endedRead() };
   const kept = await store.accessRead(renewal);
   if (kept !== undefined && signIn.usable(kept.accessToken, kept.expiresAtMs))
     return {
@@ -517,141 +470,12 @@ async function localSignInHeld(signIn, store, issuer) {
     throw new Error(
       `this server is ending, so it starts no renewal of the sign-in to ${signIn.site}`,
     );
-  return localSignInSending(signIn, () =>
-    localSignInSent(signIn, store, issuer, renewal),
-  );
-}
-
-/** What `send` answers, held as the request `close` waits for until it has. */
-async function localSignInSending(signIn, send) {
-  signIn.sending = send();
+  signIn.sending = localSignInSent(signIn, store, issuer, renewal);
   try {
     return await signIn.sending;
   } finally {
     signIn.sending = undefined;
   }
-}
-
-/**
- * In the store's hold, with no renewal token stored: the site's device
- * sign-in, polled once where its interval has passed, else a new one where
- * there is none; `issued` where a poll found it approved, and nothing where
- * the page alone is to be offered. A server told to end sends nothing.
- */
-async function localSignInDeviceHeld(signIn, store, issuer) {
-  if (issuer.device === undefined || signIn.deviceRefused) return {};
-  const nowMs = signIn.ports.nowMs();
-  let pending = await store.pendingRead(nowMs);
-  if (
-    pending !== undefined &&
-    !signIn.ending &&
-    (pending.polledAtMs ?? -Infinity) + pending.intervalSecs * 1_000 <= nowMs
-  ) {
-    const polled = await localSignInSending(signIn, () =>
-      localSignInPolled(signIn, store, issuer, pending),
-    );
-    if (polled.issued !== undefined) return polled;
-    pending = polled.pending;
-  }
-  if (pending !== undefined || signIn.ending) return { pending };
-  try {
-    const authorized = await localSignInSending(signIn, () =>
-      localSignInDeviceAuthorized(signIn, store, issuer),
-    );
-    if (authorized.refused) signIn.deviceRefused = true;
-    return { pending: authorized.pending };
-  } catch {
-    return {};
-  }
-}
-
-/**
- * One poll of `pending`, its outcome written before it is answered: `issued`
- * kept as a sign-in is, nothing where the code is spent or expired, else
- * `pending` as it is kept, its poll's time and any slowing recorded.
- */
-async function localSignInPolled(signIn, store, issuer, pending) {
-  const polledAtMs = signIn.ports.nowMs();
-  let granted;
-  try {
-    granted = await localSignInGrant(signIn.ports, issuer, {
-      grant_type: localSignInDeviceGrantType,
-      device_code: pending.deviceCode,
-    });
-  } catch {
-    granted = { refused: {} };
-  }
-  if (granted.issued !== undefined)
-    return { issued: await localSignInKept(store, granted.issued, undefined) };
-  const { error } = granted.refused;
-  if (error === "expired_token" || error === "invalid_grant") {
-    await store.pendingClear();
-    return {};
-  }
-  const kept = {
-    ...pending,
-    polledAtMs,
-    intervalSecs:
-      error === "slow_down"
-        ? Math.min(
-            pending.intervalSecs + localSignInSlowDownSecs,
-            signInStorePendingIntervalSecsMax,
-          )
-        : pending.intervalSecs,
-  };
-  await store.pendingWrite(kept);
-  return { pending: kept };
-}
-
-/**
- * A new device authorization, its pending record written before it is
- * answered, or `refused` where the issuer refused the client the grant. An
- * answer that is not one throws, and nothing is written.
- */
-async function localSignInDeviceAuthorized(signIn, store, issuer) {
-  const nowMs = signIn.ports.nowMs();
-  const response = await localSignInAsked(signIn.ports, issuer.device, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: localSignInClientId,
-      scope: localSignInScopes.join(" "),
-      audience: issuer.audience,
-    }).toString(),
-  });
-  if (localSignInRefusalStatuses.has(response.status)) {
-    await response.body?.cancel();
-    return { refused: true };
-  }
-  const { status, body } = await localSignInRead(issuer.device, response);
-  if (status !== 200)
-    throw new Error(
-      `the sign-in server answered ${String(status)} for a device authorization`,
-    );
-  const expiresInSecs = body?.expires_in;
-  if (!Number.isInteger(expiresInSecs) || expiresInSecs <= 0)
-    throw new Error("the device authorization's expiry is missing");
-  const verificationUriComplete = localSignInOptional(
-    body?.verification_uri_complete,
-  );
-  const pending = {
-    deviceCode: localSignInText(body?.device_code, "the device code"),
-    userCode: localSignInText(body?.user_code, "the user code"),
-    verificationUri: localSignInText(
-      body?.verification_uri,
-      "the verification URI",
-    ),
-    ...(verificationUriComplete === undefined
-      ? {}
-      : { verificationUriComplete }),
-    expiresAtMs: nowMs + expiresInSecs * 1_000,
-    intervalSecs:
-      Number.isInteger(body?.interval) && body.interval > 0
-        ? body.interval
-        : localSignInDeviceIntervalSecs,
-  };
-  await store.pendingWrite(pending);
-  return { pending };
 }
 
 /** One renewal of `renewal`, sent and its outcome kept. */
@@ -691,7 +515,6 @@ function localSignInHolder(site, store, ports) {
     renewing: undefined,
     sending: undefined,
     ending: false,
-    deviceRefused: false,
     refused: new Set(),
     page: undefined,
     usable(access, expiresAtMs) {

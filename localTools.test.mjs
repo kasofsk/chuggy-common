@@ -10,7 +10,6 @@ import {
 import {
   signInStoreDirectory,
   signInStoreFileName,
-  signInStorePendingName,
   signInStoreText,
 } from "@chuggy/worker-contract/signInStore";
 import { z } from "zod";
@@ -218,7 +217,7 @@ test("the server's instructions say every tool needs the person signed in, and t
   );
   assert.match(
     instructions,
-    /give them the address it names, and the link and code where it names those too, each in full, in your next message/u,
+    /give them the address it names, in full, in your next message/u,
   );
   assert.match(instructions, /call again once they say they have signed in\./u);
   assert.match(instructions, /do not work around a sign-in\.$/mu);
@@ -430,7 +429,6 @@ async function servedOf(t, asked, answered) {
         issuer: "https://auth.test",
         authorization_endpoint: "https://auth.test/oauth2/auth",
         token_endpoint: "https://auth.test/oauth2/token",
-        device_authorization_endpoint: "https://auth.test/oauth2/device/auth",
       });
     return answered(requested, init);
   });
@@ -481,27 +479,13 @@ async function servedOf(t, asked, answered) {
   };
 }
 
-const deviceCode = `ory_dc_${"D".repeat(43)}`;
-
-test("served with the global fetch, a call with no sign-in is answered with a page, the device link and its code, never the device code, and the end of input ends it", async (t) => {
+test("served with the global fetch, a call with no sign-in is answered with a page, and the end of input ends it", async (t) => {
   const signIns = await mkdtemp(join(tmpdir(), "local-tools-"));
   t.after(() => rm(signIns, { recursive: true, force: true }));
-  const said = [];
-  t.mock.method(process.stderr, "write", (line) => said.push(String(line)));
   const served = await servedOf(
     t,
     { signIns, surroundings: { home: signIns, configHome: undefined } },
-    async (requested) =>
-      requested === "https://auth.test/oauth2/device/auth"
-        ? globalThis.Response.json({
-            device_code: deviceCode,
-            user_code: "USER-1",
-            verification_uri: "https://chuggy.test/device",
-            verification_uri_complete:
-              "https://chuggy.test/device?user_code=USER-1",
-            expires_in: 600,
-          })
-        : new globalThis.Response("", { status: 404 }),
+    async () => new globalThis.Response("", { status: 404 }),
   );
   const answer = await served.called("read_ticket", { ticket: 7 });
   assert.equal(answer.isError, true);
@@ -510,12 +494,6 @@ test("served with the global fetch, a call with no sign-in is answered with a pa
     text,
     /not signed in to https:\/\/chuggy\.test: this call needs the person signed in, so give them this address, in full, in your next message, whatever else you are doing: https:\/\/auth\.test\/oauth2\/auth\?\S+ Call the tool again once they say they have signed in\./,
   );
-  assert.match(
-    text,
-    / https:\/\/chuggy\.test\/device\?user_code=USER-1 with the code USER-1$/u,
-  );
-  for (const words of [text, ...said])
-    assert.ok(!words.includes(deviceCode), words);
   await served.ended();
 });
 
@@ -562,27 +540,19 @@ test("served, a sign-in kept in the contract's store is renewed with no sign-in 
 });
 
 /**
- * The tools served over a store holding `renewal-0`, or with `polling` a
- * pending device sign-in instead, with a call's token request for it sent and
- * unanswered; `answer` answers it with `renewal-1`, and `stored` is what the
- * store holds once the serve has ended.
+ * The tools served over a store holding `renewal-0`, with a call's renewal of
+ * it sent and unanswered; `answer` answers it with `renewal-1`, and `stored`
+ * is what the store holds once the serve has ended.
  */
-async function renewingOf(t, polling = false) {
+async function renewingOf(t) {
   const home = await mkdtemp(join(tmpdir(), "local-tools-"));
   t.after(() => rm(home, { recursive: true, force: true }));
   const surroundings = { home, configHome: undefined };
   const directory = signInStoreDirectory(surroundings);
-  const store = localTokenStore({ directory, origin: "https://chuggy.test" });
-  await store.locked(() =>
-    polling
-      ? store.pendingWrite({
-          deviceCode,
-          userCode: "USER-1",
-          verificationUri: "https://chuggy.test/device",
-          expiresAtMs: Date.now() + 600_000,
-          intervalSecs: 5,
-        })
-      : store.write("renewal-0"),
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, signInStoreFileName("https://chuggy.test")),
+    signInStoreText("renewal-0"),
   );
   let sent;
   const sending = new Promise((resolve) => {
@@ -592,32 +562,29 @@ async function renewingOf(t, polling = false) {
   const served = await servedOf(
     t,
     { signIns: join(home, "earlier"), surroundings },
-    async (requested, init) => {
+    async (requested) => {
       if (requested !== "https://auth.test/oauth2/token")
         return globalThis.Response.json({ ticket: 7 });
-      sent(new URLSearchParams(init.body).get("grant_type"));
+      sent();
       return new Promise((resolve) => {
         answered = resolve;
       });
     },
   );
+  const store = localTokenStore({ directory, origin: "https://chuggy.test" });
   const call = served.called("read_ticket", { ticket: 7 });
-  const grantType = await sending;
+  await sending;
   let ended = false;
   const stored = served.served.then(async () => {
     ended = true;
     return {
       renewal: await store.read(),
       access: await store.accessRead("renewal-1"),
-      pending: await readFile(
-        join(directory, signInStorePendingName("https://chuggy.test")),
-      ).catch(() => undefined),
     };
   });
   return {
     served,
     call,
-    grantType,
     stored,
     ended: () => ended,
     answer: () =>
@@ -631,27 +598,19 @@ async function renewingOf(t, polling = false) {
   };
 }
 
-test("served, a renewal or a device poll sent before the end of input or an ending signal is stored, token and access record, before the serve ends", async (t) => {
-  for (const polling of [false, true])
-    for (const by of ["end", ...localToolEndSignals]) {
-      const renewing = await renewingOf(t, polling);
-      assert.equal(
-        renewing.grantType,
-        polling
-          ? "urn:ietf:params:oauth:grant-type:device_code"
-          : "refresh_token",
-      );
-      renewing.served.endedBy(by);
-      await renewing.served.closing;
-      renewing.answer();
-      const { renewal, access, pending } = await renewing.stored;
-      assert.equal(renewal, "renewal-1", by);
-      assert.equal(access?.accessToken, "access-1", by);
-      assert.equal(pending, undefined, by);
-      await renewing.call;
-      for (const signal of localToolEndSignals)
-        assert.equal(renewing.served.signals.listenerCount(signal), 0);
-    }
+test("served, a renewal sent before the end of input or an ending signal is stored, token and access record, before the serve ends", async (t) => {
+  for (const by of ["end", ...localToolEndSignals]) {
+    const renewing = await renewingOf(t);
+    renewing.served.endedBy(by);
+    await renewing.served.closing;
+    renewing.answer();
+    const { renewal, access } = await renewing.stored;
+    assert.equal(renewal, "renewal-1", by);
+    assert.equal(access?.accessToken, "access-1", by);
+    await renewing.call;
+    for (const signal of localToolEndSignals)
+      assert.equal(renewing.served.signals.listenerCount(signal), 0);
+  }
 });
 
 test("served, an ending signal after the end of input, while a sent renewal is unanswered, is still held and the renewal stored", async (t) => {

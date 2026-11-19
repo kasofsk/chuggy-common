@@ -5,12 +5,6 @@ import { setImmediate, setTimeout } from "node:timers";
 import { URL, URLSearchParams } from "node:url";
 
 import {
-  signInStorePendingIntervalSecsMax,
-  signInStorePendingRead,
-  signInStorePendingText,
-} from "@chuggy/worker-contract/signInStore";
-
-import {
   LocalSignInNeeded,
   localSignIn,
   localSignInAnswerBytesMax,
@@ -24,13 +18,12 @@ const site = "https://chuggy.test";
 const issuer = "https://auth.test";
 const audience = "https://chuggy.test/api";
 
-/** A store as `localTokenStore` keeps one, its pending record as the contract writes and reads it; `gate`, where set, is waited on before each hold runs. */
+/** A store as `localTokenStore` keeps one; `gate`, where set, is waited on before each hold runs. */
 function storeOf(renewal) {
   const store = {
     renewal,
     access: undefined,
     ended: undefined,
-    pending: undefined,
     locks: 0,
     gate: undefined,
   };
@@ -62,19 +55,6 @@ function storeOf(renewal) {
     endedClear: async () => {
       store.ended = undefined;
     },
-    pendingRead: async (nowMs) =>
-      store.pending === undefined
-        ? undefined
-        : signInStorePendingRead(store.pending, {
-            renewalHeld: store.renewal !== undefined,
-            nowMs,
-          }),
-    pendingWrite: async (pending) => {
-      store.pending = signInStorePendingText(pending);
-    },
-    pendingClear: async () => {
-      store.pending = undefined;
-    },
     locked: async (renewalRun) => {
       store.locks += 1;
       await store.gate?.();
@@ -83,14 +63,9 @@ function storeOf(renewal) {
   });
 }
 
-/**
- * A site and issuer answering as the real ones do; `grant` answers each token
- * request, and `device`, where given, each device authorization, the issuer's
- * discovery naming its endpoint only then.
- */
-function serversOf(grant, device = undefined) {
+/** A site and issuer answering as the real ones do; `grant` answers each token request. */
+function serversOf(grant) {
   const grants = [];
-  const devices = [];
   const fetch = async (url, init) => {
     const asked = String(url);
     if (asked === `${site}/config.json`)
@@ -104,28 +79,20 @@ function serversOf(grant, device = undefined) {
         issuer: `${issuer}/`,
         authorization_endpoint: `${issuer}/oauth2/auth`,
         token_endpoint: `${issuer}/oauth2/token`,
-        ...(device === undefined
-          ? {}
-          : { device_authorization_endpoint: `${issuer}/oauth2/device/auth` }),
       });
-    const answering = {
-      [`${issuer}/oauth2/token`]: [grants, grant],
-      [`${issuer}/oauth2/device/auth`]: [devices, device],
-    }[asked];
-    if (answering?.[1] !== undefined && init?.method === "POST") {
-      const [asks, answer] = answering;
+    if (asked === `${issuer}/oauth2/token` && init?.method === "POST") {
       const fields = Object.fromEntries(new URLSearchParams(init.body));
-      asks.push(fields);
+      grants.push(fields);
       const {
         status = 200,
         body,
         response,
-      } = await answer(fields, asks.length);
+      } = await grant(fields, grants.length);
       return response ?? globalThis.Response.json(body ?? {}, { status });
     }
     return new globalThis.Response("", { status: 404 });
   };
-  return { fetch, grants, devices };
+  return { fetch, grants };
 }
 
 function issued(n, expiresInSecs = 3_600) {
@@ -650,310 +617,4 @@ test("closing waits for a renewal already sent to be kept, and starts none still
   await assert.rejects(refused, /ending, so it starts no renewal/);
   assert.equal(waiting.grants.length, 0);
   assert.equal(store.renewal, "renewal-1");
-});
-
-const deviceCode = `ory_dc_${"D".repeat(43)}.${"E".repeat(43)}`;
-
-/** The issuer's answer to device authorization `n`, `changed` replacing its fields. */
-function authorized(n, changed = {}) {
-  return {
-    body: {
-      device_code: `${deviceCode}${String(n)}`,
-      user_code: `USER-${String(n)}`,
-      verification_uri: `${issuer}/device`,
-      verification_uri_complete: `${issuer}/device?user_code=USER-${String(n)}`,
-      expires_in: 600,
-      interval: 5,
-      ...changed,
-    },
-  };
-}
-
-const devicePending = { status: 400, body: { error: "authorization_pending" } };
-
-/** A device sign-in's ports over `store` at a clock the test moves, every line said kept. */
-function deviceOf(t, store, grant, device = (_fields, n) => authorized(n)) {
-  const clock = { nowMs: 1_000_000 };
-  const servers = serversOf(grant, device);
-  const lines = [];
-  const ports = {
-    fetch: servers.fetch,
-    nowMs: () => clock.nowMs,
-    log: (line) => lines.push(line),
-  };
-  const opened = () => {
-    const signIn = localSignIn(site, store, ports);
-    t.after(() => signIn.close());
-    return signIn;
-  };
-  return { ...servers, clock, lines, opened, signIn: opened() };
-}
-
-/** That nothing in `said` holds the device code or a long part of it. */
-function deviceCodeUnsaid(...said) {
-  for (const text of said)
-    for (const part of [deviceCode, "D".repeat(43), "E".repeat(43)])
-      assert.ok(!text.includes(part), text);
-}
-
-test("with nothing to renew, a call is answered with the page, the device link and its code, the authorization written before the answer", async (t) => {
-  for (const complete of [true, false]) {
-    const store = storeOf(undefined);
-    const device = deviceOf(
-      t,
-      store,
-      () => devicePending,
-      (_fields, n) =>
-        authorized(n, complete ? {} : { verification_uri_complete: undefined }),
-    );
-    const needed = await signInNeeded(device.signIn);
-    const link = complete
-      ? `${issuer}/device?user_code=USER-1`
-      : `${issuer}/device`;
-    assert.match(needed.message, localSignInNeededText);
-    assert.ok(
-      needed.message.endsWith(
-        ` give them as well, in full, this link, which opens on any device, and its code, for them to sign in at whichever they can: ${link} with the code USER-1`,
-      ),
-      needed.message,
-    );
-    assert.equal(needed.deviceUrl, link);
-    assert.equal(needed.userCode, "USER-1");
-    assert.deepEqual(device.devices, [
-      {
-        client_id: localSignInClientId,
-        scope: "openid offline_access",
-        audience,
-      },
-    ]);
-    assert.equal(device.grants.length, 0);
-    const pending = await store.pendingRead(device.clock.nowMs);
-    assert.equal(pending.deviceCode, `${deviceCode}1`);
-    assert.equal(pending.expiresAtMs, device.clock.nowMs + 600_000);
-    assert.equal(pending.intervalSecs, 5);
-    deviceCodeUnsaid(needed.message, ...device.lines);
-  }
-});
-
-test("calls inside the interval poll once between them, and slow_down widens the interval for every process after", async (t) => {
-  const store = storeOf(undefined);
-  const device = deviceOf(t, store, () => ({
-    status: 400,
-    body: { error: "slow_down" },
-  }));
-  const codes = [];
-  const called = async (signIn = device.signIn) =>
-    codes.push((await signInNeeded(signIn)).userCode);
-  await called();
-  await called();
-  await called();
-  assert.equal(device.devices.length, 1);
-  assert.deepEqual(
-    device.grants.map((fields) => fields.grant_type),
-    ["urn:ietf:params:oauth:grant-type:device_code"],
-  );
-  assert.equal(device.grants[0].device_code, `${deviceCode}1`);
-  assert.equal(device.grants[0].client_id, localSignInClientId);
-  const slowed = await store.pendingRead(device.clock.nowMs);
-  assert.equal(slowed.intervalSecs, 10);
-  assert.equal(slowed.polledAtMs, device.clock.nowMs);
-
-  device.clock.nowMs += 5_000;
-  const next = device.opened();
-  await called(next);
-  assert.equal(device.grants.length, 1);
-  device.clock.nowMs += 5_000;
-  await called(next);
-  assert.equal(device.grants.length, 2);
-  assert.deepEqual(new Set(codes), new Set(["USER-1"]));
-});
-
-test("a slowed interval is kept within the contract's bound", async (t) => {
-  const store = storeOf(undefined);
-  const device = deviceOf(
-    t,
-    store,
-    () => ({ status: 400, body: { error: "slow_down" } }),
-    (_fields, n) =>
-      authorized(n, { interval: signInStorePendingIntervalSecsMax }),
-  );
-  await signInNeeded(device.signIn);
-  await signInNeeded(device.signIn);
-  assert.equal(device.grants.length, 1);
-  assert.equal(
-    (await store.pendingRead(device.clock.nowMs)).intervalSecs,
-    signInStorePendingIntervalSecsMax,
-  );
-});
-
-test("a device approved with a renewal token is stored as a sign-in, with no pending or ended record, before the call is answered", async (t) => {
-  const store = storeOf(undefined);
-  store.ended = { endedAtMs: 0, error: "invalid_grant" };
-  const device = deviceOf(t, store, (_fields, n) => issued(n));
-  await signInNeeded(device.signIn);
-  const answered = device.signIn.token().then((token) => ({
-    token,
-    renewal: store.renewal,
-    access: store.access,
-    pending: store.pending,
-    ended: store.ended,
-  }));
-  assert.deepEqual(await answered, {
-    token: "access-1",
-    renewal: "renewal-1",
-    access: {
-      accessToken: "access-1",
-      expiresAtMs: device.clock.nowMs + 3_600_000,
-      renewal: "renewal-1",
-    },
-    pending: undefined,
-    ended: undefined,
-  });
-});
-
-test("a device approved with no renewal token serves this process alone: nothing is stored and the pending record is gone", async (t) => {
-  const store = storeOf(undefined);
-  const device = deviceOf(t, store, () => ({
-    body: { access_token: "access-only", expires_in: 3_600 },
-  }));
-  await signInNeeded(device.signIn);
-  assert.equal(await device.signIn.token(), "access-only");
-  assert.equal(store.renewal, undefined);
-  assert.equal(store.access, undefined);
-  assert.equal(store.pending, undefined);
-  assert.equal(await device.signIn.token(), "access-only");
-  assert.equal(device.grants.length, 1);
-});
-
-test("a code the issuer answers expired_token or invalid_grant for, or one past its expiry, is replaced by a new one in the same call", async (t) => {
-  for (const error of ["expired_token", "invalid_grant"]) {
-    const store = storeOf(undefined);
-    const device = deviceOf(t, store, () => ({ status: 400, body: { error } }));
-    assert.equal((await signInNeeded(device.signIn)).userCode, "USER-1");
-    assert.equal((await signInNeeded(device.signIn)).userCode, "USER-2");
-    assert.equal(device.grants.length, 1, error);
-    assert.equal(
-      (await store.pendingRead(device.clock.nowMs)).deviceCode,
-      `${deviceCode}2`,
-    );
-  }
-  const store = storeOf(undefined);
-  const device = deviceOf(t, store, () => devicePending);
-  assert.equal((await signInNeeded(device.signIn)).userCode, "USER-1");
-  device.clock.nowMs += 600_000;
-  assert.equal((await signInNeeded(device.signIn)).userCode, "USER-2");
-  assert.equal(device.grants.length, 0);
-});
-
-test("a poll answered with a 400 with no body or one that is not JSON, any other answer, or a fault keeps the record, its time recorded, and throws nothing", async (t) => {
-  const answers = [
-    () => ({ response: new globalThis.Response(null, { status: 400 }) }),
-    () => ({
-      response: new globalThis.Response("<html>Bad Request</html>", {
-        status: 400,
-      }),
-    }),
-    () => ({ status: 400, body: { error: "access_denied" } }),
-    () => ({ status: 503 }),
-    () => {
-      throw new TypeError("fetch failed");
-    },
-  ];
-  for (const answer of answers) {
-    const store = storeOf(undefined);
-    const device = deviceOf(t, store, answer);
-    await signInNeeded(device.signIn);
-    device.clock.nowMs += 1;
-    const needed = await signInNeeded(device.signIn);
-    assert.equal(needed.userCode, "USER-1");
-    assert.equal(device.grants.length, 1);
-    assert.equal(device.devices.length, 1);
-    const kept = await store.pendingRead(device.clock.nowMs);
-    assert.equal(kept.deviceCode, `${deviceCode}1`);
-    assert.equal(kept.polledAtMs, device.clock.nowMs);
-    deviceCodeUnsaid(needed.message, ...device.lines);
-  }
-});
-
-test("a refused device authorization, or none in the discovery, offers the page alone, writes nothing, and is not asked again", async (t) => {
-  for (const status of [400, 401]) {
-    const store = storeOf(undefined);
-    const device = deviceOf(
-      t,
-      store,
-      () => devicePending,
-      () => ({
-        status,
-        body: { error: "invalid_grant" },
-      }),
-    );
-    for (let call = 0; call < 2; call += 1) {
-      const needed = await signInNeeded(device.signIn);
-      assert.equal(needed.deviceUrl, undefined);
-      assert.doesNotMatch(needed.message, /any device/u);
-    }
-    assert.equal(device.devices.length, 1);
-    assert.equal(store.pending, undefined);
-  }
-  const { fetch, grants } = serversOf(() => devicePending);
-  const store = storeOf(undefined);
-  const signIn = localSignIn(site, store, { fetch });
-  t.after(() => signIn.close());
-  assert.equal((await signInNeeded(signIn)).deviceUrl, undefined);
-  assert.equal(store.pending, undefined);
-  assert.equal(grants.length, 0);
-});
-
-test("a device authorization cut off by a fault, or answered with anything but one, offers the page alone for that call and is asked again on the next", async (t) => {
-  const faults = [
-    () => {
-      throw new TypeError("fetch failed");
-    },
-    () => ({ status: 503 }),
-    () => authorized(1, { device_code: undefined }),
-  ];
-  for (const fault of faults) {
-    const store = storeOf(undefined);
-    let faulted = false;
-    const device = deviceOf(
-      t,
-      store,
-      () => devicePending,
-      (fields, n) => {
-        if (faulted) return authorized(n);
-        faulted = true;
-        return fault(fields, n);
-      },
-    );
-    const first = await signInNeeded(device.signIn);
-    assert.equal(first.deviceUrl, undefined);
-    assert.equal(store.pending, undefined);
-    assert.equal((await signInNeeded(device.signIn)).userCode, "USER-2");
-    assert.equal(device.devices.length, 2);
-  }
-});
-
-test("a sign-in through the page removes the pending record, and a hold that finds a renewal token stored uses it rather than polling", async (t) => {
-  const paged = storeOf(undefined);
-  const device = deviceOf(t, paged, (fields, n) =>
-    fields.grant_type === "authorization_code" ? issued(n) : devicePending,
-  );
-  const query = new URL((await signInNeeded(device.signIn)).url).searchParams;
-  assert.notEqual(paged.pending, undefined);
-  const answered = await globalThis.fetch(
-    `${query.get("redirect_uri")}?code=the-code&state=${query.get("state")}`,
-  );
-  assert.equal(answered.status, 200);
-  assert.equal(paged.pending, undefined);
-  assert.equal(paged.renewal, "renewal-1");
-
-  const renewed = storeOf(undefined);
-  const elsewhere = deviceOf(t, renewed, (_fields, n) => issued(n));
-  await signInNeeded(elsewhere.signIn);
-  renewed.renewal = "renewal-0";
-  assert.equal(await elsewhere.signIn.token(), "access-1");
-  assert.deepEqual(
-    elsewhere.grants.map((fields) => fields.grant_type),
-    ["refresh_token"],
-  );
 });
