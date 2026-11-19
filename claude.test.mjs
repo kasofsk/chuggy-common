@@ -19,6 +19,8 @@ import { workTaskAnswerSchema } from "@chuggy/worker-contract/workerTask";
 import {
   workerAgentEnvironment,
   workerChangeBaseVariable,
+  workerCommitRefVariable,
+  workerCommitVariable,
   workerImageVariable,
   workerShellEnvironment,
   workerStageEnvironment,
@@ -219,14 +221,16 @@ test("ticket configuration cannot replace worker-owned Claude arguments", () => 
  * A pod's environment as a job's `check.sh` leaves it, for an image that set
  * three of the variables it moves aside: one to what this suite's node runs
  * under, one empty, and one to a value no shell word survives unquoted. The
- * pod holds its task document and a change base it inherited, neither of
- * which a stage's shells are handed.
+ * pod holds its task document and a change base, commit and ref it inherited,
+ * none of which a stage's shells are handed.
  */
 const checkedPod = {
   PATH: process.env.PATH ?? "",
   CHUG_SUITE_POD_VARIABLE: "the pod's own",
   [workerTaskVariable]: '{"the task":"document"}',
   [workerChangeBaseVariable]: "e".repeat(40),
+  [workerCommitVariable]: "e".repeat(40),
+  [workerCommitRefVariable]: "refs/heads/the-pods",
   [workerImageVariable("NODE_OPTIONS")]: "--max-old-space-size=4096",
   [workerImageVariable("NODE_PATH")]: "",
   [workerImageVariable("LD_LIBRARY_PATH")]:
@@ -288,6 +292,10 @@ for (const shell of [...agentShells, ...posixShells])
         { changeBase: attemptBase },
         {},
         { changeBase: attemptBase, git: attemptGit },
+        {
+          commit: attemptBase,
+          commitRef: "refs/heads/chuggy/tickets/7/attempts/attempt-1",
+        },
       ])
         assert.deepEqual(
           claudeCommandEnvironment(

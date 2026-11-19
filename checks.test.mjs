@@ -31,6 +31,8 @@ import {
   runChecks,
   workerChangeBaseVariable,
   workerCheckCommands,
+  workerCommitRefVariable,
+  workerCommitVariable,
   workerCheckOutputCharsMax,
   workerCheckStageOutputCharsMax,
   workerGitEnvironment,
@@ -446,6 +448,45 @@ test("a stage's commands are told the commit the change started from", async () 
   );
 });
 
+/** A command that prints what the stage told it of its commit and that commit's ref, each `unset` where it told nothing. */
+const printsCommit = `printf "%s|%s" "\${${workerCommitVariable}-unset}" "\${${workerCommitRefVariable}-unset}"`;
+
+/**
+ * Catches the commit or its ref not reaching the stage's shells, which leaves a
+ * job that starts a forge's workflow against the change with no branch to name.
+ */
+test("a stage's commands are told the commit they are checked out at and the ref it is on", async () => {
+  const commit = "b".repeat(40);
+  const commitRef = "refs/heads/chuggy/tickets/12/attempts/attempt-1";
+
+  const { output } = await runChecks(
+    { ...workspace, commit, commitRef },
+    [printsCommit],
+    { write: () => undefined },
+  );
+
+  assert.equal(output.checks[0].output, `${commit}|${commitRef}`);
+});
+
+/**
+ * Catches a commit or ref the pod inherited reaching a stage whose attempt
+ * knows neither, which would name a branch nobody gave this attempt.
+ */
+test("a stage that knows no commit or ref leaves each unset, whatever the pod holds", async () => {
+  process.env[workerCommitVariable] = "c".repeat(40);
+  process.env[workerCommitRefVariable] = "refs/heads/the-pods";
+  try {
+    const { output } = await runChecks(workspace, [printsCommit], {
+      write: () => undefined,
+    });
+
+    assert.equal(output.checks[0].output, "unset|unset");
+  } finally {
+    delete process.env[workerCommitVariable];
+    delete process.env[workerCommitRefVariable];
+  }
+});
+
 /** A command that prints what the stage told it of which job it is in, each `unset` where it told nothing. */
 const printsJob = `printf "%s|" ${Object.values(workerJobVariables)
   .map((name) => `"\${${name}-unset}"`)
@@ -740,6 +781,21 @@ test("what a pod's runtime inherits holds no job's identity", () => {
 });
 
 /**
+ * Catches a commit or ref the pod held reaching what is not a stage's shell, as
+ * if it were the attempt's.
+ */
+test("what a pod's runtime inherits holds no commit or ref", () => {
+  assert.deepEqual(
+    workerInheritedEnvironment({
+      PATH: "/bin",
+      [workerCommitVariable]: "c".repeat(40),
+      [workerCommitRefVariable]: "refs/heads/the-pods",
+    }),
+    { PATH: "/bin" },
+  );
+});
+
+/**
  * Catches a setup file the pod held reaching what is not a setup line: a
  * command or an agent's shell writing to it would be writing to a file nothing
  * reads, or to one a setup line of another job is handed.
@@ -797,16 +853,22 @@ test("what chuggy sets in a stage's shells stands over what setup passed on, and
     {
       setupEnvironment: {
         [workerChangeBaseVariable]: "setup's",
+        [workerCommitVariable]: "setup's",
+        [workerCommitRefVariable]: "setup's",
         [workerJobVariables.stage]: "setup's",
         CARGO_NET_GIT_FETCH_WITH_CLI: "false",
       },
       changeBase: "a".repeat(40),
+      commit: "b".repeat(40),
+      commitRef: "refs/heads/main",
       job,
       git: attemptGit,
     },
   );
 
   assert.equal(shells[workerChangeBaseVariable], "a".repeat(40));
+  assert.equal(shells[workerCommitVariable], "b".repeat(40));
+  assert.equal(shells[workerCommitRefVariable], "refs/heads/main");
   assert.equal(shells[workerJobVariables.stage], "Work");
   assert.equal(shells.GIT_CONFIG_COUNT, String(attemptGit.length));
   assert.equal(shells.CARGO_NET_GIT_FETCH_WITH_CLI, "false");
