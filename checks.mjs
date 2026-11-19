@@ -33,6 +33,11 @@
  * a base nobody gave this attempt. The shell runs with `-u`, so a line reads it
  * as `${CHUG_CHANGE_BASE-}`, and `"$CHUG_CHANGE_BASE"` aborts where it is unset.
  *
+ * THOSE SHELLS ARE TOLD THE COMMIT THEY ARE CHECKED OUT AT, in `CHUG_COMMIT`,
+ * and the full ref the forge holds it on, in `CHUG_REF`, set only where the
+ * input bundle names that ref and never guessed from the clone. One the pod
+ * inherited is dropped.
+ *
  * THOSE SHELLS ARE TOLD WHICH JOB THEY ARE IN, under `workerJobVariables`:
  * the task's tenant, project, ticket and attempt, the repository its bundle
  * pins, and its stage as a configuration's keys spell it. Every attempt knows
@@ -188,6 +193,12 @@ const checkTaskDocuments = [workerTaskVariable, sessionTaskVariable];
 /** The variable a stage's shells find the commit the change started from in. */
 export const workerChangeBaseVariable = "CHUG_CHANGE_BASE";
 
+/** The variable a stage's shells find the commit they are checked out at in. */
+export const workerCommitVariable = "CHUG_COMMIT";
+
+/** The variable a stage's shells find the full ref that commit is on at the forge in. */
+export const workerCommitRefVariable = "CHUG_REF";
+
 /** The variable a setup line finds the file it passes variables on in named by. */
 export const workerSetupEnvironmentVariable = "CHUG_ENV";
 
@@ -262,8 +273,8 @@ function workerUnkeptEnvironment(environment) {
 
 /**
  * What the pod holds, less the documents that placed it and any change base,
- * setup file or job's identity it inherited. Everything else stands, the
- * site's own variables among it.
+ * commit, ref, setup file or job's identity it inherited. Everything else
+ * stands, the site's own variables among it.
  */
 export function workerInheritedEnvironment(environment) {
   return Object.fromEntries(
@@ -271,6 +282,8 @@ export function workerInheritedEnvironment(environment) {
       ([name]) =>
         !checkTaskDocuments.includes(name) &&
         name !== workerChangeBaseVariable &&
+        name !== workerCommitVariable &&
+        name !== workerCommitRefVariable &&
         name !== workerSetupEnvironmentVariable &&
         !checkJobVariableNames.includes(name),
     ),
@@ -385,6 +398,7 @@ export function workerGitEnvironment(environment, git) {
  * handed by the agent's own means: each variable `check.sh` moved aside, back
  * under its own name; `handed.setupEnvironment`, what the job's setup lines
  * passed on, over those; `handed.changeBase` where the attempt knows one;
+ * `handed.commit` and `handed.commitRef`, each where the attempt knows it;
  * `handed.heldCredentials`, each variable a held credential sets, over those;
  * `handed.job`, what `workerJobEnvironment` tells a job's shells; and
  * `handed.git`, the entries the attempt's git configuration adds.
@@ -394,6 +408,8 @@ export function workerShellEnvironment(environment, handed = {}) {
     setupEnvironment = {},
     heldCredentials = {},
     changeBase,
+    commit,
+    commitRef,
     job = {},
     git = [],
   } = handed;
@@ -404,6 +420,10 @@ export function workerShellEnvironment(environment, handed = {}) {
     ...(changeBase === undefined
       ? {}
       : { [workerChangeBaseVariable]: changeBase }),
+    ...(commit === undefined ? {} : { [workerCommitVariable]: commit }),
+    ...(commitRef === undefined
+      ? {}
+      : { [workerCommitRefVariable]: commitRef }),
     ...job,
     ...workerGitEnvironment({ ...environment, ...setupEnvironment }, git),
   };
@@ -587,8 +607,9 @@ function checkReport(commands, ran, scrub) {
  * caller's credential scrub. `context` names the directory the commands run in,
  * what the job's setup lines passed on, the variables naming its held
  * credentials' files, the commit the change started from where the attempt
- * knows it, what a job's shells are told of which job they are in, and the
- * attempt's git configuration where it has one.
+ * knows it, the commit it is checked out at and the ref that is on where the
+ * attempt knows each, what a job's shells are told of which job they are in,
+ * and the attempt's git configuration where it has one.
  */
 export async function runChecks(context, commands, services = {}) {
   if (commands.length === 0)
@@ -602,6 +623,8 @@ export async function runChecks(context, commands, services = {}) {
     setupEnvironment: context.setupEnvironment,
     heldCredentials: context.heldCredentials,
     changeBase: context.changeBase,
+    commit: context.commit,
+    commitRef: context.commitRef,
     job: context.job,
     git: context.git,
   });

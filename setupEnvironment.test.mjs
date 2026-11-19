@@ -14,6 +14,8 @@ import test from "node:test";
 
 import {
   workerChangeBaseVariable,
+  workerCommitRefVariable,
+  workerCommitVariable,
   workerImageSteeringVariables,
   workerImageVariable,
   workerJobEnvironment,
@@ -143,6 +145,8 @@ test("a line neither form reads, or a name no shell takes, is refused without it
 const chuggyNames = [
   workerSetupEnvironmentVariable,
   workerChangeBaseVariable,
+  workerCommitVariable,
+  workerCommitRefVariable,
   ...Object.values(workerJobVariables),
   ...reservedJobVariables,
   ...workerImageSteeringVariables.map(workerImageVariable),

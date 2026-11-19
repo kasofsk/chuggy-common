@@ -278,6 +278,9 @@ const changeBaseKind = "ChangeBase";
 /** A full commit hash, in either of the object formats git names a commit in. */
 const changeBaseCommit = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 
+/** The input reference naming the full ref the forge holds the attempt's `TargetCommit` on. */
+const targetCommitRefKind = "TargetCommitRef";
+
 /** The input references naming the tree an evaluation must evaluate, and the accepted commit a re-check re-reports. */
 const expectedTreeKind = "ExpectedTree";
 const recheckKind = "Recheck";
@@ -299,6 +302,16 @@ function workerRecheck(input) {
   return named !== undefined && changeBaseCommit.test(named)
     ? named
     : undefined;
+}
+
+/**
+ * The full ref the forge holds the attempt's commit on, as the input bundle
+ * names it, or nothing where it names none, as a work bundle and one from a
+ * plane that predates the reference do. It is never guessed from the clone.
+ */
+function workerWorkspaceCommitRef(input) {
+  const commitRef = optionalReference(input, targetCommitRefKind);
+  return commitRef === undefined ? {} : { commitRef };
 }
 
 /**
@@ -810,6 +823,8 @@ async function runAgent(context) {
       setupEnvironment: context.setupEnvironment,
       heldCredentials: context.heldCredentials,
       changeBase: context.changeBase,
+      commit: context.commit,
+      commitRef: context.commitRef,
       job: context.job,
       git: context.git,
     }),
@@ -1446,7 +1461,8 @@ export async function workerCredential(asked) {
  * What one attempt works in: the repository its own bundle pinned, cloned with
  * the credential this pod resolved, that credential's `refresh` where the
  * plane minted it, and the commit the change started from where the bundle
- * names one the clone holds. `seams` names the plane, the clone, the file the
+ * names one the clone holds, and the ref the forge holds its base on where the
+ * bundle names one. `seams` names the plane, the clone, the file the
  * password is written to, the directory it is written in and the directory
  * cloned into, this module's own, the contract's and the image's
  * `CHUG_WORKER_WORKSPACE` where it names none. `images` are the
@@ -1515,6 +1531,7 @@ export async function workerWorkspace(
     environment,
     ...(refresh === undefined ? {} : { refresh, refreshApart, readApart }),
     ...(changeBase === undefined ? {} : { changeBase }),
+    ...workerWorkspaceCommitRef(input),
     ...(recheck === undefined ? {} : { recheck }),
     ...(optionalReference(input, expectedTreeKind) === undefined
       ? {}
@@ -1710,6 +1727,8 @@ export async function runWorkerTask(context, commands) {
       setupEnvironment: context.setupEnvironment,
       heldCredentials: context.heldCredentials,
       changeBase: context.changeBase,
+      commit: context.commit,
+      commitRef: context.commitRef,
       job: context.job,
       git: context.git,
     },
@@ -1991,6 +2010,22 @@ function workerAttemptAside(attempt) {
 }
 
 /**
+ * What every shell of one attempt is handed beside what its setup passed on:
+ * its held credentials' files, the commit its change started from, the commit
+ * it is checked out at and that commit's ref, which job it is in, and `git`.
+ */
+function workerAttemptHanded(attempt, workspace, git) {
+  return {
+    heldCredentials: attempt.heldCredentials,
+    changeBase: workspace.changeBase,
+    commit: workspace.base,
+    commitRef: workspace.commitRef,
+    job: workerJobEnvironment(attempt.task, workspace.repositoryId),
+    git,
+  };
+}
+
+/**
  * What one attempt does in the workspace it cloned, every git it runs handed
  * `git` and every shell told which job it is in and handed its held
  * credentials' files: its setup, what an earlier attempt left put back on top
@@ -1999,12 +2034,7 @@ function workerAttemptAside(attempt) {
  */
 async function workerAttemptWorked(attempt, workspace, git) {
   const { task, bearer, evidence, scrub } = attempt;
-  const handed = {
-    heldCredentials: attempt.heldCredentials,
-    changeBase: workspace.changeBase,
-    job: workerJobEnvironment(task, workspace.repositoryId),
-    git,
-  };
+  const handed = workerAttemptHanded(attempt, workspace, git);
   const aside = workerAttemptAside(attempt);
   if (await workerRecheckPublished(attempt, workspace, git, aside)) return;
   const setupEnvironment = await prepareWorker(

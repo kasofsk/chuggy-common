@@ -18,6 +18,8 @@ import { workTaskAnswerSchema } from "@chuggy/worker-contract/workerTask";
 
 import {
   workerChangeBaseVariable,
+  workerCommitRefVariable,
+  workerCommitVariable,
   workerImageVariable,
   workerShellEnvironment,
 } from "./checks.mjs";
@@ -546,7 +548,8 @@ test("a Codex credential's home is under HOME where none is named", async (t) =>
  * variables `check.sh` moves aside, one plain, one empty, and one to every
  * character a TOML basic string must escape and some it need not, and that
  * hands git an entry of its own; and whose attempt knows the commit its change
- * started from and adds an entry to git's configuration.
+ * started from, the commit it is checked out at and that commit's ref, and adds
+ * an entry to git's configuration.
  */
 const handed = workerShellEnvironment(
   {
@@ -561,6 +564,8 @@ const handed = workerShellEnvironment(
   },
   {
     changeBase: "a".repeat(40),
+    commit: "b".repeat(40),
+    commitRef: "refs/heads/chuggy/tickets/7/attempts/attempt-1",
     git: [["credential.https://github.com.helper", "cache --socket '/m'"]],
   },
 );
@@ -600,6 +605,8 @@ test("a Codex run's shell is set exactly what it is handed", () => {
   assert.deepEqual(Object.keys(codexSetTable(argument)).sort(), [
     "CARGO_NET_GIT_FETCH_WITH_CLI",
     workerChangeBaseVariable,
+    workerCommitVariable,
+    workerCommitRefVariable,
     "GIT_CONFIG_COUNT",
     "GIT_CONFIG_KEY_0",
     "GIT_CONFIG_KEY_1",
