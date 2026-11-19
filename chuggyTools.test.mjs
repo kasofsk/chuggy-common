@@ -1602,6 +1602,7 @@ const repositoriesListed = [
     boundAt: "2026-10-01T00:00:00.000Z",
     landing: { mode: "PullRequest" },
     pipelinesWritable: false,
+    pipelinesRunnable: false,
     configured: true,
     configurationsHeld: { result: "Imported", count: 2 },
   },
@@ -1610,6 +1611,7 @@ const repositoriesListed = [
     boundAt: "2026-10-02T00:00:00.000Z",
     landing: { mode: "Push" },
     pipelinesWritable: false,
+    pipelinesRunnable: false,
     retiredAt: "2026-10-03T00:00:00.000Z",
     configured: false,
   },
@@ -1618,6 +1620,7 @@ const repositoriesListed = [
     boundAt: "2026-10-04T00:00:00.000Z",
     landing: { mode: "PullRequest" },
     pipelinesWritable: true,
+    pipelinesRunnable: true,
     configured: true,
     configurationsHeld: { result: "Bootstrapped", revision: "r0" },
     workerReach: {
@@ -3340,7 +3343,7 @@ test("the descriptions say what the server does where a session reads it", () =>
       /`configured` says whether the project holds configurations for it/,
       /Bootstrapped, the project's bootstrap `revision`/,
       /A retired binding carries `retiredAt`, and a draft write naming it is refused/,
-      /`pipelinesWritable` says whether its jobs may write its pipeline definitions, and `workerReach`, present only where the worker app cannot be said to reach it, says why/,
+      /`pipelinesWritable` says whether its jobs may write its pipeline definitions, `pipelinesRunnable` whether they may be issued `chuggy\.github-workflow-runs`, a credential that starts and reads its pipeline runs, and `workerReach`, present only where the worker app cannot be said to reach it, says why/,
       /A ticket may be filed in any binding not retired, and one holding no configurations releases its tickets under the project's bootstrap\. Each row's `fileable` says whether to file a ticket there: false, with `fileableReason` saying why, where it is retired or carries `workerReach`/,
     ],
     fetch_image: [
