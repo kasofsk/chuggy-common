@@ -15,11 +15,26 @@ import {
 import { z } from "zod";
 
 import {
+  accessTokenExpiresHeader,
+  accessTokenWarningDays,
+} from "@chuggy/worker-contract/accessToken";
+
+import {
   chuggyProjectTools,
   chuggySubmissionRepeatDescription,
+  chuggyToolAnswerBytes,
+  chuggyToolAnswerBytesMax,
 } from "./chuggyTools.mjs";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, URL, URLSearchParams } from "node:url";
@@ -37,6 +52,12 @@ import {
   localToolServer,
   localToolReleasesBytesMax,
   localToolSignInFile,
+  localToolTokenAccess,
+  localToolTokenExpiringNote,
+  localToolTokenNotFoundNote,
+  localToolTokenNoteBytesMax,
+  localToolTokenNotHeld,
+  localToolTokenRefused,
   localToolUpdated,
 } from "./localTools.mjs";
 
@@ -458,6 +479,7 @@ async function servedOf(t, asked, answered) {
       workspace: "vteng",
       project: "chuggy",
       version: "1",
+      environment: {},
       ...asked,
     },
     { McpServer, StdioServerTransport: class {}, z },
@@ -928,6 +950,7 @@ test("served with updates on, the site's pin goes to the runner updater once con
       project: "chuggy",
       version: "0.4.0",
       signIns,
+      environment: {},
       surroundings: { home: signIns, configHome: undefined },
       fetch: async (url) => {
         asked.push({ url: String(url), connected });
@@ -982,4 +1005,304 @@ test("nothing the server's modules reach is loaded later than they are, so an in
   for (const name of ["runnerUpdate.mjs", "fileLock.mjs", "workerPool.js"])
     assert.ok(named.includes(name), `${name} is reached`);
   assert.deepEqual(lazy, []);
+});
+
+const dayMs = 24 * 60 * 60 * 1_000;
+
+/** An access token as chuggy mints one. */
+function accessTokenOf() {
+  return `chgp_${randomBytes(32).toString("base64url")}`;
+}
+
+/** Whether `text` holds the token's secret or any eight characters of it. */
+function holdsTokenPart(text, token) {
+  for (let start = 0; start + 8 <= token.length; start += 1)
+    if (text.includes(token.slice(start, start + 8))) return true;
+  return false;
+}
+
+/**
+ * The tools served with `CHUGGY_TOKEN` set to `value` over an empty home,
+ * `answered` answering each API request; `requests` are those it was sent,
+ * `stderr` what was written there, and `home()` every path left in the home.
+ */
+async function tokenServedOf(t, value, answered) {
+  const home = await mkdtemp(join(tmpdir(), "local-tools-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const stderr = [];
+  t.mock.method(process.stderr, "write", (chunk) => stderr.push(String(chunk)));
+  const requests = [];
+  const served = await servedOf(
+    t,
+    {
+      signIns: join(home, "earlier"),
+      surroundings: { home, configHome: join(home, "config") },
+      environment: { CHUGGY_TOKEN: value },
+    },
+    async (requested, init) => {
+      requests.push({ requested, init });
+      return answered(requested, init);
+    },
+  );
+  return {
+    ...served,
+    requests,
+    stderr,
+    home: () => readdir(home, { recursive: true }),
+  };
+}
+
+/** A ticket's answer whose token expiry header is `expires`, absent where undefined. */
+function ticketAnswered(expires, status = 200) {
+  return globalThis.Response.json(
+    { ticket: 7 },
+    {
+      status,
+      headers:
+        expires === undefined ? {} : { [accessTokenExpiresHeader]: expires },
+    },
+  );
+}
+
+/** The text items of an answer. */
+function textsOf(answer) {
+  return answer.content.map(({ text }) => text);
+}
+
+test("served under a CHUGGY_TOKEN access token, each request presents it, and no sign-in is begun nor its store reached", async (t) => {
+  const token = accessTokenOf();
+  const served = await tokenServedOf(t, token, () => ticketAnswered());
+  for (const ticket of [7, 8]) {
+    const answer = await served.called("read_ticket", { ticket });
+    assert.equal(answer.isError, undefined);
+    assert.equal(answer.content.length, 1);
+  }
+  await served.ended();
+  assert.deepEqual(
+    served.requests.map(({ requested, init }) => [
+      requested,
+      init.headers.authorization,
+    ]),
+    [7, 8].map((ticket) => [
+      `https://chuggy.test/api/v1/tenants/vteng/projects/chuggy/tickets/${String(ticket)}`,
+      `Bearer ${token}`,
+    ]),
+  );
+  // `servedOf` answers the site's configuration and its issuer itself, so a
+  // sign-in begun would be the only reader of either, and none reached here.
+  assert.equal(globalThis.fetch.mock.callCount(), served.requests.length);
+  assert.deepEqual(await served.home(), []);
+});
+
+test("under a token, a 401 is one request, answered as the token refused with its remedy and no part of the token", async (t) => {
+  const token = accessTokenOf();
+  const served = await tokenServedOf(t, token, () =>
+    ticketAnswered(undefined, 401),
+  );
+  const answer = await served.called("read_ticket", { ticket: 7 });
+  await served.ended();
+  assert.equal(served.requests.length, 1);
+  assert.equal(answer.isError, true);
+  assert.deepEqual(textsOf(answer), [localToolTokenRefused]);
+  assert.match(
+    localToolTokenRefused,
+    /deleted, it expired, or it belongs to another site/u,
+  );
+  assert.match(
+    localToolTokenRefused,
+    /make a new one in the project's Settings → Access tokens and set CHUGGY_TOKEN to it/u,
+  );
+  assert.ok(!holdsTokenPart(JSON.stringify(answer), token));
+  assert.ok(!holdsTokenPart(served.stderr.join(""), token));
+  assert.deepEqual(await served.home(), []);
+});
+
+test("a CHUGGY_TOKEN that is not an access token is never sent: every call says so, read_docs too, and no sign-in is begun", async (t) => {
+  for (const value of [
+    "ghp_notachuggytoken",
+    `CHGP_${"a".repeat(43)}`,
+    `chgp_${"a".repeat(42)}`,
+  ]) {
+    const served = await tokenServedOf(t, value, () => ticketAnswered());
+    for (const [name, input] of [
+      ["read_ticket", { ticket: 7 }],
+      ["read_docs", {}],
+      [
+        "release_draft",
+        { ticket: 4, authoringVersion: 2, configurationRevision: "r1" },
+      ],
+    ]) {
+      const answer = await served.called(name, input);
+      assert.equal(answer.isError, true, name);
+      assert.deepEqual(textsOf(answer), [localToolTokenNotHeld], name);
+      assert.ok(!holdsTokenPart(JSON.stringify(answer), value), name);
+    }
+    await served.ended();
+    assert.equal(globalThis.fetch.mock.callCount(), 0, value);
+    assert.deepEqual(await served.home(), [], value);
+  }
+});
+
+test("an empty CHUGGY_TOKEN is unset, and a call is answered with the sign-in page", async (t) => {
+  const served = await tokenServedOf(t, "", () => ticketAnswered());
+  const answer = await served.called("read_ticket", { ticket: 7 });
+  await served.ended();
+  assert.equal(answer.isError, true);
+  assert.match(
+    textsOf(answer).join(""),
+    /not signed in to https:\/\/chuggy\.test: /u,
+  );
+  assert.equal(served.requests.length, 0);
+});
+
+test("with the token's expiry within its warning days, each answer ends with the expiry note and one stderr line is written", async (t) => {
+  const expires = new Date(Date.now() + 3 * dayMs).toISOString();
+  const token = accessTokenOf();
+  const served = await tokenServedOf(t, token, () => ticketAnswered(expires));
+  const note = localToolTokenExpiringNote(Date.parse(expires));
+  for (const ticket of [7, 8]) {
+    const answer = await served.called("read_ticket", { ticket });
+    assert.equal(answer.isError, undefined);
+    assert.equal(answer.content.length, 2);
+    assert.deepEqual(answer.content[1], { type: "text", text: note });
+  }
+  await served.ended();
+  assert.match(
+    note,
+    new RegExp(
+      `expires at ${expires}: before then, make a new one in the project's Settings → Access tokens and set CHUGGY_TOKEN to it\\.$`,
+      "u",
+    ),
+  );
+  assert.deepEqual(served.stderr, [`${note}\n`]);
+  assert.ok(!holdsTokenPart(served.stderr.join(""), token));
+});
+
+test("an expiry past the warning days, or none, or one unreadable, adds nothing and writes nothing", async (t) => {
+  for (const expires of [
+    new Date(Date.now() + (accessTokenWarningDays + 1) * dayMs).toISOString(),
+    undefined,
+    "soon",
+  ]) {
+    const served = await tokenServedOf(t, accessTokenOf(), () =>
+      ticketAnswered(expires),
+    );
+    const answer = await served.called("read_ticket", { ticket: 7 });
+    await served.ended();
+    assert.equal(answer.isError, undefined, expires);
+    assert.equal(answer.content.length, 1, expires);
+    assert.deepEqual(served.stderr, [], expires);
+  }
+});
+
+test("the token's newest expiry is the one kept, read from every answer", async () => {
+  const access = localToolTokenAccess(accessTokenOf(), {
+    log: () => undefined,
+  });
+  const near = Date.now() + dayMs;
+  const far = near + 30 * dayMs;
+  const headers = [far, near, undefined].map((at) =>
+    at === undefined ? undefined : new Date(at).toISOString(),
+  );
+  const context = localToolContext({
+    site: "https://chuggy.test",
+    tenant: "vteng",
+    project: "chuggy",
+    version: "1",
+    access,
+    request: async () => ticketAnswered(headers.shift()),
+  });
+  for (let call = 0; call < 3; call += 1)
+    await context.request(context.task, undefined, "/api/v1/x");
+  assert.equal(access.expiresAtMs, far);
+});
+
+test("a 404 under a token ends the answer with the other-project note, and one under a sign-in adds nothing", async (t) => {
+  const served = await tokenServedOf(t, accessTokenOf(), () =>
+    ticketAnswered(undefined, 404),
+  );
+  const answer = await served.called("read_ticket", { ticket: 7 });
+  await served.ended();
+  assert.equal(answer.isError, true);
+  assert.equal(answer.content.length, 2);
+  assert.match(answer.content[0].text, /^HTTP 404\n/u);
+  assert.deepEqual(answer.content[1], {
+    type: "text",
+    text: localToolTokenNotFoundNote,
+  });
+
+  const signedIn = localToolContext({
+    site: "https://chuggy.test",
+    tenant: "vteng",
+    project: "chuggy",
+    version: "1",
+    signIn: signInOf(["token"]),
+    request: apiOf([404]).request,
+  });
+  const { registered, sdk } = sdkOf();
+  localToolServer(signedIn, sdk);
+  const readTicket = registered.find(({ name }) => name === "read_ticket");
+  const relayed = await readTicket.handler({ ticket: 7 });
+  assert.equal(relayed.content.length, 1);
+});
+
+test("an answer already filling what one answer may weigh is given no note, and stays within it", async (t) => {
+  const expires = new Date(Date.now() + dayMs).toISOString();
+  const head = chuggyToolAnswerBytes("HTTP 404\n");
+  const body = "a".repeat(chuggyToolAnswerBytesMax - head);
+  const served = await tokenServedOf(
+    t,
+    accessTokenOf(),
+    () =>
+      new globalThis.Response(body, {
+        status: 404,
+        headers: { [accessTokenExpiresHeader]: expires },
+      }),
+  );
+  const answer = await served.called("read_ticket", { ticket: 7 });
+  await served.ended();
+  assert.equal(answer.content.length, 1);
+  assert.equal(
+    chuggyToolAnswerBytes(answer.content[0].text),
+    chuggyToolAnswerBytesMax,
+  );
+  assert.deepEqual(served.stderr, [
+    `${localToolTokenExpiringNote(Date.parse(expires))}\n`,
+  ]);
+});
+
+test("each note is within its bound, for any expiry a date can name", () => {
+  for (const note of [
+    localToolTokenNotFoundNote,
+    localToolTokenExpiringNote(Date.parse("+275760-09-13T00:00:00.000Z")),
+    localToolTokenExpiringNote(0),
+  ])
+    assert.ok(chuggyToolAnswerBytes(note) <= localToolTokenNoteBytesMax, note);
+});
+
+test("under a token, the instructions say whom the tools act as and to pass a refusal on, with no sign-in or steering sentence, and the rest unchanged", () => {
+  const task = { tenant: "vteng", project: "chuggy" };
+  const signedIn = localToolInstructions(task).split("\n");
+  const token = localToolInstructions(
+    task,
+    localToolTokenAccess(accessTokenOf(), { log: () => undefined }),
+  );
+  assert.doesNotMatch(token, /signed in|sign-in/u);
+  assert.doesNotMatch(
+    token,
+    /update_lead_settings|update_placement|merge_pull_request/u,
+  );
+  assert.match(
+    token,
+    /^These tools are the only way to read or act on chuggy from here, and they act as the person who made the access token they are given, in this project only\. When a call answers that the token was refused, pass that on to the person/mu,
+  );
+  assert.match(
+    token,
+    /^Changing the project's thread settings or its placement, and merging a ticket's pull request, are, like approvals, the person's to do in the console\.$/mu,
+  );
+  const lines = token.split("\n");
+  assert.deepEqual(
+    lines.filter((_line, index) => index !== 1).slice(0, -1),
+    signedIn.filter((_line, index) => index !== 1).slice(0, -2),
+  );
 });
