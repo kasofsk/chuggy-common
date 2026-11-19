@@ -60,6 +60,8 @@ import {
   workerAgentEnvironment,
   workerChangeBaseVariable,
   workerCheckCommands,
+  workerCommitRefVariable,
+  workerCommitVariable,
   workerEnvironmentWithout,
   workerImageVariable,
   workerJobVariables,
@@ -1495,6 +1497,46 @@ test("a job's setup lines and commands are told which job they are in", async (t
   );
 });
 
+/** A shell line that prints what its job was told of its commit and that commit's ref, each `unset` where nothing was. */
+const printsCommit = `printf "%s|%s" "\${${workerCommitVariable}-unset}" "\${${workerCommitRefVariable}-unset}"`;
+
+/**
+ * Catches a job's setup lines or its commands not told the commit they are
+ * checked out at, or the ref their bundle names it on; told a ref where the
+ * bundle names none, as a work task's does not; or told either as the pod held
+ * it.
+ */
+test("a job's setup lines and commands are told its commit, and the ref it is on where its bundle names one", async (t) => {
+  podHolds(t, {
+    [workerCommitVariable]: "the pod's",
+    [workerCommitRefVariable]: "the pod's",
+  });
+  const commitRef = "refs/heads/chuggy/tickets/7/attempts/attempt-1";
+  let pinned;
+
+  const told = await attemptPrinted(
+    { ...fetchedAnswer, taskKind: "Evaluation" },
+    printsCommit,
+    (base) => {
+      pinned = base;
+      return [{ ordinal: 3, kind: "TargetCommitRef", reference: commitRef }];
+    },
+  );
+  assert.deepEqual(told, {
+    printed: `${pinned}|${commitRef}`,
+    setUp: `${pinned}|${commitRef}`,
+  });
+
+  const worked = await attemptPrinted(workAnswered, printsCommit, (base) => {
+    pinned = base;
+    return [];
+  });
+  assert.deepEqual(worked, {
+    printed: `${pinned}|unset`,
+    setUp: `${pinned}|unset`,
+  });
+});
+
 /**
  * Catches what a job's setup passed on not reaching its commands, and the
  * file a setup line passes variables on in reaching them, where a command
@@ -2093,9 +2135,9 @@ function podHolds(t, variables) {
 /**
  * Catches an agent started without what its shell was prepared with, with a
  * name `check.sh` kept the image's value under, with the task document, the
- * change base or a job's identity the pod inherited, any of which would reach
- * the agent's shell; or its shell prepared without the image's value or the
- * attempt's own base.
+ * change base, commit, ref or a job's identity the pod inherited, any of which
+ * would reach the agent's shell; or its shell prepared without the image's
+ * value or the attempt's own base, commit and ref.
  */
 test("an agent is started as a check stage's shells inherit, and its shell prepared with the rest", async (t) => {
   const kept = workerImageVariable("NODE_PATH");
@@ -2103,14 +2145,20 @@ test("an agent is started as a check stage's shells inherit, and its shell prepa
     [kept]: "/image/node_modules",
     [workerTaskVariable]: "the task document",
     [workerChangeBaseVariable]: "e".repeat(40),
+    [workerCommitVariable]: "the pod's",
+    [workerCommitRefVariable]: "the pod's",
     [workerJobVariables.stage]: "the pod's",
   });
   const changeBase = "a".repeat(40);
+  const commit = "b".repeat(40);
+  const commitRef = "refs/heads/chuggy/tickets/7/attempts/attempt-1";
   const preparedWith = [];
   const reads = [
     kept,
     workerTaskVariable,
     workerChangeBaseVariable,
+    workerCommitVariable,
+    workerCommitRefVariable,
     workerJobVariables.stage,
   ]
     .map((name) => `\${${name}-dropped}`)
@@ -2121,6 +2169,8 @@ test("an agent is started as a check stage's shells inherit, and its shell prepa
     task,
     directory: process.cwd(),
     changeBase,
+    commit,
+    commitRef,
     agentEnvironment: {},
     evidence: evidenceIdle,
     agent: {
@@ -2144,12 +2194,14 @@ test("an agent is started as a check stage's shells inherit, and its shell prepa
 
   assert.equal(
     run.result.summary,
-    "prepared argued dropped dropped dropped dropped",
+    "prepared argued dropped dropped dropped dropped dropped dropped",
   );
   assert.deepEqual(preparedWith, [
     {
       NODE_PATH: "/image/node_modules",
       [workerChangeBaseVariable]: changeBase,
+      [workerCommitVariable]: commit,
+      [workerCommitRefVariable]: commitRef,
     },
   ]);
 });
