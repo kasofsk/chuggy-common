@@ -3551,15 +3551,15 @@ test("a ticket's landings are described as the route answers them, and read_tick
   const claims = [
     /the newest one answer holds, oldest first, `truncated` where it leaves older ones out/,
     /Each landing carries its `state`/,
-    /Unavailable \(it could not go through and escalated: as the newest, its ticket waits on a person; an older one stays after a resume\)/,
-    /`failureKind` where it failed, such as MergeConflict, QueueChecksFailed \(the merge queue removed its pull request twice for failed checks; its work went back to Work\) or RecheckRequired/,
-    /RecheckRequired, with `recheck` unless recorded before re-checks kept one: its `reason`, TargetMoved \(the target moved past the accepted commit\), StackTreeDiffers \(the merge's tree is not its stack's\) or MergedTreeDiffers \(its merged pull request left a tree its work was not checked on\), and `baseRef`, the base checked against, where present/,
-    /A Held landing carries `hold`, and an Unavailable one the `hold` it escalated from where one is recorded: its `kind`, [^.]*, and `since`, when a hold of that kind began/,
-    /`hold\.removal`, where its pull request left the merge queue, is the forge's `reason`, such as `manual`, and the `actor` removing it, where named/,
-    /An AwaitingMerge landing carries `wait`: its `reason` \(Blocked by the forge's rules, as where the queue will not take it yet; HeadMoved; or Queued, waiting its turn\) and `checkedAt`, when the forge was last heard about its merge/,
-    /`proposal` is the pull request [^.]*: its `url`, [^.]*its `mergeability`, and `mergeState`, GitHub's `mergeable_state`/,
-    /its `status` as chuggy last read it, [^.]*so a Proposed landing's is the one it opened with/,
-    /`conflict` is the paths its newest attempt conflicted on, `truncated` where they were cut/,
+    /Unavailable \(it failed and escalated: as the newest, its ticket waits on a person; an older one stays after a resume\)/,
+    /`failureKind` where it failed, such as MergeConflict, QueueChecksFailed \(its merge queue's checks failed; its work went back to Work: to a re-check on the base with no agent, or to the agent\) or RecheckRequired/,
+    /RecheckRequired, with `recheck` unless recorded before re-checks kept one: its `reason`, TargetMoved \(the target passed the accepted commit\), StackTreeDiffers \(the merge's tree is not its stack's\) or MergedTreeDiffers \(its merged pull request left a tree its work was not checked on\), and `baseRef`, the base checked against, where present/,
+    /A Held one carries `hold`, an Unavailable one the `hold` it escalated from where recorded: its `kind`, [^.]*, and `since`, when that kind began/,
+    /`hold\.removal`, where its pull request left the queue, is the forge's `reason`, such as `manual`, and the removing `actor` where named/,
+    /An AwaitingMerge one carries `wait`: its `reason` \(Blocked by forge rules, as where the queue won't take it yet; HeadMoved; or Queued, in line\) and `checkedAt`, when the forge last spoke of its merge/,
+    /`proposal` is its pull request, if any: `url`, [^.]*`mergeability` and `mergeState`, GitHub's `mergeable_state`/,
+    /`status` as chuggy last read it, [^.]*so a Proposed landing's is the one it opened with/,
+    /`conflict` is the paths its newest attempt conflicted on and `failedChecks`, on the attempt and a ProposalMergesExhausted hold only where one could be read, the failed checks' `names`, each `truncated` where cut/,
   ];
   for (const claim of claims)
     assert.match(described("read_ticket_landings"), claim);
