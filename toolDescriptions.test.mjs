@@ -30,6 +30,7 @@ import {
   jobHostToolNames,
   jobHostWakeRefusalsStanding,
 } from "./jobHost.mjs";
+import { hostedToolContext, hostedToolServer } from "./hostedTools.mjs";
 import { localToolContext, localToolServer } from "./localTools.mjs";
 import { sessionTicketWakesDefinitions } from "./sessionTicketWakes.mjs";
 
@@ -110,6 +111,18 @@ function localServer(request) {
   );
 }
 
+function hostedServer() {
+  return hostedToolServer(
+    hostedToolContext({
+      site: "https://chuggy.example",
+      api: "https://chuggy.example",
+      version: "1",
+      bearer: "bearer",
+    }),
+    { McpServer, z },
+  );
+}
+
 /** What a listed tool is found wanting in, nothing where it is in shape. */
 function toolDescriptionFaults({ name, description, inputSchema }) {
   const faults = [];
@@ -181,6 +194,16 @@ for (const [server, built, roster] of [
     ],
   ],
   ["the local server", localServer, chuggyProjectTools.map(({ name }) => name)],
+  [
+    "the hosted server",
+    hostedServer,
+    [
+      "list_projects",
+      ...chuggyProjectTools
+        .map(({ name }) => name)
+        .filter((name) => name !== "fetch_image"),
+    ],
+  ],
 ])
   test(`${server} lists every tool opening with a short sentence, every parameter described and its annotations given`, async () => {
     const tools = await listed(built());
@@ -202,6 +225,20 @@ test("the pod's server and the local server list each tool both serve with one s
       annotations,
       name,
     );
+});
+
+test("the hosted server lists each tool it shares with the local server with the local server's annotations and title", async () => {
+  const [local, hosted] = await Promise.all([
+    listed(localServer()),
+    listed(hostedServer()),
+  ]);
+
+  for (const { name, title, annotations } of hosted) {
+    assert.equal(title, annotations.title, name);
+    const served = local.find((tool) => tool.name === name);
+    if (served !== undefined)
+      assert.deepEqual(served.annotations, annotations, name);
+  }
 });
 
 test("the local server lists each tool's title as its own as well as among its annotations", async () => {

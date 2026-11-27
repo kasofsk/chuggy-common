@@ -1863,6 +1863,8 @@ const count = (z) => z.number().int().min(0);
 /** A draft's authoring version, which a new draft starts at. */
 const authoringVersion = (z) => z.number().int().min(1);
 const identity = (z) => z.string().min(1).max(256);
+/** A tenant or a project a call names, refused where it is a segment a URL resolves away. */
+export const chuggyToolPartition = (z) => identity(z).regex(/^(?!\.{1,2}$)/u);
 const cursor = (z) =>
   identity(z)
     .describe(
@@ -3049,6 +3051,31 @@ export const chuggyProjectTools = [
       ),
   },
 ];
+
+/**
+ * The `list_projects` of a serving bound to no project, `./hostedTools.mjs`:
+ * the inventory of every project its caller may read, in every tenant. No
+ * session's roster holds it, so no capability names it.
+ */
+export const chuggyInventoryTool = {
+  name: "list_projects",
+  annotations: {
+    title: "List projects",
+    readOnlyHint: true,
+    openWorldHint: false,
+  },
+  description:
+    "One page of the projects you may read, in every workspace. Call it first, for the `workspace` and `project` every project tool takes. Answers JSON: `projects`, each its `tenant`, which is its workspace, its `project`, its `name` and, where it has one, its `icon`; and `nextCursor`, present only where there are more.",
+  shape: (z) => ({
+    cursor: cursor(z),
+    limit: limit(z, nativeHttpPageItemsMax),
+  }),
+  call: (context, { cursor: after, limit: pageLimit }) =>
+    read(
+      context,
+      `${accountPath("projects")}${search({ cursor: after, limit: pageLimit })}`,
+    ),
+};
 
 /**
  * Every tool a member's own session reads its owner by, each at its tenant

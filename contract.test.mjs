@@ -58,6 +58,7 @@ import {
 import { z } from "zod";
 
 import {
+  chuggyInventoryTool,
   chuggyMemberTools,
   chuggyOfferTools,
   chuggyProjectTools,
@@ -85,6 +86,7 @@ import {
 import { envelope, fetchedAnswer, pushed } from "./envelope.fixture.mjs";
 import { heldCredentials } from "./heldCredentials.mjs";
 import { heartbeatIntervalMilliseconds, keepWorkerLease } from "./lease.mjs";
+import { hostedToolContext, hostedToolDefinitions } from "./hostedTools.mjs";
 import { localToolCapabilities, localToolContext } from "./localTools.mjs";
 import {
   planeCredential,
@@ -1283,9 +1285,13 @@ function toolRoutesMatching(pathname) {
     .map(([name]) => name);
 }
 
-test("the pod's tools reach exactly the routes the contract gives them", async () => {
+test("the tools reach exactly the routes the contract gives them", async () => {
   const reached = new Set();
-  for (const definition of [...chuggyProjectTools, ...chuggyMemberTools]) {
+  for (const definition of [
+    ...chuggyProjectTools,
+    ...chuggyMemberTools,
+    chuggyInventoryTool,
+  ]) {
     const paths = [];
     const docs = [];
     const context = chuggyToolContext(
@@ -1326,6 +1332,47 @@ test("the pod's tools reach exactly the routes the contract gives them", async (
       .filter((route) => !chuggyToolRoutesUnbuilt.includes(route))
       .sort(),
   );
+});
+
+test("a hosted tool that takes a workspace and a project reaches that project's routes alone, and every other reaches none", async () => {
+  const asked = [];
+  const context = hostedToolContext({
+    site: "https://chuggy.test",
+    api: "http://api.internal:8080",
+    version: "1",
+    bearer,
+    request: async (task, held, path) => {
+      asked.push({ task, held, path: new URL(path, task.api.url).pathname });
+      return { status: 200, text: async () => "{}" };
+    },
+  });
+  const project = `/api/v1/tenants/w-1/projects/p-1`;
+
+  for (const definition of hostedToolDefinitions(context)) {
+    asked.length = 0;
+    const bound = "workspace" in definition.shape(z);
+    await chuggyToolHandler(
+      definition,
+      z,
+    )({
+      ...everyToolArgument,
+      ...toolArgumentInPlace[definition.name],
+      workspace: "w-1",
+      project: "p-1",
+    });
+
+    for (const { task, held, path } of asked) {
+      assert.equal(task.api.url, "http://api.internal:8080", definition.name);
+      assert.equal(held, bearer, definition.name);
+      assert.equal(
+        path === project || path.startsWith(`${project}/`),
+        bound,
+        `${definition.name} asked ${path}`,
+      );
+      assert.ok(!path.includes("/projects/") || bound, definition.name);
+    }
+    if (bound) assert.equal(asked.length, 1, definition.name);
+  }
 });
 
 /** The tool names one roster registers, off the pod's own server definitions. */
