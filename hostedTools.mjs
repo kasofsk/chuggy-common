@@ -42,7 +42,9 @@ import {
 } from "./chuggyTools.mjs";
 import {
   localToolCapabilities,
+  localToolFilingSteps,
   localToolRepeatDescription,
+  localToolSteeringSteps,
 } from "./localTools.mjs";
 
 /** What a call answers where the API refused the bearer it was made under. */
@@ -63,17 +65,8 @@ export function hostedToolInstructions() {
 These tools are the only way to read or act on chuggy from here, and they act as the person who connected chuggy, in the projects list_projects answers. When a call answers that chuggy refused this connection's sign-in, pass that on to the person, in full, in your next message, whatever else you are doing. Nothing else stands in for what these tools answer, so do not work around a refused sign-in.
 The chuggy docs are behind read_docs: call it with no page for the index first, then with a page the index lists.
 To file a ticket, passing every call the \`workspace\` and \`project\` list_projects named:
-1. read_abilities: who you act as, which a ticket's \`creator\` names, and what you may do.
-2. list_repositories: a repository that is configured and \`fileable\`.
-3. list_configurations: a revision whose \`repository\` is that repository, or, where its list_repositories row's \`configurationsHeld.result\` is Bootstrapped, the \`configurationsHeld.revision\` that row carries.
-4. initialize_draft on that revision: the fence and the defaults.
-5. create_draft: the minimum brief, and \`authoring\` from the defaults.
-6. read_draft: the draft as filed.
-7. release_draft.
-8. read_operation: every command is submitted, and this is how its outcome is read.
-Releasing starts nothing: once its dependencies are Done the ticket waits Pending until a person who may dispatch dispatches it: by dispatch_ticket on the word of the person you act for, or by another person who may dispatch.
-To change a project's thread settings: read_docs the page "A project's thread settings", then read_lead_settings and update_lead_settings.
-To merge a ticket's pull request: read_ticket_landings, ask the person whether they want chuggy to merge it, then merge_pull_request.`;
+${localToolFilingSteps}
+${localToolSteeringSteps("a")}`;
 }
 
 /** A request under the bearer, which never asks again and ends the call on a 401. */

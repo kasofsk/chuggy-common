@@ -23,7 +23,12 @@ import {
   hostedToolServer,
   hostedToolSignInRefused,
 } from "./hostedTools.mjs";
-import { localToolRepeatDescription } from "./localTools.mjs";
+import {
+  localToolFilingSteps,
+  localToolInstructions,
+  localToolRepeatDescription,
+  localToolSteeringSteps,
+} from "./localTools.mjs";
 
 const bearer = "person-bearer";
 
@@ -193,4 +198,16 @@ test("a repeated submission is described as a new operation, and the server name
   assert.match(instructions, /Call list_projects first/u);
   assert.match(instructions, /`workspace` and `project`/u);
   assert.doesNotMatch(instructions, /sign in|address|w-1/iu);
+});
+
+test("the hosted instructions file a ticket and steer a project by the local serving's own steps", async () => {
+  const client = await hosted(recorded().fetch);
+  const instructions = client.getInstructions();
+  await client.close();
+  const local = localToolInstructions({ tenant: "w", project: "p" });
+
+  assert.ok(local.includes(localToolFilingSteps));
+  assert.ok(local.includes(localToolSteeringSteps("the")));
+  assert.ok(instructions.includes(localToolFilingSteps));
+  assert.ok(instructions.includes(localToolSteeringSteps("a")));
 });
