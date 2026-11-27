@@ -1937,8 +1937,8 @@ const chuggyTicketTakeRefusals =
 const anyObject = (z) => z.looseObject({});
 
 /**
- * Every project tool: its name, the shape its input is checked against at the
- * boundary, and the one route it reaches. It is a value rather than a function
+ * Every project tool: its name, its MCP annotations, the shape its input is
+ * checked against at the boundary, and the one route it reaches. It is a value rather than a function
  * because it is a roster, and a roster read twice must read the same both
  * times; it is exported so a suite can drive every tool's route, whatever
  * roster a session holds.
@@ -1946,6 +1946,11 @@ const anyObject = (z) => z.looseObject({});
 export const chuggyProjectTools = [
   {
     name: "list_tickets",
+    annotations: {
+      title: "List tickets",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "One page of this project's tickets, ascending by number or by recent activity. Call it to find a ticket and its phase. Each carries `creator`, the member who filed it, and `owner`, the member its next execution is placed for: the member who took it, else its creator. Each carries `epics`, the epics it is in, when it is in any. A page may hold fewer than `limit`, and only `nextAfter`, or `nextCursor`, present says there are more.",
     shape: (z) => ({
@@ -1997,6 +2002,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_ticket",
+    annotations: {
+      title: "Read ticket",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "One ticket: its phase, its version, its authoring, its brief and what its runs cost. Call it for where a ticket stands. `creator` is the member who filed it, and `owner` the member its next execution is placed for: the member who took it, else its creator, absent where neither is a member. It carries `runTotals`, what every run of its executions reported, summed: turns, durations, tokens by kind, permission denials and `costUsdMicros`, millionths of a dollar at the runtime's list price, with tokens and cost per model in `models`. A ticket no run has reported for carries none. A ticket waiting because its run stopped at its clone, setup, commit, push or deadline, because its runner's disk ran low, or because a credential its configuration listed was not delivered, names that step's label, the execution and the attempt in `escalation.failed`, which read_run_error takes to read the attempt's error text, and for a credential not delivered its `absent`: the `credential` and the `reason` it was not. Where its work is landing, waits to land or escalated at landing, read_ticket_landings says how: its hold, its approval, or its pull request and what its merge waits on. A ticket in an epic carries `epics`, each epic's number and title, read_epic reads one. A Pending ticket following its configuration's newest revision carries `following`: its `verdict`, one of Current, Moves, Held or Trimmed, and for Held the `code` its release would be refused with.",
     shape: (z) => ({ ticket: ticket(z) }),
@@ -2005,6 +2015,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_draft",
+    annotations: {
+      title: "Read draft",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "One draft still open on this project. Call it before revise_draft, whose fence and whole brief it answers.",
     shape: (z) => ({
@@ -2017,6 +2032,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "list_drafts",
+    annotations: {
+      title: "List drafts",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "One page of the drafts this project still holds open, ascending by ticket. Call it to find a draft to revise or release.",
     shape: (z) => ({
@@ -2031,6 +2051,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "list_configurations",
+    annotations: {
+      title: "List configurations",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "One page of this project's configuration revisions, newest first. By default it holds the newest of each configuration imported from a repository and every revision imported from none; `latest: false` holds every revision. Call it for the revision a draft is filed against. Each answers its `revision`, its `name`, the `repository` it was imported from, its `readiness` and, for a catalog, its `catalog`; read_configuration answers the rest.",
     shape: (z) => ({
@@ -2053,6 +2078,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_configuration",
+    annotations: {
+      title: "Read configuration",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "One configuration revision's canonical document, as a draft is authored against it. Call it for who does a ticket's work and what evaluates it. `canonical` is the stored document as JSON text, and its `worker.mode` is who does the work of a ticket released against it: the agent, and what that agent is started with, a model where the configuration names one. Its evaluation stages run in the order listed and a failed stage ends evaluation, while the evaluators of one stage run in parallel; in a catalog each evaluator of a plan stage names its own workload, so review lenses that should run side by side belong in one stage. A configuration larger than one answer is read by `path`, keys walking into the parsed `canonical`: " +
       chuggyPathReadDescription +
@@ -2075,6 +2105,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_ticket_landings",
+    annotations: {
+      title: "Read ticket landings",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "One ticket's landings, each finalizing its work into its repository. Call it for how its work lands or why not. It answers the newest one answer holds, oldest first, `truncated` where it leaves older ones out; a ticket before landing has none. Answers JSON. Each landing carries its `state`, such as Proposed (its pull request awaits a person's merge) or Unavailable (it failed and escalated: as the newest, its ticket waits on a person; an older one stays after a resume), its `cycle`, `attempts` and newest `attempt`, if any: its `outcome`, `targetRef` and `failureKind` where it failed, such as MergeConflict, QueueChecksFailed (its merge queue's checks failed; its work went back to Work: to a re-check on the base with no agent, or to the agent) or RecheckRequired, with `recheck` unless recorded before re-checks kept one: its `reason`, TargetMoved (the target passed the accepted commit), StackTreeDiffers (the merge's tree is not its stack's) or MergedTreeDiffers (its merged pull request left a tree its work was not checked on), and `baseRef`, the base checked against, where present. A Held one carries `hold`, an Unavailable one the `hold` it escalated from where recorded: its `kind`, what holds it, and `since`, when that kind began. `hold.removal`, where its pull request left the queue, is the forge's `reason`, such as `manual`, and the removing `actor` where named. An AwaitingMerge one carries `wait`: its `reason` (Blocked by forge rules, as where the queue won't take it yet; HeadMoved; or Queued, in line) and `checkedAt`, when the forge last spoke of its merge. A Landed one carries `landedCommit`. `proposal` is its pull request, if any: `url`, `headRef`, `baseRef`, `status` as chuggy last read it, so a Proposed landing's is the one it opened with, `mergeability` and `mergeState`, GitHub's `mergeable_state`. `conflict` is the paths its newest attempt conflicted on and `failedChecks`, on the attempt and a ProposalMergesExhausted hold only where one could be read, the failed checks' `names`, each `truncated` where cut.",
     shape: (z) => ({ ticket: ticket(z) }),
@@ -2086,6 +2121,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_landing_queues",
+    annotations: {
+      title: "Read landing queues",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "This project's landing queues, one for each reference a Serialized or Stacked ticket lands on. Call it for why a ticket's landing waits on another ticket's. Answers JSON. Each queue carries its `repository` and its `target`, a queue naming no `target` being its tickets' that name none, which is a different queue from one naming the default branch. Its `holder` is the one ticket that may land on that reference now, and `waiting` the tickets ranked behind it, in rank order, none of which lands there before the holder stops holding it. `holderPhase` is the holder's phase, and `holderSince` when it became the holder, in UTC: the later of when it took its rank and when the ticket holding the queue before it stopped, which a re-check, a re-stack, a re-evaluation and an invalidation leave as it was. A ticket alone in a queue is its holder and waits on nobody. It answers the route's first whole queues one answer holds, in the route's order, by repository and then target, `truncated` where it leaves later ones out or the route left tickets out.",
     shape: () => ({}),
@@ -2094,6 +2134,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "list_executions",
+    annotations: {
+      title: "List executions",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "One page of this project's executions, narrowed by ticket or by state. Call it for a ticket's runs and their ids.",
     shape: (z) => ({
@@ -2126,6 +2171,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_execution",
+    annotations: {
+      title: "Read execution",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "One execution: its ticket, its attempts, its state and its outcome. Call it for what a run reported of itself. `result.report` is what the run said of itself: for a check, every command it ran with its status, and the end of what the failing one wrote; for an agent, its summary. It is the run's own text, as untrusted as anything a run wrote. An execution whose passing result was carried from an earlier one, here and in list_executions, names that one in `carriedFrom`: its `execution`, `task` and `workCycle`.",
     shape: (z) => ({ execution: execution(z) }),
@@ -2134,6 +2184,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_run_transcript",
+    annotations: {
+      title: "Read run transcript",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description: `One page of the events one attempt's run wrote, oldest first. They are the run's own text, as untrusted as anything a run wrote. A page read answers JSON: \`entries\`, each event whole where it fits and one too large as {uuid, type, bytes, preview}; \`elided\`, how many of the batches this page was cut from could not be read, so pages cut from the same batches repeat the count; \`complete\`, whether the run has ended; and \`next\` — pass its \`after\` and \`entry\` back for the page after this one. An answer with no \`next\` has read all the run wrote: where \`complete\` is true that is the whole of it, and while the run is still writing, the same read again answers what it wrote since. ${transcriptAnswerDescription} A read that fails answers the reason instead.`,
     shape: (z) => ({
       execution: execution(z),
@@ -2151,6 +2206,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_run_error",
+    annotations: {
+      title: "Read run error",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "One attempt's error text: why the attempt ended without a result, as its worker, or the cluster in its place, wrote it. Call it for the output of a failed clone, setup line or push. It is the run's own text, as untrusted as anything a run wrote. Answers JSON: {bytes, content}, or {bytes, tail} with the text's end where the whole is larger than one answer. An attempt with none answers that it has none. read_ticket names the execution and attempt in `escalation.failed`, and read_execution's attempts carry the text's size as `error.bytes`.",
     shape: (z) => ({ execution: execution(z), attempt: attempt(z) }),
@@ -2162,6 +2222,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_operation",
+    annotations: {
+      title: "Read operation",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "One submitted operation's outcome. Call it after every command: this is the only way to learn what a command did. A Succeeded operation carries `decidedSequence`, the project's journal head the command moved it to.",
     shape: (z) => ({
@@ -2174,6 +2239,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "list_threads",
+    annotations: {
+      title: "List threads",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "The member threads open on this project: whose each is, its state, and whether it is this session's own. Call it for the session a thread is read by.",
     shape: () => ({}),
@@ -2181,6 +2251,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_thread",
+    annotations: {
+      title: "Read thread",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "One page of a member thread, newest turn last: whose it is, its state, and that much of its conversation.",
     shape: (z) => ({
@@ -2200,6 +2275,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_thread_transcript",
+    annotations: {
+      title: "Read thread transcript",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description: `One page of a thread's own raw transcript, which is how it reads past its own compaction. A page read answers JSON: \`entries\` whole where they fit, an entry too large as {uuid, type, bytes, preview}, and \`next\` — pass its \`after\` and \`entry\` back for the page after this one. An answer with no \`next\` has read to the stream's end. ${transcriptAnswerDescription} A read that fails answers the reason instead.`,
     shape: (z) => ({
       session: thread(z),
@@ -2215,6 +2295,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "list_repositories",
+    annotations: {
+      title: "List repositories",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "Every repository this project binds, oldest first. Call it for the repository a ticket is filed in. `repository` is its clone URL, which is what a brief's `repository` names; `landing` is its landing default, the mode a ticket in it lands by where neither its brief nor its catalog finalizer names one; `configured` says whether the project holds configurations for it, and `configurationsHeld` what it holds now: Imported, with the `count` of names it declared, or Bootstrapped, the project's bootstrap `revision`, which a repository declaring none releases its tickets under. `lastImport` is the newest import attempt, and it can fail while earlier imported revisions stay usable. A retired binding carries `retiredAt`, and a draft write naming it is refused. `pipelinesWritable` says whether its jobs may write its pipeline definitions, `pipelinesRunnable` whether they may be issued `chuggy.github-workflow-runs`, a credential that starts and reads its pipeline runs, and `workerReach`, present only where the worker app cannot be said to reach it, says why. A ticket may be filed in any binding not retired, and one holding no configurations releases its tickets under the project's bootstrap. Each row's `fileable` says whether to file a ticket there: false, with `fileableReason` saying why, where it is retired or carries `workerReach`, since a ticket in a repository the worker app does not reach stops at its clone.",
     shape: () => ({}),
@@ -2228,6 +2313,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "fetch_image",
+    annotations: {
+      title: "Fetch image",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     description:
       "One of this project's images, written to a new file. Answers that file's path, its media type and its size in bytes; open the file with Read to see the image.",
     shape: (z) => ({
@@ -2240,6 +2332,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_docs",
+    annotations: {
+      title: "Read docs",
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
     description:
       "chuggy's own documentation, as Markdown, verbatim. Call it first with no `page`: that answers the index, which lists each page by its URL. Then call it with `page`, one of those URLs, for that page. A URL outside the index's own directory is refused.",
     shape: (z) => ({
@@ -2256,6 +2353,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_abilities",
+    annotations: {
+      title: "Read abilities",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "Who this session acts as and what it may do on this project, read live. Call it once before acting. `principal` is the session's own principal, encoded as a ticket's `creator` is, so the tickets whose `creator` is it are yours. The rest are the permits it holds, each true or false, `dispatch`, `skipPlannedEvaluations` and `writeEpic` among them: read a permit here rather than learning it from a refusal. `writeEpic` is what create_epic, revise_epic, add_epic_tickets and remove_epic_tickets need.",
     shape: () => ({}),
@@ -2263,6 +2365,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "list_epics",
+    annotations: {
+      title: "List epics",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "One page of this project's epics, each with its progress, its status and the outside tickets it waits on. Call it to find an epic. An epic is a named set of tickets worked toward one end; `nextAfter` present says there are more.",
     shape: (z) => ({
@@ -2296,6 +2403,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_epic",
+    annotations: {
+      title: "Read epic",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "One epic: its title, summary, description, visibility, revision and member tickets. Call it before revise_epic. It carries `progress`, its members counted by phase with `done` and `total`, `status`, one of empty, done, attention, not_started and in_progress, and `waitingOnOutside`, the tickets outside the epic that a Pending member waits on. A description longer than one answer holds is answered cut to fit, with `descriptionChars`, `descriptionCharsLeft` and a `note` naming the `offset` that reads on.",
     shape: (z) => ({
@@ -2310,6 +2422,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_epic_history",
+    annotations: {
+      title: "Read epic history",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "One page of an epic's revisions, newest first, each with who made it and its title then. Call it to see how an epic changed. `nextAfter` present says there are more.",
     shape: (z) => ({
@@ -2330,6 +2447,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_epic_graph",
+    annotations: {
+      title: "Read epic graph",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "An epic's members and the tickets outside it that they depend on, with an edge from each dependency to its dependent. Call it to see what orders the epic's work.",
     shape: (z) => ({ epic: epic(z) }),
@@ -2338,6 +2460,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "initialize_draft",
+    annotations: {
+      title: "Initialize draft",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "The defaults and the fence a new draft is filed against, for one configuration revision. Call it before create_draft or file_dependent. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from: each stage's `key` and each evaluator's `key` are positions counted from one in the configuration's plan, and passing it unchanged runs the whole plan. `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, stage N runs the selected plan's Nth stage, and `defaults` and `choices` are those of the selection passed. `commandedCheckStage` is the stage a brief's `checks` join, by its program stage key, counted from one as `defaults.program` keys are, and absent where none takes them, and `commandedCheckStageNote` says it in words: the same stage and, for a catalog, the plan and the stage's name, or that none does and which plans would. `configuration` is answered without its `canonical`; read_configuration answers the document, by `path` where it is larger than one answer. Dependencies are chosen from list_tickets. An epic for the draft is chosen at create_draft, which is where a missing or Archived one is refused.",
     shape: (z) => ({
@@ -2369,6 +2496,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "file_dependent",
+    annotations: {
+      title: "File dependent draft",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     description:
       "Files a new draft derived from an existing ticket. Call it after initialize_draft, for work that follows from a ticket already filed.",
     shape: (z) => ({
@@ -2416,6 +2550,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "revise_draft",
+    annotations: {
+      title: "Revise draft",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description:
       "Replaces one open draft's authoring, brief, overrides and selection, fenced on `expectedVersion`. A Pending ticket's draft takes a revision too, which its ticket runs only once update_ticket releases it.",
     shape: (z) => ({
@@ -2460,6 +2601,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "delete_draft",
+    annotations: {
+      title: "Delete draft",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description:
       "Deletes one open draft, fenced on `expectedVersion`. Call it for a draft that will not be released.",
     shape: (z) => ({
@@ -2479,6 +2627,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "release_draft",
+    annotations: {
+      title: "Release draft",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description: `Submits the release of one draft. Releasing makes the ticket Pending and starts no work: once its dependencies are Done it waits Pending until a person who may dispatch dispatches it; dispatch_ticket submits one on your owner's word. ${chuggySubmissionDescription} A release refused for its brief or its configuration is refused again at that authoring version, so revise_draft the draft and release the \`authoringVersion\` and \`configurationRevision\` the revision answers. ${chuggyProgramShortDescription}`,
     shape: (z) => ({
       ticket: ticket(z).describe(
@@ -2501,6 +2656,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "create_draft",
+    annotations: {
+      title: "Create draft",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     description:
       "Files a new draft for work your owner asked for, derived from nothing. Call it after initialize_draft, whose answer it is fenced on. Its `epic` files the draft into an epic in the same write.",
     shape: (z) => ({
@@ -2535,6 +2697,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "revoke_ticket",
+    annotations: {
+      title: "Revoke ticket",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description: `Submits the revocation of one ticket, on your owner's word only. Revoking ends the ticket for good: it cancels the work running for it and undoes nothing that already landed. It revokes no other ticket. A ticket depending on a revoked one cannot start, and read_ticket names those dependencies in \`revokedDependencies\`: while it is Pending, an update that drops them (revise_draft, then update_ticket) lets it start, and otherwise it can only be revoked too. ${chuggySubmissionDescription}`,
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
@@ -2542,6 +2711,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "take_ticket",
+    annotations: {
+      title: "Take ticket",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description: `Takes one released ticket for the member this session acts as, on your owner's word only. The take is the caller's own and names no other member: the ticket's \`owner\` becomes read_abilities' \`principal\`, and its next executions are placed for that member's personal runner and own agent account. read_abilities' \`mutate\` answers whether the caller may take; without it the take is answered 403 Forbidden. The answer is \`outcome\`, Taken, or AlreadyOwner where the caller owns it already, and \`owner\`. ${chuggyTicketTakeRefusals}`,
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
@@ -2553,6 +2729,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "return_ticket",
+    annotations: {
+      title: "Return ticket",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description: `Returns one ticket the member this session acts as took to its creator, on your owner's word only. The return is the caller's own, as the take was: only the ticket's taker returns it, and any other caller is refused 409 NotTaker. read_abilities' \`mutate\` answers whether the caller may take or return; without it the return is answered 403 Forbidden. The answer is \`outcome\` Returned and \`owner\`, the creator, absent where the creator is no member. ${chuggyTicketTakeRefusals}`,
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
@@ -2564,6 +2747,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "update_ticket",
+    annotations: {
+      title: "Update ticket",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description: `Submits the update of one Pending ticket to its draft as revise_draft last left it, on your owner's word only. A ticket no longer Pending is refused (TicketNotPending), and one whose revision moved since it was read is refused (TicketRevisionStale), so read_ticket it again. The draft's dependencies replace the ticket's: dropping one is never refused, and one it adds is refused if it was revoked (DependenciesRevoked) or already waits on this ticket (DependencyCycle). ${chuggySubmissionDescription} ${chuggyProgramShortDescription}`,
     shape: (z) => ({
       ticket: ticket(z),
@@ -2588,6 +2778,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "create_epic",
+    annotations: {
+      title: "Create epic",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     description: `Creates an epic, a named set of tickets worked toward one end, on your owner's word only. Call it after read_abilities says \`writeEpic\`. The answer is the epic's number and its first \`revision\`. ${chuggyEpicWriteRefusals}`,
     shape: (z) => epicContent(z),
     call: (context, args) =>
@@ -2598,6 +2795,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "revise_epic",
+    annotations: {
+      title: "Revise epic",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description: `Revises an epic whole, on your owner's word only. Call it after read_epic, whose \`revision\` it is written against and whose fields it replaces: send every field again, changed or not, except a \`description\` that is not changing, which left out is kept as the epic holds it. To change only the members, add_epic_tickets and remove_epic_tickets do it without resending the rest. The answer is the epic's number and its new \`revision\`. ${chuggyEpicWriteRefusals}`,
     shape: (z) => ({
       epic: epic(z),
@@ -2615,6 +2819,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "add_epic_tickets",
+    annotations: {
+      title: "Add epic tickets",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description: `Adds tickets to an epic and changes nothing else about it, on your owner's word only. It reads the epic and revises it in one call, so no read_epic is needed. Tickets already in it are left, and a call that adds nothing writes nothing. A write that went stale between its read and its write is read and written once more. ${chuggyEpicWriteRefusals}`,
     shape: (z) => ({ epic: epic(z), tickets: epicTickets(z) }),
     call: (context, args) =>
@@ -2630,6 +2841,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "remove_epic_tickets",
+    annotations: {
+      title: "Remove epic tickets",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description: `Removes tickets from an epic and changes nothing else about it, on your owner's word only. It reads the epic and revises it in one call, so no read_epic is needed. Tickets not in it are left, and a call that removes nothing writes nothing. A write that went stale between its read and its write is read and written once more. ${chuggyEpicWriteRefusals}`,
     shape: (z) => ({ epic: epic(z), tickets: epicTickets(z) }),
     call: (context, args) =>
@@ -2645,12 +2863,24 @@ export const chuggyProjectTools = [
   },
   {
     name: "dispatch_ticket",
+    annotations: {
+      title: "Dispatch ticket",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     description: `Submits the dispatch of one released ticket, on your owner's word only, which starts its work now. It is your owner's dispatch, so where they may not dispatch in this project the submission is answered 404, though the ticket exists. Only a Pending ticket whose dependencies are all Done can be dispatched, and any other is answered without anything being submitted. A ticket that moved between this tool reading it and submitting is refused (TicketChanged), so call again. ${chuggySubmissionDescription}`,
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) => dispatchTicket(context, args.ticket),
   },
   {
     name: "read_lead_settings",
+    annotations: {
+      title: "Read thread settings",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description: `This project's thread settings, under the name they had before: what the project sets for its threads, and what they run under. Call it before update_lead_settings, and for how a thread is prompted. read_docs's page "A project's thread settings" says what each field is. \`overrides\` is what the project sets of ${updateLeadSettingsFieldsText}, a field it leaves out taking the default; \`effective\` is its North Star and the standing rules its threads run under; \`revision\` is what update_lead_settings is written against. Reading and writing both need \`manageSelector\` in read_abilities, and without it the route answers 404. Settings larger than one answer are read by \`path\`, keys walking into the settings: ${chuggyPathReadDescription} With no \`path\`, the settings are answered whole where they fit and otherwise as their outline. A \`path\` the settings do not hold is refused, naming the keys where it stopped.`,
     shape: (z) =>
       pathArguments(
@@ -2668,6 +2898,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "update_lead_settings",
+    annotations: {
+      title: "Update thread settings",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description: `Changes this project's thread settings, under the name they had before, on your owner's word only. Call it after read_lead_settings, whose \`revision\` it is written against, and see read_docs's page "A project's thread settings" for what each field is. The fields it sets or clears are ${updateLeadSettingsFieldsText}. It reads the settings and writes the whole override set back with \`set\` applied and \`clear\` dropped, so a field named in neither keeps what the settings hold, and a long text is never sent again. A write needs \`manageSelector\` in read_abilities, and without it the route answers 404. A write is answered as its status and the \`revision\` the settings are now at; 409 with the \`code\` SettingsRevisionConflict is settings that moved since they were read, and is never asked again, so read them and decide again. Every other answer is the API's, its status and body unaltered: 503 SettingsWriteContended, which may be sent again, 404, and a body larger than the API takes.`,
     shape: (z) => ({
       expectedRevision: count(z).describe(
@@ -2690,6 +2927,11 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_placement",
+    annotations: {
+      title: "Read placement",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "Where this project's threads run, and what decided it. Call it before update_placement. `thread` is a `route` and its `source`; `choices` are the routes you may choose, none where you may not administer the project; `runners` says whether runners would take each.",
     shape: () => ({}),
@@ -2697,6 +2939,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "update_placement",
+    annotations: {
+      title: "Update placement",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description: `Changes where this project's threads run, on your owner's word only. A write needs \`administer\` in read_abilities. The answer is the API's, its status and body unaltered, a refusal included: 403 HostedRunsNotGranted where a route InCluster needs the tenant's hosted grant.`,
     shape: (z) => ({
       thread: z
@@ -2707,12 +2956,24 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_usage",
+    annotations: {
+      title: "Read usage",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description: `Your owner's own agent accounts: each agent's usage, its pause and its credentials. ${chuggyAgentAccountDescription} Call it for why an agent is paused, and before update_usage_settings, retry_paused_agent or retire_credential. Answers JSON: \`accounts\`, one per agent, each its \`agent\`; its \`settings\`, \`fiveHourPercent\` and \`sevenDayPercent\` being the share of each window a reading at or over pauses it at and \`pausesThreads\` whether your owner's threads pause with it; \`readings\`, each window's newest across its credentials; \`limit\`, the newest a provider stopped it at; \`pause\`, absent where none holds, with the \`credentials\` holding it; and \`credentials\`, each by its \`name\` with its own \`readings\` and \`pause\`.`,
     shape: () => ({}),
     call: (context) => read(context, accountPath("agentAccounts")),
   },
   {
     name: "update_usage_settings",
+    annotations: {
+      title: "Update usage settings",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description: `Changes how your owner's own account pauses one agent, on your owner's word only. ${chuggyAgentAccountDescription} It writes the agent's settings whole, so send every field, changed or not, from what read_usage answers as its \`settings\`. ${chuggyAgentAccountWriteDescription} 204 is the settings written.`,
     shape: (z) => ({
       agent: accountAgent(z),
@@ -2734,6 +2995,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "retry_paused_agent",
+    annotations: {
+      title: "Retry paused agent",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     description: `Lets one claim of one paused agent through the limit a provider stopped it at, on your owner's word only. ${chuggyAgentAccountDescription} It is a press, and lets no claim through a threshold your owner's settings pause the agent at. ${chuggyAgentAccountWriteDescription} 204 is the press recorded, and 409 with the \`code\` NotHardPaused is an agent no limit holds paused.`,
     shape: (z) => ({ agent: accountAgent(z) }),
     call: (context, { agent }) =>
@@ -2741,6 +3009,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "retire_credential",
+    annotations: {
+      title: "Retire credential",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description: `Retires one credential of one agent of your owner's own account, by its name, on your owner's word only. ${chuggyAgentAccountDescription} Its readings and its limit are dropped, so the account reads it no more until a run reports it again. ${chuggyAgentAccountWriteDescription} 204 is Retired, 404 is NotHeld, no credential held under that name, and 409 with the \`code\` CredentialInUse is one a live runner of your owner's still names.`,
     shape: (z) => ({
       agent: accountAgent(z),
@@ -2757,6 +3032,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "merge_pull_request",
+    annotations: {
+      title: "Merge pull request",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description: `Merges the pull request one ticket's landing opened, through chuggy's portal app, on your owner's yes only. read_ticket_landings first, name the pull request by its \`proposal.url\`, and ask whether they want chuggy to merge it or would rather review and merge it themselves: a repository with its own history may have rules an app cannot pass. The answer is the API's, its status and body unaltered: 200 \`outcome\` Merged, also where it was merged already; 403 ProposalMergeForbidden where your owner lacks the MergeProposals permit, \`mergeProposals\` in read_abilities; 404 for a ticket with no proposed landing; and 409 with \`refused\`, Closed, Conflicting, Blocked, Behind, HeadMoved, NotMergeable or AppDenied, and the pull request's \`url\`. On a 409 say the reason in one line with that link and leave the merge to your owner.`,
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
@@ -2776,6 +3058,11 @@ export const chuggyProjectTools = [
 export const chuggyMemberTools = [
   {
     name: "read_my_abilities",
+    annotations: {
+      title: "Read my abilities",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "Who your owner is in this tenant and what they may do there, read live. Call it before saying what your owner may do. Answers JSON: `principal`, their principal, encoded as a ticket's `creator` is, and the tenant's permits `openUnscopedChat`, `executeHosted`, `registerPersonalRunner` and `administerTenant`, each true or false.",
     shape: () => ({}),
@@ -2783,6 +3070,11 @@ export const chuggyMemberTools = [
   },
   {
     name: "list_projects",
+    annotations: {
+      title: "List projects",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "One page of the projects your owner may see in this tenant, in identity order, none in retention. Call it for which projects there are and how each stands. Answers JSON: `projects`, each its `project`, its `lifecycle` (Active, Suspended, IntegrityBlocked or Deleting) and `role`, the strongest role your owner holds on it, and `nextAfter`. A page reads `limit` of the tenant's projects and keeps those your owner may see, so it may hold fewer, or none, and only `nextAfter`, present, says there are more.",
     shape: (z) => ({
@@ -2801,6 +3093,11 @@ export const chuggyMemberTools = [
   },
   {
     name: "list_my_threads",
+    annotations: {
+      title: "List my threads",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "Your owner's threads across this tenant, their own and each project's they may still see. Their own open threads come first, then their other open ones, then the rest, each by when it last moved, newest first, as many as one answer holds, so an older one past them is not listed. Call it for the session a thread is read by. Answers JSON: `threads`, each its `session` and its `scope`: Member, a thread of their own kept in no project, which read_my_thread reads, or Project, kept in the `project` it names, of which only this entry is read here. Each also carries its `state` (Open or Closed), its `title` where it has one, `turns`, how many it holds, `openedAt`, `lastActivityAt`, when it last moved, and `hidden`, whether it is off their rail.",
     shape: () => ({}),
@@ -2808,6 +3105,11 @@ export const chuggyMemberTools = [
   },
   {
     name: "read_my_thread",
+    annotations: {
+      title: "Read my thread",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "One page of one of your owner's own threads, kept in no project. Answers JSON: the thread's `state`, `title` and `lastActivityAt` as list_my_threads answers them, and `turns`, the newest before `before`, oldest first, each its `ordinal`, its `state`, the `input` your owner sent and its `result` and `failure` where it has them; `nextBefore`, present, is the cursor for the turns before them. A project's thread, or a session that is not one of theirs, is answered 404.",
     shape: (z) => ({
@@ -2829,6 +3131,11 @@ export const chuggyMemberTools = [
   },
   {
     name: "list_my_runners",
+    annotations: {
+      title: "List my runners",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "Your owner's personal runners in this tenant, oldest first, and the projects every one of them may serve. Call it for whether a runner of theirs is registered and taking work. Answers JSON: `runners`, each its `id`, its `capabilities`, `registeredAt`, `polledAt`, its newest poll, absent until it polls, `live`, whether that poll is recent enough for it to be taking work, `executionsLive`, the same of its newest poll for executions alone, which may be older, and `runner`, the `package` and `version` that poll named and the version chuggy `pinned` for it where it pins one, absent where it named none; and `projects`. Answers 404 where they have none.",
     shape: () => ({}),
@@ -2836,6 +3143,11 @@ export const chuggyMemberTools = [
   },
   {
     name: "read_chat_host",
+    annotations: {
+      title: "Read chat host",
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
     description:
       "Your owner's chat host in this tenant, the machine their own threads run on. Call it for whether it is registered and taking chats. Answers JSON: its `id`, `registeredAt`, `polledAt`, its newest poll, absent until it polls, `live`, whether that poll is recent enough for it to be taking chats, and `runner`, the `package` and `version` that poll named and the version chuggy `pinned` for it where it pins one, absent where it named none. Answers 404 where they have none.",
     shape: () => ({}),
@@ -2872,6 +3184,13 @@ function navigatePage(args) {
 export const chuggyOfferTools = [
   {
     name: "navigate",
+    annotations: {
+      title: "Navigate console",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     exact: true,
     description:
       "Moves your owner's console to one page. The console follows it only while your owner is still on the page they wrote from, so it is an offer of a page and never the only place your answer is.",
@@ -2908,6 +3227,13 @@ export const chuggyOfferTools = [
   },
   {
     name: "offer_release",
+    annotations: {
+      title: "Offer release",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     exact: true,
     description:
       "Puts one draft's release in front of your owner as a card they confirm or decline, at exactly the authoring version you name. Their answer arrives as an OfferReply turn.",
@@ -2925,6 +3251,13 @@ export const chuggyOfferTools = [
   },
   {
     name: "offer_revoke",
+    annotations: {
+      title: "Offer revocation",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     exact: true,
     description:
       "Puts one ticket's revocation in front of your owner as a card they confirm or decline, at exactly the revision you name. Their answer arrives as an OfferReply turn.",
@@ -3117,6 +3450,7 @@ export function chuggyToolServer(context, sdk) {
         definition.description,
         chuggyToolInput(definition, sdk.z),
         chuggyToolHandler(definition, sdk.z),
+        { annotations: definition.annotations },
       ),
     ),
   });

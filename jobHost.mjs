@@ -1029,6 +1029,13 @@ function jobHostJobDefinitions(host) {
   return [
     {
       name: jobStart,
+      annotations: {
+        title: "Start job",
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
       description: `Starts a command as a job that runs on outside your turns, as /bin/sh -c in a process group of its own, its output and error written to its log. It wakes this thread when it exits on its own, and never when ${jobStop} ends it. ${jobHostWakeSays} With \`restart\`, a job running when this attempt ends is started again by the thread's next attempt, which keeps an attempt running for the thread while it runs; without it, the next attempt only says it ended. The host holds at most ${String(jobHostJobsMax)} jobs. Answers its pid and its log's path, which you read with your own tools. ${jobHostWakesRefusedSays}`,
       shape: (z) => ({
         name: jobHostNameShape(z),
@@ -1058,12 +1065,24 @@ function jobHostJobDefinitions(host) {
     },
     {
       name: jobStop,
+      annotations: {
+        title: "Stop job",
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
       description: `Ends a running job: TERM to its process group, then KILL past ${String(jobHostStopGraceMs / 1_000)} seconds. It forgets a job that is not running.`,
       shape: (z) => ({ name: jobHostNameShape(z) }),
       call: (_context, args) => jobHostStop(host, args),
     },
     {
       name: jobList,
+      annotations: {
+        title: "List jobs",
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
       description: `Lists every job the host holds, with its command, its pid while it runs, its status and its log's path. A status is Running, Exited with its code or signal, Stopped by ${jobStop}, or AttemptEnded where an attempt ended under it. ${jobHostLastWakeSays}`,
       shape: () => ({}),
       call: () => jobHostList(host),
@@ -1077,6 +1096,13 @@ function jobHostWatchDefinitions(host) {
   return [
     {
       name: watch,
+      annotations: {
+        title: "Watch file",
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
       description: `Wakes this thread on new lines of a file that match a regular expression, read every ${String(jobHostWatchPollMs / 1_000)} seconds from the file's end as it is now. ${jobHostWakeSays} Each read that matched wakes it once, keeping at most ${String(jobHostWatchBatchLinesMax)} of its lines in the matched file it answers, which you read with your own tools. The host holds at most ${String(jobHostWatchesMax)} watches, and one of the same name is replaced. ${jobHostWakesRefusedSays}`,
       shape: (z) => ({
         name: jobHostNameShape(z),
@@ -1099,12 +1125,24 @@ function jobHostWatchDefinitions(host) {
     },
     {
       name: unwatch,
+      annotations: {
+        title: "End watch",
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
       description: "Ends a watch; what it matched stays in its matched file.",
       shape: (z) => ({ name: jobHostNameShape(z) }),
       call: (_context, args) => jobHostUnwatch(host, args),
     },
     {
       name: watchList,
+      annotations: {
+        title: "List watches",
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
       description: `Lists every watch the host holds: its file, its pattern and its matched file's path. ${jobHostLastWakeSays}`,
       shape: () => ({}),
       call: () =>
@@ -1128,6 +1166,13 @@ function jobHostTimerDefinitions(host) {
   return [
     {
       name: wakeAt,
+      annotations: {
+        title: "Set wake timer",
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
       description: `Wakes this thread once, a number of seconds from now, for a reason. ${jobHostWakeSays} A timer that falls due while no attempt runs fires as the next one starts. The host holds at most ${String(jobHostTimersMax)} timers, and one for the same reason is replaced. ${jobHostWakesRefusedSays}`,
       shape: (z) => ({
         seconds: z
@@ -1144,12 +1189,24 @@ function jobHostTimerDefinitions(host) {
     },
     {
       name: wakeCancel,
+      annotations: {
+        title: "Cancel wake timer",
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
       description: `Cancels the timer ${wakeAt} set for a reason.`,
       shape: (z) => ({ reason: jobHostReasonShape(z) }),
       call: (_context, args) => jobHostWakeCancel(host, args),
     },
     {
       name: wakeList,
+      annotations: {
+        title: "List wake timers",
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
       description: `Lists every timer the host holds: its reason and when it falls due; then each of the last ${String(jobHostTimersFiredMax)} that fired and is not set again, by its reason alone. ${jobHostLastWakeSays}`,
       shape: () => ({}),
       call: () => jobHostTimerList(host),
