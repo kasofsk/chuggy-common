@@ -98,6 +98,23 @@ export const localToolCapabilities = [
 /** What a submitted command made again answers here, where every call is a turn of its own. */
 export const localToolRepeatDescription = `The same call again is a new operation, submitted again: where the first already landed, the API refuses the second for what it names, so read_operation the first's id to learn what it did before calling again.`;
 
+/** How an agent files a ticket once it knows the project, the steps every serving of these tools gives. */
+export const localToolFilingSteps = `1. read_abilities: who you act as, which a ticket's \`creator\` names, and what you may do.
+2. list_repositories: a repository that is configured and \`fileable\`.
+3. list_configurations: a revision whose \`repository\` is that repository, or, where its list_repositories row's \`configurationsHeld.result\` is Bootstrapped, the \`configurationsHeld.revision\` that row carries.
+4. initialize_draft on that revision: the fence and the defaults.
+5. create_draft: the minimum brief, and \`authoring\` from the defaults.
+6. read_draft: the draft as filed.
+7. release_draft.
+8. read_operation: every command is submitted, and this is how its outcome is read.
+Releasing starts nothing: once its dependencies are Done the ticket waits Pending until a person who may dispatch dispatches it: by dispatch_ticket on the word of the person you act for, or by another person who may dispatch.`;
+
+/** How an agent steers `article` project's thread settings and merges a ticket's pull request, where it may. */
+export function localToolSteeringSteps(article) {
+  return `To change ${article} project's thread settings: read_docs the page "A project's thread settings", then read_lead_settings and update_lead_settings.
+To merge a ticket's pull request: read_ticket_landings, ask the person whether they want chuggy to merge it, then merge_pull_request.`;
+}
+
 /**
  * What the server tells an agent before it lists the tools, `task` naming the
  * workspace and project it is bound to, and `access` the token it acts under
@@ -110,21 +127,12 @@ export function localToolInstructions(task, access) {
     : `every one but read_docs needs the person signed in. When a call answers that they are not, give them the address it names, in full, in your next message, whatever else you are doing, and call again once they say they have signed in. Nothing else stands in for what these tools answer, so do not work around a sign-in.`;
   const steering = token
     ? `Changing the project's thread settings or its placement, and merging a ticket's pull request, are, like approvals, the person's to do in the console.`
-    : `To change the project's thread settings: read_docs the page "A project's thread settings", then read_lead_settings and update_lead_settings.
-To merge a ticket's pull request: read_ticket_landings, ask the person whether they want chuggy to merge it, then merge_pull_request.`;
+    : localToolSteeringSteps("the");
   return `This server is bound to the workspace ${task.tenant} and its project ${task.project}.
 These tools are the only way to read or act on chuggy from here, and ${acting}
 The chuggy docs are behind read_docs: call it with no page for the index first, then with a page the index lists.
 To file a ticket:
-1. read_abilities: who you act as, which a ticket's \`creator\` names, and what you may do.
-2. list_repositories: a repository that is configured and \`fileable\`.
-3. list_configurations: a revision whose \`repository\` is that repository, or, where its list_repositories row's \`configurationsHeld.result\` is Bootstrapped, the \`configurationsHeld.revision\` that row carries.
-4. initialize_draft on that revision: the fence and the defaults.
-5. create_draft: the minimum brief, and \`authoring\` from the defaults.
-6. read_draft: the draft as filed.
-7. release_draft.
-8. read_operation: every command is submitted, and this is how its outcome is read.
-Releasing starts nothing: once its dependencies are Done the ticket waits Pending until a person who may dispatch dispatches it: by dispatch_ticket on the word of the person you act for, or by another person who may dispatch.
+${localToolFilingSteps}
 ${steering}`;
 }
 
