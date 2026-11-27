@@ -297,11 +297,13 @@ export function localToolServer(context, sdk) {
     server.registerTool(
       definition.name,
       {
+        title: definition.annotations.title,
         description: definition.description.replace(
           chuggySubmissionRepeatDescription,
           localToolRepeatDescription,
         ),
         inputSchema: chuggyToolInput(definition, sdk.z),
+        annotations: definition.annotations,
       },
       context.access === undefined
         ? handler

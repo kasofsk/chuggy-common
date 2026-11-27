@@ -1,7 +1,7 @@
 /**
  * Every chuggy tool as an MCP client lists it: a description that opens with
- * one short sentence, and a description on every parameter and on every field
- * of one that is an object. Both servers are listed through the MCP SDK's own
+ * one short sentence, a description on every parameter and on every field of
+ * one that is an object, and the annotations a directory requires of it. Both servers are listed through the MCP SDK's own
  * client, so what is held is the JSON schema the SDK publishes and not the zod
  * shape it is converted from.
  */
@@ -79,11 +79,12 @@ function podServer(request, held) {
     }),
     {
       z,
-      tool: (name, description, inputSchema, handler) => ({
+      tool: (name, description, inputSchema, handler, extras) => ({
         name,
         description,
         inputSchema,
         handler,
+        annotations: extras?.annotations,
       }),
       createSdkMcpServer: ({ name, version, tools }) => {
         const server = new McpServer({ name, version });
@@ -130,6 +131,22 @@ function toolDescriptionFaults({ name, description, inputSchema }) {
   return faults;
 }
 
+/** What a listed tool's annotations are found wanting in, nothing where it carries every one a directory requires. */
+function toolAnnotationFaults({ name, annotations }) {
+  const faults = [];
+  if (typeof annotations?.title !== "string" || annotations.title === "")
+    faults.push(`${name} has no title`);
+  for (const hint of ["readOnlyHint", "openWorldHint"])
+    if (typeof annotations?.[hint] !== "boolean")
+      faults.push(`${name} has no ${hint}`);
+  if (
+    annotations?.readOnlyHint === false &&
+    typeof annotations.destructiveHint !== "boolean"
+  )
+    faults.push(`${name} changes something and has no destructiveHint`);
+  return faults;
+}
+
 /** The pod's server for a chat host's thread, which holds its own tools too: a job host's and `ticket_wakes`. */
 function podServerJobs() {
   return podServer(undefined, [
@@ -165,12 +182,78 @@ for (const [server, built, roster] of [
   ],
   ["the local server", localServer, chuggyProjectTools.map(({ name }) => name)],
 ])
-  test(`${server} lists every tool opening with a short sentence and every parameter described`, async () => {
+  test(`${server} lists every tool opening with a short sentence, every parameter described and its annotations given`, async () => {
     const tools = await listed(built());
 
     assert.deepEqual(tools.map(({ name }) => name).sort(), [...roster].sort());
     assert.deepEqual(tools.flatMap(toolDescriptionFaults), []);
+    assert.deepEqual(tools.flatMap(toolAnnotationFaults), []);
   });
+
+test("the pod's server and the local server list each tool both serve with one set of annotations", async () => {
+  const [pod, local] = await Promise.all([
+    listed(podServer()),
+    listed(localServer()),
+  ]);
+
+  for (const { name, annotations } of local)
+    assert.deepEqual(
+      pod.find((tool) => tool.name === name).annotations,
+      annotations,
+      name,
+    );
+});
+
+test("the local server lists each tool's title as its own as well as among its annotations", async () => {
+  for (const { name, title, annotations } of await listed(localServer()))
+    assert.equal(title, annotations.title, name);
+});
+
+test("only read_docs, which reads GitHub, and job_start, which runs any command, are open-world", async () => {
+  const tools = await listed(podServerJobs());
+
+  assert.deepEqual(
+    tools
+      .filter(({ annotations }) => annotations.openWorldHint)
+      .map(({ name }) => name)
+      .sort(),
+    ["job_start", "read_docs"],
+  );
+});
+
+test("a tool listed without a title or a hint a directory requires is found wanting", async () => {
+  const server = new McpServer({ name: "wanting", version: "1" });
+  server.registerTool("bare", { description: "Short." }, () => ({
+    content: [],
+  }));
+  server.registerTool(
+    "undestructive",
+    {
+      description: "Short.",
+      annotations: {
+        title: "Undestructive",
+        readOnlyHint: false,
+        openWorldHint: false,
+      },
+    },
+    () => ({ content: [] }),
+  );
+  server.registerTool(
+    "read",
+    {
+      description: "Short.",
+      annotations: { title: "Read", readOnlyHint: true, openWorldHint: false },
+    },
+    () => ({ content: [] }),
+  );
+
+  assert.deepEqual((await listed(server)).flatMap(toolAnnotationFaults), [
+    "bare has no title",
+    "bare has no readOnlyHint",
+    "bare has no openWorldHint",
+    "undestructive changes something and has no destructiveHint",
+  ]);
+});
 
 test("a job host's list tools say what lastWake answers, and the tools that set a wake what wakesRefused does", async () => {
   const tools = await listed(podServerJobs());

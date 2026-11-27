@@ -78,6 +78,13 @@ export function sessionTicketWakesDefinitions(session) {
   return [
     {
       name: "ticket_wakes",
+      annotations: {
+        title: "Ticket wakes",
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
       exact: true,
       description:
         "Reads or sets whether this thread is woken for events on the tickets it drafted. With no `choice` it answers the thread's own choice, its member's chat host's setting and the one that applies; given one it sets the thread's own and answers the same. The thread's own choice applies where it made one, else its host's setting, else Off. Answers JSON: `thread` and `host`, each absent where none was made, and `effective`.",
